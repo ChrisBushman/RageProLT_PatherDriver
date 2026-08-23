@@ -139,7 +139,7 @@ int  gldFlushBuffer(gld_context *ctx, void *drawable);
 void gld_log(const char *fmt, ...);
 
 /* ---- The gld* entry points (subset; full list in ABI.md) ------------ */
-int  gldInitializeLibrary(void *);
+void *gldInitializeLibrary(void *iface, void *a2, void *a3, void *a4, void *a5);
 void gldTerminateLibrary(void);
 int  gldGetRendererInfo(gld_renderer_info *out, uint32_t renderer_mask);
 int  gldChoosePixelFormat(void **pf, const int *attribs);
