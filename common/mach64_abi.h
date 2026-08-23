@@ -37,7 +37,14 @@ enum {
     MACH64_MEM_CONTROL     = 2,  /* 4KB shared status/control page          */
     MACH64_MEM_FB_APERTURE = 3,  /* second fixed aperture (not used by GL)  */
     MACH64_MEM_CMDBUF      = 4,  /* growable kernel/user-shared command buf */
+    MACH64_MEM_RING        = 5,  /* DMA descriptor ring (phys-contig, uncached)*/
 };
+
+/* In THIS build, get_config (selector 3) returns DMA bus addresses so the
+ * userspace DMA orchestrator can build descriptors:
+ *   config0 = command-buffer bus address
+ *   ctx_token = descriptor-ring bus address
+ *   config1 = chip config word */
 
 /* ---- io_connect_method selector indices ------------------------------
  * The complete 17-entry IOExternalMethod table recovered from

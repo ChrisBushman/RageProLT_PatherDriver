@@ -13,3 +13,4 @@ tools/mach64_poke
 tools/mach64_fill
 tools/mach64_tri
 tools/mach64_gouraud
+tools/mach64_dmatest

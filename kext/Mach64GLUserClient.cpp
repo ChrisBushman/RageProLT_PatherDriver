@@ -74,8 +74,11 @@ Mach64GLUserClient::clientMemoryForType(UInt32 type, IOOptionBits *opts,
     case MACH64_MEM_CONTROL:                   // 2 : 4KB shared control page
         *mem  = fProvider->controlPage();
         break;
-    case MACH64_MEM_CMDBUF:                     // 4 : growable shared cmd buf
+    case MACH64_MEM_CMDBUF:                     // 4 : DMA command buffer
         *mem  = fProvider->commandBuffer(this);
+        break;
+    case MACH64_MEM_RING:                      // 5 : DMA descriptor ring
+        *mem  = fProvider->ringMemory();
         break;
     default:
         return kIOReturnBadArgument;
@@ -83,12 +86,13 @@ Mach64GLUserClient::clientMemoryForType(UInt32 type, IOOptionBits *opts,
     return (*mem) ? kIOReturnSuccess : kIOReturnNoMemory;
 }
 
-/* selector 3: return chip config + a context-buffer handle (see get_config). */
+/* selector 3: in this build, returns DMA bus addresses for the userspace DMA
+ * orchestrator: c0=cmdbuf bus, ctxTok=ring bus, c1=chip config. */
 IOReturn Mach64GLUserClient::get_config(UInt32 *c0, UInt32 *ctxTok, UInt32 *c1)
 {
-    *c0     = fProvider->chipConfig0();
+    *c0     = fProvider->cmdBufBus();
+    *ctxTok = fProvider->ringBus();
     *c1     = fProvider->chipConfig1();
-    *ctxTok = fProvider->allocContextBuffer(this);
     return kIOReturnSuccess;
 }
 

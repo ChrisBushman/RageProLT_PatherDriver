@@ -48,12 +48,25 @@ bool Mach64Accelerator::start(IOService *provider)
     fRegs->retain();
     fFB->retain();
 
-    /* Shared control page (type 2) + growable command buffer (type 4). */
+    /* Shared control page (type 2). */
     fControl = IOBufferMemoryDescriptor::withOptions(
         kIOMemoryKernelUserShared | kIODirectionInOut, 0x1000, PAGE_SIZE);
-    fCmdBuf  = IOBufferMemoryDescriptor::withOptions(
-        kIOMemoryKernelUserShared | kIODirectionInOut, 0x10000, PAGE_SIZE);
-    if (!fControl || !fCmdBuf) return false;
+
+    /* DMA command buffer (type 4) + descriptor ring (type 5): the engine
+     * bus-master-READS these, so they must be physically contiguous and we
+     * need their bus addresses.  Mapped uncached to userspace (see
+     * clientMemoryForType) so no PPC cache flush is needed. */
+    IOOptionBits dmaOpts = kIOMemoryPhysicallyContiguous |
+                           kIOMemoryKernelUserShared | kIODirectionOutIn;
+    fCmdBuf = IOBufferMemoryDescriptor::withOptions(dmaOpts, 0x10000, PAGE_SIZE);
+    fRing   = IOBufferMemoryDescriptor::withOptions(dmaOpts, 0x4000, PAGE_SIZE);
+    if (!fControl || !fCmdBuf || !fRing) return false;
+
+    IOByteCount seg;
+    fCmdBufBus = fCmdBuf->getPhysicalSegment(0, &seg);
+    fRingBus   = fRing->getPhysicalSegment(0, &seg);
+    IOLog("Mach64Accelerator: cmdbuf bus=0x%08lx ring bus=0x%08lx\n",
+          (unsigned long)fCmdBufBus, (unsigned long)fRingBus);
 
     fStamp   = 0;
     /* Real values come from reading CONFIG_CHIP_ID / memory config; the plugin
@@ -77,6 +90,7 @@ void Mach64Accelerator::free(void)
     if (fFB)      { fFB->release();      fFB = 0; }
     if (fControl) { fControl->release(); fControl = 0; }
     if (fCmdBuf)  { fCmdBuf->release();  fCmdBuf = 0; }
+    if (fRing)    { fRing->release();    fRing = 0; }
     super::free();
 }
 

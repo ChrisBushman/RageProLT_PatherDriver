@@ -1,0 +1,123 @@
+/*
+ * mach64_dmatest.c - minimal bus-master DMA test: DMA one register write.
+ *
+ * The safe first ring milestone (the DRI's bm_dma_test equivalent): build a
+ * command buffer that writes SCRATCH_REG1, put a descriptor for it in the ring,
+ * activate bus-mastering, kick, and verify SCRATCH_REG1 changed.  Proves the
+ * DMA memory / bus addresses / descriptor / kick all work before any vertices.
+ *
+ * The kext allocates the ring + command buffer physically-contiguous and maps
+ * them UNCACHED to us (no PPC cache flush needed); get_config returns their bus
+ * addresses.  We orchestrate the ring + kick via the register window.
+ *
+ * QUIESCE: done with the engine idle; we save/restore ATIRagePro's BUS_CNTL/
+ * SRC_CNTL/BM_GUI_TABLE around our DMA.  A collision with ATIRagePro's async
+ * DMA is possible (no lock) -> display glitch/reboot; acceptable headless.
+ *
+ * Build with -framework IOKit.
+ */
+#include <IOKit/IOKitLib.h>
+#include <libkern/OSByteOrder.h>
+#include <mach/mach.h>
+#include <stdio.h>
+#include "../common/mach64_abi.h"
+
+#define REG_WINDOW    0x7FF800u
+#define SCRATCH_REG1  0x0484
+#define BUS_CNTL      0x04a0
+#define SRC_CNTL      0x05b4
+#define DST_HEIGHT_WIDTH 0x0518
+#define BM_ADDR       0x0648
+#define BM_GUI_TABLE_CMD 0x064c
+#define BM_GUI_TABLE  0x01b8
+#define FIFO_STAT     0x0710
+#define GUI_STAT      0x0738
+#define APERTURE_OFFSET 0x7ff800u
+#define BUS_MASTER_DIS  (1u<<6)
+#define BUS_EXT_REG_EN  (1u<<27)
+#define SRC_BM_ENABLE   (1u<<8)
+#define SRC_BM_SYNC     (1u<<9)
+#define SRC_BM_OP_SYSTEM_TO_REG (3u<<10)
+#define DMA_EOL         (1u<<31)
+#define DMA_HOLD_OFFSET (1u<<30)
+#define GUI_ACTIVE      1u
+#define FIFO_SLOT_MASK  0xffffu
+#define ADRINDEX(r)  ((unsigned)((r)>=0x400 ? (((r)-0x400)>>2) : (((r)>>2)|0x100)))
+#define TESTVAL      0xCAFEF00Du
+
+static unsigned REGB, RING, CMD;
+static unsigned rd(unsigned o){ return OSReadLittleInt32((void*)REGB, o); }
+static void     wr(unsigned o, unsigned v){ OSWriteLittleInt32((void*)REGB, o, v); }
+static void     rw(unsigned o, unsigned v){ OSWriteLittleInt32((void*)RING, o, v); }
+static void     cw(unsigned o, unsigned v){ OSWriteLittleInt32((void*)CMD, o, v); }
+static int wfifo(int e){ int i; for(i=0;i<1000000;i++) if((rd(FIFO_STAT)&FIFO_SLOT_MASK)<=(unsigned)(0x8000>>e))return 0; return -1; }
+static int widle(void){ int i; if(wfifo(16)<0)return -1; for(i=0;i<2000000;i++) if(!(rd(GUI_STAT)&GUI_ACTIVE))return 0; return -1; }
+
+static unsigned mapmem(io_connect_t c, unsigned type)
+{
+    vm_address_t a=0; vm_size_t s=0;
+    if (IOConnectMapMemory(c,type,mach_task_self(),&a,&s,kIOMapAnywhere|kIOMapInhibitCache)!=KERN_SUCCESS)
+        return 0;
+    return a;
+}
+
+int main(void)
+{
+    io_service_t svc; io_connect_t conn; kern_return_t kr;
+    vm_address_t fb=0; vm_size_t fbs=0;
+    unsigned cmdbus=0, ringbus=0, cfg=0;
+    unsigned save_bus, save_src, save_tbl, before, after;
+
+    svc=IOServiceGetMatchingService(kIOMasterPortDefault,IOServiceMatching("Mach64Accelerator"));
+    if(!svc){fprintf(stderr,"no service\n");return 1;}
+    kr=IOServiceOpen(svc,mach_task_self(),MACH64_GL_CONNECT_TYPE,&conn); IOObjectRelease(svc);
+    if(kr){fprintf(stderr,"open 0x%x\n",kr);return 1;}
+    if(IOConnectMapMemory(conn,MACH64_MEM_SURFACE,mach_task_self(),&fb,&fbs,kIOMapAnywhere|kIOMapInhibitCache)){fprintf(stderr,"map fb\n");return 1;}
+    REGB=fb+REG_WINDOW;
+    CMD =mapmem(conn,MACH64_MEM_CMDBUF);
+    RING=mapmem(conn,MACH64_MEM_RING);
+    if(!CMD||!RING){fprintf(stderr,"map cmd/ring failed\n");return 1;}
+
+    /* get_config -> bus addresses (this build) */
+    IOConnectMethodScalarIScalarO(conn, kMach64Sel_get_config, 0, 3, &cmdbus, &ringbus, &cfg);
+    printf("cmdbuf bus=0x%08x  ring bus=0x%08x\n", cmdbus, ringbus);
+    if(!cmdbus||!ringbus){fprintf(stderr,"no bus addresses\n");goto out;}
+
+    /* command buffer: single reg write SCRATCH_REG1 = TESTVAL */
+    cw(0, ADRINDEX(SCRATCH_REG1));   /* header: count 0, reg index */
+    cw(4, TESTVAL);
+
+    /* descriptor: DMA the 8-byte command buffer to the BM_ADDR data port */
+    rw(0,  APERTURE_OFFSET + BM_ADDR);
+    rw(4,  cmdbus);
+    rw(8,  8u | DMA_HOLD_OFFSET | DMA_EOL);
+    rw(12, 0);
+
+    wr(SCRATCH_REG1, 0);
+    before = rd(SCRATCH_REG1);
+    printf("SCRATCH_REG1 before = 0x%08x\n", before);
+
+    save_bus=rd(BUS_CNTL); save_src=rd(SRC_CNTL); save_tbl=rd(BM_GUI_TABLE);
+    printf("saved BUS_CNTL=0x%08x SRC_CNTL=0x%08x BM_GUI_TABLE=0x%08x\n", save_bus,save_src,save_tbl);
+
+    if(widle()<0) fprintf(stderr,"warn: not idle before DMA\n");
+    wr(BUS_CNTL, (save_bus & ~BUS_MASTER_DIS) | BUS_EXT_REG_EN);
+    if(widle()<0) fprintf(stderr,"warn: not idle after bus enable\n");
+    wr(BM_GUI_TABLE_CMD, ringbus /* | CIRCULAR_BUF_SIZE_16KB(0) */);
+    wr(SRC_CNTL, SRC_BM_ENABLE | SRC_BM_SYNC | SRC_BM_OP_SYSTEM_TO_REG);
+    wr(DST_HEIGHT_WIDTH, 0);           /* kick the transfer */
+    if(widle()<0) fprintf(stderr,"warn: DMA didn't go idle (possible stall)\n");
+
+    /* restore ATIRagePro's DMA state */
+    wr(SRC_CNTL, save_src);
+    wr(BM_GUI_TABLE_CMD, save_tbl & 0xfffffff0);
+    wr(BUS_CNTL, save_bus);
+
+    after = rd(SCRATCH_REG1);
+    printf("SCRATCH_REG1 after  = 0x%08x (want 0x%08x)\n", after, TESTVAL);
+    printf("\n%s\n", after==TESTVAL
+        ? "DMA RING WORKS: engine bus-master-executed our command buffer!"
+        : "DMA did not take -- check bus address / coherency / activation");
+out:
+    IOServiceClose(conn); return 0;
+}

@@ -27,7 +27,10 @@ class Mach64Accelerator : public IOService
     IODeviceMemory           *fRegs;      // MMIO register aperture (BAR)
     IODeviceMemory           *fFB;        // framebuffer / VRAM aperture (BAR)
     IOBufferMemoryDescriptor *fControl;   // 4KB shared control page
-    IOBufferMemoryDescriptor *fCmdBuf;    // growable shared command buffer
+    IOBufferMemoryDescriptor *fCmdBuf;    // phys-contig shared command buffer
+    IOBufferMemoryDescriptor *fRing;      // phys-contig DMA descriptor ring
+    IOPhysicalAddress         fCmdBufBus; // command-buffer bus address
+    IOPhysicalAddress         fRingBus;   // ring bus address
     UInt32                    fStamp;     // fence counter
     UInt32                    fConfig0;   // chip config words (get_config)
     UInt32                    fConfig1;
@@ -42,6 +45,11 @@ public:
     IOMemoryDescriptor *allocSurface(Mach64GLUserClient *c);           // type 1
     IOMemoryDescriptor *controlPage(void)        { return fControl; }  // type 2
     IOMemoryDescriptor *commandBuffer(Mach64GLUserClient *c);          // type 4
+    IOMemoryDescriptor *ringMemory(void)    { return fRing; }          // type 5
+
+    // ---- DMA bus addresses (returned via get_config in this build) ----
+    UInt32 cmdBufBus(void) { return (UInt32)fCmdBufBus; }
+    UInt32 ringBus(void)   { return (UInt32)fRingBus; }
 
     // ---- selector-3 (get_config) data ----
     UInt32 chipConfig0(void) { return fConfig0; }
