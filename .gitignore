@@ -6,3 +6,10 @@ build/
 
 # macOS
 .DS_Store
+
+# compiled userspace tools (PPC-only; build on the Lombard)
+tools/mach64_peek
+tools/mach64_poke
+tools/mach64_fill
+tools/mach64_tri
+tools/mach64_gouraud
