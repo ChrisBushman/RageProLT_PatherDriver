@@ -1,3 +1,36 @@
+# mach64 3D solid-triangle recipe
+
+## ✅ WORKING on hardware (flat-shaded)
+
+Verified on the Lombard: the setup engine rasterizes the correct triangle
+shape, filled with a flat color.  Winning config:
+
+```
+SCALE_3D_CNTL = 0x100c1   (3D shade pipe on -> triangle coverage/rasterization)
+SETUP_CNTL    = 0x40      Z_CNTL = 0   DP_PIX_WIDTH = 0x60060666 (ARGB8888)
+DST_OFF_PITCH = ((pitch_px/8)<<22)|(offset>>3)   (off-screen render target)
+DP_MIX        = 0x70007   (BKGD_MIX_S|FRGD_MIX_S)
+DP_SRC        = 0x101     (FRGD/BKGD_SRC_FRGD_CLR -> color from DP_FRGD_CLR)
+DP_FRGD_CLR   = color     SC_LEFT_RIGHT=0x1fff0000  SC_TOP_BOTTOM=0x3fff0000
+per vertex n: VERTEX_n_Z=0, VERTEX_n_ARGB=color, VERTEX_n_X_Y=(x*4<<16)|(y*4&0xffff)
+TRIGGER: ONE_OVER_AREA_UC(0x300) = floatbits(1.0/area)
+```
+
+- The **setup engine gives coverage**; color comes from **`DP_FRGD_CLR`** (flat).
+  `SCALE_3D_CNTL=0` gives an empty result (3D pipe off), confirming the 3D pipe
+  does the rasterization.
+- **Gouraud (per-vertex color) is NOT working via MMIO**: with `DP_SRC=3D` the
+  color reads `0xffffffff` regardless of `dp_mix`/`scale_3d_cntl`/ARGB order.
+  The per-vertex ARGB doesn't latch into the interpolator through individual
+  MMIO register writes — it needs the **DMA-burst vertex packet** (the DRI path:
+  one packet writing Z/ARGB/X_Y as consecutive auto-incrementing registers).
+  Future work once the bus-master ring is up.
+
+Implemented in `tools/mach64_tri.c`.  Below is the original pre-hardware
+analysis for reference.
+
+---
+
 # mach64 3D solid-triangle recipe (worked out from DRI, pre-hardware)
 
 Analysis-only prep for the 3D triangle test.  Everything here is derived from

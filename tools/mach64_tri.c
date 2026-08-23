@@ -1,16 +1,16 @@
 /*
- * mach64_tri.c - 3D solid triangle into off-screen VRAM, readback-verified.
+ * mach64_tri.c - draw a 3D triangle with the mach64 setup engine into
+ * off-screen VRAM and render it back as ASCII to prove it worked.
  *
- * Progress: the setup engine rasterizes the correct SHAPE, but with DP_SRC=3D
- * (gouraud) the color comes out 0xffffffff -- the per-vertex ARGB isn't
- * reaching the interpolator via individual MMIO writes.  For a FLAT triangle we
- * don't need gouraud: take coverage from the setup engine but color from
- * DP_FRGD_CLR (as the 2D fill does).  This run tests color-source variants:
- *   A: DP_SRC=FRGD_CLR (0x101) + DP_FRGD_CLR=color      [flat color, likely]
- *   B: DP_SRC=3D but write ARGB AFTER X_Y (latch order)
- *   C: DP_SRC=FRGD_CLR + scale_3d_cntl=0 (coverage only)
+ * WORKING config (found empirically, see docs/re-notes/3d-triangle.md):
+ *   SCALE_3D_CNTL=0x100c1 (3D shade pipe -> triangle coverage/rasterization),
+ *   color from DP_FRGD_CLR via DP_SRC=0x101 (flat shade), DP_MIX=0x70007,
+ *   vertices Z/ARGB/X_Y, trigger = ONE_OVER_AREA_UC=floatbits(1/area).
+ * (Per-vertex gouraud color needs the DMA-burst vertex path; individual MMIO
+ *  writes don't latch vertex ARGB -- flat via DP_FRGD_CLR works now.)
  *
- * See docs/re-notes/3d-triangle.md.  Build with -framework IOKit.
+ * Safety: idle-wait, save/restore engine context, FIFO-gated writes,
+ * off-screen target, readback.  Build with -framework IOKit.
  */
 #include <IOKit/IOKitLib.h>
 #include <libkern/OSByteOrder.h>
@@ -40,6 +40,7 @@
 #define VTX_XY(n)       (0x0240 + (n)*0x20 + 0x18)
 #define FIFO_SLOT_MASK  0x0000ffff
 #define GUI_ACTIVE      0x00000001
+#define TARGET_OFF   0x600000u
 #define PITCH_PIX    128
 #define ROW_BYTES    (PITCH_PIX * 4)
 #define TRI_COLOR    0xAA33CC55u
@@ -55,50 +56,15 @@ static const unsigned ctx_regs[] = {
     SCALE_3D_CNTL,SETUP_CNTL,Z_CNTL,DP_PIX_WIDTH,DST_OFF_PITCH,DP_FRGD_CLR,
     SC_LEFT_RIGHT,SC_TOP_BOTTOM,DP_WRITE_MASK,DP_MIX,DP_SRC,CLR_CMP_CNTL };
 #define NCTX (sizeof(ctx_regs)/sizeof(ctx_regs[0]))
-static const int TX[3]={32,96,48}, TY[3]={32,40,110};
-
-/* dpsrc: color source; frgd: DP_FRGD_CLR; argb_last: write ARGB after X_Y */
-static void draw_tri(unsigned target, unsigned scale3d, unsigned dpsrc,
-                     unsigned frgd, int argb_last)
-{
-    int i,x,y,xx[3],yy[3]; double area; float ooa; unsigned oob;
-    for (y=0;y<120;y++) for (x=0;x<128;x++)
-        OSWriteLittleInt32((void*)FB, target + y*ROW_BYTES + x*4, 0);
-    for (i=0;i<3;i++){ xx[i]=TX[i]*4; yy[i]=TY[i]*4; }
-    area=(1.0/16.0)*((double)(xx[0]-xx[2])*(yy[1]-yy[2])-(double)(yy[0]-yy[2])*(xx[1]-xx[2]));
-    ooa=(float)(1.0/area); memcpy(&oob,&ooa,4);
-    widle();
-    ewr(SCALE_3D_CNTL, scale3d);
-    ewr(SETUP_CNTL,    0x00000040);
-    ewr(Z_CNTL,        0);
-    ewr(DP_PIX_WIDTH,  0x60060666);
-    ewr(DST_OFF_PITCH, ((PITCH_PIX/8)<<22)|(target>>3));
-    ewr(DP_FRGD_CLR,   frgd);
-    ewr(SC_LEFT_RIGHT, 0x1fff0000);
-    ewr(SC_TOP_BOTTOM, 0x3fff0000);
-    ewr(DP_WRITE_MASK, 0xffffffff);
-    ewr(CLR_CMP_CNTL,  0);
-    ewr(DP_MIX,        0x00070007);
-    ewr(DP_SRC,        dpsrc);
-    for (i=0;i<3;i++){
-        ewr(VTX_Z(i),0);
-        if (argb_last){ ewr(VTX_XY(i),(xx[i]<<16)|(yy[i]&0xffff)); ewr(VTX_ARGB(i),TRI_COLOR); }
-        else          { ewr(VTX_ARGB(i),TRI_COLOR); ewr(VTX_XY(i),(xx[i]<<16)|(yy[i]&0xffff)); }
-    }
-    ewr(ONE_OVER_AREA_UC, oob);
-    widle();
-}
-static unsigned centroid(unsigned target){ return OSReadLittleInt32((void*)FB, target + 60*ROW_BYTES + 58*4); }
+static const int TX[3]={20,110,50}, TY[3]={16,44,116};
+static unsigned pix(int x,int y){ return OSReadLittleInt32((void*)FB, TARGET_OFF + y*ROW_BYTES + x*4); }
 
 int main(void)
 {
     io_service_t svc; io_connect_t conn; kern_return_t kr;
-    vm_address_t addr=0; vm_size_t size=0; unsigned saved[NCTX]; int i;
-    struct { const char *name; unsigned off, scale, dpsrc, frgd; int argb_last; } V[] = {
-        { "A frgd-clr color ", 0x600000, 0x000100c1, 0x00000101, TRI_COLOR, 0 },
-        { "B 3D argb-last    ", 0x640000, 0x000100c1, 0x00000505, 0,         1 },
-        { "C frgd + scale0   ", 0x680000, 0x00000000, 0x00000101, TRI_COLOR, 0 },
-    };
+    vm_address_t addr=0; vm_size_t size=0; unsigned saved[NCTX];
+    int i,x,y,xx[3],yy[3]; double area; float ooa; unsigned oob, nfill=0;
+
     svc=IOServiceGetMatchingService(kIOMasterPortDefault,IOServiceMatching("Mach64Accelerator"));
     if(!svc){fprintf(stderr,"no service\n");return 1;}
     kr=IOServiceOpen(svc,mach_task_self(),MACH64_GL_CONNECT_TYPE,&conn); IOObjectRelease(svc);
@@ -109,16 +75,41 @@ int main(void)
     if(widle()<0){fprintf(stderr,"not idle\n");goto out;}
     for(i=0;i<(int)NCTX;i++) saved[i]=rd(ctx_regs[i]);
 
-    printf("target color 0x%08x; testing color-source variants...\n\n", TRI_COLOR);
-    for(i=0;i<3;i++){
-        draw_tri(V[i].off, V[i].scale, V[i].dpsrc, V[i].frgd, V[i].argb_last);
-        unsigned c=centroid(V[i].off);
-        printf("  %s dpsrc=0x%04x scale=0x%08x -> centroid=0x%08x  %s\n",
-               V[i].name, V[i].dpsrc, V[i].scale, c,
-               c==TRI_COLOR?"*** CORRECT ***":(c?"(other)":"(empty)"));
-    }
+    for(y=0;y<128;y++) for(x=0;x<128;x++) OSWriteLittleInt32((void*)FB, TARGET_OFF + y*ROW_BYTES + x*4, 0);
+    for(i=0;i<3;i++){ xx[i]=TX[i]*4; yy[i]=TY[i]*4; }
+    area=(1.0/16.0)*((double)(xx[0]-xx[2])*(yy[1]-yy[2])-(double)(yy[0]-yy[2])*(xx[1]-xx[2]));
+    ooa=(float)(1.0/area); memcpy(&oob,&ooa,4);
+    printf("drawing triangle (%d,%d)(%d,%d)(%d,%d) color=0x%08x\n\n",TX[0],TY[0],TX[1],TY[1],TX[2],TY[2],TRI_COLOR);
+
+    ewr(SCALE_3D_CNTL, 0x000100c1);
+    ewr(SETUP_CNTL,    0x00000040);
+    ewr(Z_CNTL,        0);
+    ewr(DP_PIX_WIDTH,  0x60060666);
+    ewr(DST_OFF_PITCH, ((PITCH_PIX/8)<<22)|(TARGET_OFF>>3));
+    ewr(DP_FRGD_CLR,   TRI_COLOR);
+    ewr(SC_LEFT_RIGHT, 0x1fff0000);
+    ewr(SC_TOP_BOTTOM, 0x3fff0000);
+    ewr(DP_WRITE_MASK, 0xffffffff);
+    ewr(CLR_CMP_CNTL,  0);
+    ewr(DP_MIX,        0x00070007);
+    ewr(DP_SRC,        0x00000101);           /* color from DP_FRGD_CLR */
+    for(i=0;i<3;i++){ ewr(VTX_Z(i),0); ewr(VTX_ARGB(i),TRI_COLOR); ewr(VTX_XY(i),(xx[i]<<16)|(yy[i]&0xffff)); }
+    ewr(ONE_OVER_AREA_UC, oob);
+    if(widle()<0) fprintf(stderr,"warning: not idle after draw\n");
+
     for(i=0;i<(int)NCTX;i++){ wfifo(1); wr(ctx_regs[i],saved[i]); }
     widle();
+
+    /* ASCII readback of the off-screen triangle (stride 2 for aspect) */
+    printf("off-screen VRAM readback ('#' = our color):\n");
+    for(y=0;y<124;y+=4){
+        printf("  ");
+        for(x=0;x<124;x+=2){ unsigned v=pix(x,y); if(v==TRI_COLOR){putchar('#');nfill++;} else putchar(v?'?':'.'); }
+        putchar('\n');
+    }
+    printf("\n%s (%u sampled pixels are our color)\n",
+           nfill>20 ? "3D TRIANGLE CONFIRMED: setup engine rasterized + colored it!" :
+                      "triangle not present", nfill);
 out:
     IOConnectUnmapMemory(conn,MACH64_MEM_SURFACE,mach_task_self(),addr);
     IOServiceClose(conn); return 0;

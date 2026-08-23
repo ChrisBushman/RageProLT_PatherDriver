@@ -17,7 +17,8 @@ back to software. This project fills that one missing piece.
 | Hardware register **read** (`CONFIG_CHIP_ID=0xdc004c49`) | ✅ **verified on hardware** |
 | Hardware register **write** (scratch round-trip) | ✅ **verified on hardware** |
 | **2D draw engine executes our commands** (off-screen solid fill, readback-verified) | ✅ **verified on hardware** |
-| 3D setup engine / triangle | ⬜ next phase |
+| **3D setup engine rasterizes a triangle** (flat-shaded, off-screen, readback-verified) | ✅ **verified on hardware** |
+| Gouraud (per-vertex color) via DMA-burst vertex path | ⬜ needs bus-master ring |
 | Wire into GLDriver plugin (real OpenGL apps) | ⬜ |
 | GLDriver plugin (`gldriver/`) | 🟡 skeleton — handshake transcribed, bodies TODO |
 
