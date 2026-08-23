@@ -121,6 +121,11 @@ int main(int argc, char **argv)
     wr(DST_HEIGHT_WIDTH, 0);           /* kick the transfer */
     if(widle()<0) fprintf(stderr,"warn: DMA didn't go idle (possible stall)\n");
 
+    /* diagnostics: did the engine walk the ring? (BM_GUI_TABLE should advance
+     * from ring base by one descriptor = 0x10 bytes if it processed ours) */
+    printf("after kick: BM_GUI_TABLE=0x%08x (ring base 0x%08x) GUI_STAT=0x%08x\n",
+           rd(BM_GUI_TABLE), ringbus, rd(GUI_STAT));
+
     /* restore ATIRagePro's DMA state */
     wr(SRC_CNTL, save_src);
     wr(BM_GUI_TABLE_CMD, save_tbl & 0xfffffff0);

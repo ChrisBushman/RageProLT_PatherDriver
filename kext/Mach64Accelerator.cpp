@@ -59,7 +59,9 @@ bool Mach64Accelerator::start(IOService *provider)
     IOOptionBits dmaOpts = kIOMemoryPhysicallyContiguous |
                            kIOMemoryKernelUserShared | kIODirectionOutIn;
     fCmdBuf = IOBufferMemoryDescriptor::withOptions(dmaOpts, 0x10000, PAGE_SIZE);
-    fRing   = IOBufferMemoryDescriptor::withOptions(dmaOpts, 0x4000, PAGE_SIZE);
+    /* ring MUST be 16KB-aligned: BM_GUI_TABLE|CIRCULAR_BUF_SIZE_16KB treats it
+     * as a 16KB circular buffer and masks the base to 16KB. */
+    fRing   = IOBufferMemoryDescriptor::withOptions(dmaOpts, 0x4000, 0x4000);
     if (!fControl || !fCmdBuf || !fRing) return false;
 
     /* prepare() wires the pages so getPhysicalSegment returns REAL physical
