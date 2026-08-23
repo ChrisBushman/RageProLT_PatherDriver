@@ -1,0 +1,75 @@
+/*
+ * mach64_abi.h - the plugin <-> kext contract, reverse-engineered from the
+ * Panther ATIRage128 driver set (ATIRage128GLDriver.bundle + ATIRage128.kext).
+ * Shared by the GLDriver bundle (userspace) and the kext.
+ *
+ * Provenance: docs/re-notes/ABI.md
+ */
+#ifndef MACH64_ABI_H
+#define MACH64_ABI_H
+
+#include <stdint.h>
+
+/* ---- IOServiceOpen connection type ----------------------------------
+ * gldCreateContext opens the user client with type=1 (the GL context).
+ */
+#define MACH64_GL_CONNECT_TYPE   1
+
+/* ---- IOConnectMapMemory memory types (clientMemoryForType) -----------
+ * Verified from IOATIR128GLContext::clientMemoryForType jump table.
+ * (turn 14: type 1 = registers was WRONG; corrected here from the kext.)
+ */
+enum {
+    MACH64_MEM_REGISTERS   = 0,  /* MMIO register aperture (fixed BAR)      */
+    MACH64_MEM_SURFACE     = 1,  /* VRAM color/render surface (allocated)   */
+    MACH64_MEM_CONTROL     = 2,  /* 4KB shared status/control page          */
+    MACH64_MEM_FB_APERTURE = 3,  /* second fixed aperture (not used by GL)  */
+    MACH64_MEM_CMDBUF      = 4,  /* growable kernel/user-shared command buf */
+};
+
+/* ---- io_connect_method selector indices ------------------------------
+ * The complete 17-entry IOExternalMethod table recovered from
+ * ATIR128GLContext::getTargetAndMethodForIndex.  in/out are scalar counts
+ * (or 'S' = variable-size struct).
+ */
+enum {
+    kMach64Sel_set_surface        = 0,  /* ScalarI_StructI  in=4          */
+    kMach64Sel_set_swap_rect      = 1,  /* ScalarI_StructI  in=4          */
+    kMach64Sel_set_swap_interval  = 2,  /* ScalarI_StructI  in=2          */
+    kMach64Sel_get_config         = 3,  /* ScalarI_ScalarO  in=0 out=3    */
+    kMach64Sel_get_status         = 4,  /* ScalarI_ScalarO  in=0 out=1    */
+    kMach64Sel_get_surface_size   = 5,  /* ScalarI_ScalarO  in=0 out=4    */
+    kMach64Sel_get_surface_info   = 6,  /* ScalarI_ScalarO  in=1 out=3    */
+    kMach64Sel_read_buffer        = 7,  /* StructI_StructO                */
+    kMach64Sel_finish             = 8,  /* ScalarI_StructI  in=0          */
+    kMach64Sel_wait_for_stamp     = 9,  /* ScalarI_StructI  in=1          */
+    kMach64Sel_new_texture        = 10, /* StructI_StructO                */
+    kMach64Sel_delete_texture     = 11, /* ScalarI_StructI  in=1          */
+    kMach64Sel_become_global_shared = 12,
+    kMach64Sel_pageoff_texture    = 13, /* ScalarI_StructI  in=2          */
+    kMach64Sel_scale_surface      = 14, /* ScalarI_StructI  in=3          */
+    kMach64Sel_new_vertex_buffer  = 15, /* ScalarI_ScalarO  in=1 out=1    */
+    kMach64Sel_delete_vertex_buffer = 16, /* ScalarI_StructI in=1         */
+    kMach64Sel_COUNT              = 17,
+};
+
+/* get_config (selector 3) returns 3 dwords into the plugin's context. */
+typedef struct {
+    uint32_t config0;   /* hw config word ([hw+0x8c]); plugin tests bit 1 */
+    uint32_t ctx_token; /* allocated context-buffer handle                */
+    uint32_t config1;   /* second config word ([hw+0x90])                 */
+} mach64_get_config_out;
+
+/* Shared command-buffer submission model (turns 9 & 15):
+ * the plugin writes a verified register-write stream into the type-4 buffer;
+ * new_vertex_buffer() hands back the next buffer AND kicks the previous;
+ * wait_for_stamp() fences on completion.  Header prepended to each buffer.
+ */
+typedef struct {
+    uint32_t stamp;     /* fence value the kernel signals on completion    */
+    uint32_t dword_count;
+    uint32_t reserved[2];
+    /* uint32_t stream[]  -- (ADRINDEX(reg), value) pairs follow           */
+} mach64_cmdbuf_header;
+
+#endif /* MACH64_ABI_H */

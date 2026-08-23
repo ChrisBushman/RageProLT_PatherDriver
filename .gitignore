@@ -1,0 +1,8 @@
+# build output
+build/
+*.o
+*.bundle
+*.kext
+
+# macOS
+.DS_Store
