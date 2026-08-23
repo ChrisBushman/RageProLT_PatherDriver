@@ -29,6 +29,17 @@
 #define MACH64_DP_PIX_WIDTH     0x06d0
 #define MACH64_DP_WRITE_MASK    0x06c8
 
+/* ---- Register aperture location (PPC/big-endian mach64) -------------
+ * VERIFIED on the Lombard: the MMIO registers are NOT at BAR2 (the 4KB
+ * auxiliary aperture is optional and was disabled -> reads master-abort and
+ * machine-check the machine).  They live in the last 2KB of the little-endian
+ * framebuffer aperture (BAR0):
+ *     register R  ->  BAR0 + MACH64_REG_WINDOW + R
+ * The window is little-endian, so read/write with byte-swap (OSRead/Write
+ * LittleInt32).  Confirmed: CONFIG_CHIP_ID reads 0xdc004c49 (type 0x4c49,
+ * rev 0xdc), matching the PCI IDs. */
+#define MACH64_REG_WINDOW       0x7FF800u   /* BAR0 + 8MB - 2KB */
+
 /* ---- Bus-master data port (submission target) ----------------------- */
 #define MACH64_BM_ADDR          0x0648
 
