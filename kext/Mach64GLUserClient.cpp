@@ -83,7 +83,11 @@ Mach64GLUserClient::clientMemoryForType(UInt32 type, IOOptionBits *opts,
     default:
         return kIOReturnBadArgument;
     }
-    return (*mem) ? kIOReturnSuccess : kIOReturnNoMemory;
+    /* IOKit RELEASES the returned descriptor after mapping, so hand it back
+     * with an extra retain -- otherwise our cached fCmdBuf/fRing get
+     * over-released and freed out from under us -> panic on unload. */
+    if (*mem) { (*mem)->retain(); return kIOReturnSuccess; }
+    return kIOReturnNoMemory;
 }
 
 /* selector 3: in this build, returns DMA bus addresses for the userspace DMA
