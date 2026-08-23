@@ -18,6 +18,7 @@ io_service_t mach64_match_service(uint32_t index)
 int gldInitializeLibrary(void *framework_glue)
 {
     (void)framework_glue;
+    gld_log("\n=== gldInitializeLibrary: OpenGL.framework loaded our bundle ===\n");
     return 0;
 }
 

@@ -124,6 +124,20 @@ void mach64_render_quad_strip (gld_context *, const void *, uint32_t);
 
 void gldUpdateDispatch(gld_context *ctx, void *table, uint32_t flags);
 
+/* ---- core entry points the framework requires (gld_entry.c) ---------
+ * Recovered signatures / GL conventions; refined empirically via gld_log. */
+int  gldAttachDrawable(gld_context *ctx, int type, void *drawable, uint32_t flags);
+const char *gldGetString(gld_context *ctx, uint32_t name);
+int  gldGetError(gld_context *ctx);
+int  gldGetInteger(gld_context *ctx, uint32_t pname, int *params);
+int  gldSetInteger(gld_context *ctx, uint32_t pname, int value);
+void gldInitDispatch(gld_context *ctx, void *table, uint32_t flags);
+int  gldFlushBuffer(gld_context *ctx, void *drawable);
+
+/* diagnostic log -> /tmp/mach64gld.log, so we can watch how OpenGL.framework
+ * drives the bundle when it is loaded into a real GL app. */
+void gld_log(const char *fmt, ...);
+
 /* ---- The gld* entry points (subset; full list in ABI.md) ------------ */
 int  gldInitializeLibrary(void *);
 void gldTerminateLibrary(void);

@@ -22,6 +22,7 @@ extern io_service_t mach64_match_service(uint32_t index); /* IOServiceGetMatchin
 int gldGetRendererInfo(gld_renderer_info *out, uint32_t renderer_mask)
 {
     (void)renderer_mask;
+    gld_log("gldGetRendererInfo(mask=0x%x)\n", renderer_mask);
     io_service_t svc = mach64_match_service(0);
     if (!svc) return 0x2719;                 /* no device                  */
 
@@ -59,6 +60,7 @@ int gldCreateContext(gld_context **outp, void *pixfmt, void *shared,
     gld_context *ctx = calloc(1, 0x200);     /* 512-byte struct (verified)  */
     if (!ctx) return 0x2720;
 
+    gld_log("gldCreateContext(pixfmt=%p)\n", pixfmt);
     io_service_t svc = mach64_match_service(0);
     if (IOServiceOpen(svc, mach_task_self(), MACH64_GL_CONNECT_TYPE,
                       &ctx->connect) != KERN_SUCCESS) {
