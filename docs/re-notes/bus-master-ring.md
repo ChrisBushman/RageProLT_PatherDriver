@@ -95,8 +95,34 @@ writes GUI vertex regs, this path reaches exactly what we need.
 
 ## Status
 
-**Ring PROVEN.**  Flat 3D triangle (MMIO) + bus-master DMA ring both work.
-Next: build the gouraud command buffer (auto-incrementing vertex packets that
-latch per-vertex color) and submit it via this ring instead of MMIO.  The
-DMA-coexistence risk (async collision with ATIRagePro) is handled for now by
-the quiesce+save/restore approach — acceptable headless over SSH.
+**Ring PROVEN, and now driven from the KEXT.**  Progression, all verified on HW:
+flat 3D triangle (MMIO) → bus-master ring (userspace orchestrated) → gouraud via
+ring (userspace) → **gouraud via the kext's own submission path**.
+
+The kernel path (`Mach64Accelerator::rotateCommandBuffer` → `submitCommandBuffer`
+→ `waitForStamp`) is validated by `tools/mach64_ringtest.c`: userspace writes a
+complete register-write stream (3D state + vertices + trigger + SRC_CNTL=0
+terminator) into the type-4 command buffer and calls `new_vertex_buffer(size)`;
+the kext builds the ring descriptor, quiesces, activates bus-mastering, kicks,
+and waits — drawing the gouraud triangle (`covered=507`, R/G/B balanced).  The
+tool touches NO registers, so even the 3D *state* writes go through the
+GUI-master path.
+
+Kernel submission specifics that work:
+- uncached kernel maps of BAR0 (registers at +0x7FF800) and the ring, via
+  `IOMemoryDescriptor::map(kIOMapInhibitCache)` — mirrors the userspace uncached
+  maps; kernel writes reach RAM without a separate dcache flush.
+- `mach64_sync()` = `sync; eieio` before the kick.
+- `IOLock` serializes our own clients; `IODelay(1)`-gated `waitFifo`/`waitIdle`.
+- synchronous submit (quiesce model owns the engine only between save/restore);
+  `waitForStamp` is a real signed-wraparound fence, trivially retired today.
+
+The DMA-coexistence risk (async collision with ATIRagePro, no shared HW lock) is
+still handled by quiesce+save/restore — acceptable headless over SSH.
+
+### Remaining before a real GL driver
+- **gld* translation layer**: map GL state/vertex calls to these register
+  streams in the GLDriver bundle (the userspace half).
+- **double-buffering / async**: split `fCmdBuf`, alternate per stamp, retire by
+  polling `BM_GUI_TABLE` — for CPU/GPU overlap (perf, not correctness).
+- **real coexistence**: DRI-style shared HW lock or full device takeover.
