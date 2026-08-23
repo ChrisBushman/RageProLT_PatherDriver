@@ -91,12 +91,21 @@ int gldCreateContext(gld_context **outp, void *pixfmt, void *shared,
     if (!ctx->backend) { IOServiceClose(ctx->connect); free(ctx); return 0x2720; }
     mach64_init_state((mach64_priv *)ctx->backend);
 
-    /* TODO: decode pixfmt -> ctx->fmt_caps / ctx->mode_word (disasm 0x48fc),
-     *       bind the drawable's surface as the render target
-     *       (mach64_set_render_target from ctx->regs/get_surface_info), and wire
-     *       the dispatch table (gldUpdateDispatch) so GLEngine's primitive
-     *       callbacks reach mach64_draw_triangle. */
-    (void)pixfmt;
+    /* Consume the chosen pixel format (from gldChoosePixelFormat): record the
+     * colour/buffer caps and turn on the depth-test path if a depth buffer was
+     * requested.  The render TARGET (surface offset/pitch) is bound later, when
+     * the drawable is attached (mach64_set_render_target from get_surface_info);
+     * the framework calls gldUpdateDispatch separately to install our render
+     * slots. */
+    {
+        const gld_pixel_format *pf = (const gld_pixel_format *)pixfmt;
+        if (pf) {
+            ctx->fmt_caps  = pf->color_size;
+            ctx->mode_word = pf->flags;
+            if (pf->depth_size > 0)
+                mach64_set_depth_test(ctx, 1, 0x0201 /* GL_LESS */);
+        }
+    }
 
     *outp = ctx;
     return 0;

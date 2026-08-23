@@ -34,6 +34,23 @@ typedef struct {
     uint32_t texture_memory; /* 0x34 texture memory bytes                 */
 } gld_renderer_info;
 
+/* ---- Pixel format (gld_pixelformat.c) -------------------------------
+ * Our private object returned by gldChoosePixelFormat and handed back to
+ * gldCreateContext (the framework treats it opaquely; we alloc + free it).
+ * The attribs array + token semantics were recovered from the reference
+ * gldChoosePixelFormat jump table (see docs/re-notes/gld-layer.md). */
+#define GLD_PF_DOUBLEBUFFER  0x1
+#define GLD_PF_STEREO        0x2
+typedef struct {
+    uint32_t color_size;    /* GLD_PFA_COLOR_SIZE   (bits)                 */
+    uint32_t alpha_size;    /* GLD_PFA_ALPHA_SIZE                          */
+    uint32_t depth_size;    /* GLD_PFA_DEPTH_SIZE   (0 = no depth)         */
+    uint32_t stencil_size;  /* recorded; mach64 has no hw stencil          */
+    uint32_t accum_size;    /* recorded; mach64 has no hw accum            */
+    uint32_t aux_buffers;
+    uint32_t flags;         /* GLD_PF_DOUBLEBUFFER | GLD_PF_STEREO         */
+} gld_pixel_format;
+
 /* ---- Our per-context object (mirrors the 0x200-byte struct malloc'd by
  * gldCreateContext).  Only the fields the handshake touches are named. */
 typedef struct {
@@ -112,6 +129,7 @@ int  gldInitializeLibrary(void *);
 void gldTerminateLibrary(void);
 int  gldGetRendererInfo(gld_renderer_info *out, uint32_t renderer_mask);
 int  gldChoosePixelFormat(void **pf, const int *attribs);
+int  gldDestroyPixelFormat(void *pf);
 int  gldCreateContext(gld_context **out, void *pixfmt, void *shared,
                       void *share_io, void *a7, void *a8, void *a9);
 int  gldDestroyContext(gld_context *ctx);
