@@ -3,7 +3,7 @@ CC     ?= cc
 CFLAGS ?= -O2 -Wall -std=gnu99
 
 .PHONY: all clean
-all: mach64_peek mach64_poke
+all: mach64_peek mach64_poke mach64_fill
 
 mach64_peek: mach64_peek.c ../common/mach64_abi.h
 	$(CC) $(CFLAGS) -o $@ mach64_peek.c -framework IOKit
@@ -11,5 +11,8 @@ mach64_peek: mach64_peek.c ../common/mach64_abi.h
 mach64_poke: mach64_poke.c ../common/mach64_abi.h
 	$(CC) $(CFLAGS) -o $@ mach64_poke.c -framework IOKit
 
+mach64_fill: mach64_fill.c ../common/mach64_abi.h
+	$(CC) $(CFLAGS) -o $@ mach64_fill.c -framework IOKit
+
 clean:
-	rm -f mach64_peek mach64_poke
+	rm -f mach64_peek mach64_poke mach64_fill
