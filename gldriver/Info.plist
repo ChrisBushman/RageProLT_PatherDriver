@@ -5,9 +5,9 @@
 	<key>CFBundleDevelopmentRegion</key>
 	<string>English</string>
 	<key>CFBundleExecutable</key>
-	<string>Mach64GLDriver</string>
+	<string>ATIRageProGLDriver</string>
 	<key>CFBundleIdentifier</key>
-	<string>com.rageprolt.Mach64GLDriver</string>
+	<string>com.rageprolt.ATIRageProGLDriver</string>
 	<key>CFBundleInfoDictionaryVersion</key>
 	<string>6.0</string>
 	<key>CFBundleName</key>

@@ -1,5 +1,5 @@
 /*
- * mach64_firstlight.c - FIRST LIGHT: load Mach64GLDriver.bundle the way
+ * mach64_firstlight.c - FIRST LIGHT: load ATIRageProGLDriver.bundle the way
  * OpenGL.framework does (CFBundle + look up gld* by name) and drive the full
  * plugin lifecycle to render a triangle on the real hardware.
  *
@@ -50,7 +50,7 @@ static void *sym(CFBundleRef b, const char *n)
 
 int main(int argc, char **argv)
 {
-    const char *path = (argc > 1) ? argv[1] : "gldriver/Mach64GLDriver.bundle";
+    const char *path = (argc > 1) ? argv[1] : "gldriver/ATIRageProGLDriver.bundle";
     CFURLRef url; CFBundleRef b;
     int (*g_init)(void *);
     int (*g_choose)(void **, const int *);

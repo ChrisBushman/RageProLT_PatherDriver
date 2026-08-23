@@ -1,10 +1,12 @@
-# gldriver/Makefile - build Mach64GLDriver.bundle (the OpenGL renderer plugin).
-# Userspace PPC bundle; build on the Lombard.  OpenGL.framework loads it via
-# CFBundle and looks up the gld* symbols by name.
+# gldriver/Makefile - build ATIRageProGLDriver.bundle (the OpenGL renderer plugin).
+# Userspace PPC bundle; build on the Lombard.  The name MUST be ATIRageProGLDriver:
+# GLEngine builds the exec path directly as /System/Library/Extensions/<name>.
+# bundle/Contents/MacOS/<name>, where <name> = ATIRagePro.kext's IOGLBundleName
+# (="ATIRageProGLDriver").  A different exec name -> silent dlopen fail.
 CC     ?= cc
 CFLAGS ?= -O2 -Wall -std=gnu99 -I..
 
-EXEC   := Mach64GLDriver
+EXEC   := ATIRageProGLDriver
 BUNDLE := $(EXEC).bundle
 SRC    := gld_glue.c gld_context.c gld_state.c gld_render.c gld_prims.c \
           gld_dispatch.c gld_pixelformat.c gld_entry.c ../common/mach64_emit.c

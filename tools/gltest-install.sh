@@ -5,7 +5,7 @@
 #   sudo sh gltest-install.sh
 set -e
 DIR=`cd \`dirname "$0"\` && pwd`; ROOT=`cd "$DIR/.." && pwd`; B=Mach64Accelerator.kext
-GLB="$ROOT/gldriver/Mach64GLDriver.bundle"
+GLB="$ROOT/gldriver/ATIRageProGLDriver.bundle"
 DST=/System/Library/Extensions/ATIRageProGLDriver.bundle
 
 if [ ! -d "$GLB" ]; then echo "build the bundle first: make -C gldriver bundle"; exit 1; fi
