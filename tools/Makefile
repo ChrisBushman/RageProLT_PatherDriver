@@ -20,6 +20,10 @@ mach64_primtest: mach64_primtest.c $(GLD_SRC) $(PRIM_SRC) $(GLD_HDRS)
 mach64_pftest: mach64_pftest.c ../gldriver/gld_pixelformat.c $(GLD_HDRS)
 	$(CC) $(CFLAGS) -I.. -o $@ mach64_pftest.c ../gldriver/gld_pixelformat.c -framework IOKit
 
+# accelerated CGL app: triggers framework renderer discovery (links real OpenGL)
+mach64_gltest: mach64_gltest.c
+	$(CC) $(CFLAGS) -o $@ mach64_gltest.c -framework OpenGL
+
 # first light: loads the built bundle via CFBundle at runtime (NOT linked in)
 mach64_firstlight: mach64_firstlight.c $(GLD_HDRS)
 	$(CC) $(CFLAGS) -I.. -o $@ mach64_firstlight.c -framework CoreFoundation -framework IOKit
