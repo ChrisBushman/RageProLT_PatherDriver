@@ -25,6 +25,9 @@ void *gldInitializeLibrary(void *iface, void *a2, void *a3, void *a4, void *a5)
 {
     gld_log("\n=== gldInitializeLibrary iface=%p a2=%p a3=%p a4=%p a5=%p ===\n",
             iface, a2, a3, a4, a5);
+    /* Report the GLEngine caller so we can disassemble the loader/post-Init path
+     * exactly (static PIC xref-ing GLEngine was a dead end). */
+    gld_log("  caller(ret0)=%p\n", __builtin_return_address(0));
     g_gld_iface = iface;
     return iface;   /* non-null = success, matching the reference */
 }
