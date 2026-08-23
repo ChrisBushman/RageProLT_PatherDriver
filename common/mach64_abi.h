@@ -8,7 +8,19 @@
 #ifndef MACH64_ABI_H
 #define MACH64_ABI_H
 
+/* Kernel-safe integer types: the kext builds with -nostdinc (no <stdint.h>),
+ * so bridge to libkern's UInt* there; userspace uses C99 <stdint.h>. */
+#if defined(KERNEL)
+#include <libkern/OSTypes.h>
+typedef UInt32 m64_u32;
+typedef UInt16 m64_u16;
+typedef UInt8  m64_u8;
+#else
 #include <stdint.h>
+typedef uint32_t m64_u32;
+typedef uint16_t m64_u16;
+typedef uint8_t  m64_u8;
+#endif
 
 /* ---- IOServiceOpen connection type ----------------------------------
  * gldCreateContext opens the user client with type=1 (the GL context).
@@ -55,9 +67,9 @@ enum {
 
 /* get_config (selector 3) returns 3 dwords into the plugin's context. */
 typedef struct {
-    uint32_t config0;   /* hw config word ([hw+0x8c]); plugin tests bit 1 */
-    uint32_t ctx_token; /* allocated context-buffer handle                */
-    uint32_t config1;   /* second config word ([hw+0x90])                 */
+    m64_u32 config0;   /* hw config word ([hw+0x8c]); plugin tests bit 1 */
+    m64_u32 ctx_token; /* allocated context-buffer handle                */
+    m64_u32 config1;   /* second config word ([hw+0x90])                 */
 } mach64_get_config_out;
 
 /* Shared command-buffer submission model (turns 9 & 15):
