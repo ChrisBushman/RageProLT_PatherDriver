@@ -104,8 +104,11 @@ int gldCreateContext(gld_context **outp, void *pixfmt, void *shared,
         if (pf) {
             ctx->fmt_caps  = pf->color_size;
             ctx->mode_word = pf->flags;
-            if (pf->depth_size > 0)
-                mach64_set_depth_test(ctx, 1, 0x0201 /* GL_LESS */);
+            /* NOTE: do NOT enable the depth test yet even when depth was
+             * requested -- we have no depth buffer (Z_OFF_PITCH / depth surface
+             * unallocated), so Z_EN would fail every fragment and draw nothing.
+             * Keep depth off until the depth surface lands (see gld_state.c). */
+            /* if (pf->depth_size > 0) mach64_set_depth_test(ctx, 1, 0x0201); */
         }
     }
 
