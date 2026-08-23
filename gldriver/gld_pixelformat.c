@@ -26,12 +26,17 @@
  * that isn't ours. */
 #define GLD_NODE_WORDS 13
 #define GLD_NNODES     4
+/* node[0x08] bit 0x100 = the HARDWARE/ACCELERATED marker: cglChoosePixelFormat's
+ * primary scoring loop skips any node without it (andi. 0x100 / beq).  The
+ * captured configs came from the software "Generic" renderer so they lack it;
+ * we OR it in (0x6dd -> 0x7dd) to mark our configs as accelerated. */
+#define GLD_NODE_ACCEL 0x000007dd
 static const uint32_t gld_node_templates[GLD_NNODES][GLD_NODE_WORDS] = {
-  /* next   [1]  0x04   [2]  0x08   [3] [4] 0x10    [5]0x14     [6] 0x18  [7]0x1c [8]0x20 [9][10][11] [12]0x30 */
-  { 0, 0x00020241, 0x000006dd, 0, 0x00000200, 0x00000000, 0x00000400, 0x00000001, 4, 0,0,0, 7 },
-  { 0, 0x00020242, 0x000006dd, 0, 0x00000200, 0x00000000, 0x00001000, 0x00000001, 4, 0,0,0, 7 },
-  { 0, 0x00020248, 0x000006dd, 0, 0x00004000, 0x00000000, 0x00001000, 0x00000001, 4, 0,0,0, 7 },
-  { 0, 0x00020400, 0x000006dd, 0, 0x00008000, 0x20000000, 0x00001000, 0x00000080, 4, 0,0,0, 7 },
+  /* next   [1]  0x04   [2]  0x08         [3] [4] 0x10    [5]0x14     [6] 0x18  [7]0x1c [8]0x20 [9][10][11] [12]0x30 */
+  { 0, 0x00020241, GLD_NODE_ACCEL, 0, 0x00000200, 0x00000000, 0x00000400, 0x00000001, 4, 0,0,0, 7 },
+  { 0, 0x00020242, GLD_NODE_ACCEL, 0, 0x00000200, 0x00000000, 0x00001000, 0x00000001, 4, 0,0,0, 7 },
+  { 0, 0x00020248, GLD_NODE_ACCEL, 0, 0x00004000, 0x00000000, 0x00001000, 0x00000001, 4, 0,0,0, 7 },
+  { 0, 0x00020400, GLD_NODE_ACCEL, 0, 0x00008000, 0x20000000, 0x00001000, 0x00000080, 4, 0,0,0, 7 },
 };
 
 int gldChoosePixelFormat(void **pf_out, const int *attribs)
