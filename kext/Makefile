@@ -55,7 +55,27 @@ kext: $(EXEC)
 validate: kext
 	kextload -n -t -z $(BUNDLE)
 
-# ---- actually load (needs root; can panic) --------------------------
+# ---- SAFE non-matching load test ------------------------------------
+# A bundle whose IOPCIMatch targets a non-present device, so it loads (module
+# init + class registration) but matches nothing -> cannot touch the display.
+SAFE_BUNDLE := $(EXEC)-safe.kext
+SAFE_MATCH  := 0xdead1002
+
+safe-bundle: $(EXEC)
+	@rm -rf $(SAFE_BUNDLE); mkdir -p $(SAFE_BUNDLE)/Contents/MacOS
+	@sed 's|0x4c491002 0x4c421002 0x4c501002|$(SAFE_MATCH)|' Info.plist \
+	    > $(SAFE_BUNDLE)/Contents/Info.plist
+	@cp $(EXEC) $(SAFE_BUNDLE)/Contents/MacOS/$(EXEC)
+	@echo "built $(SAFE_BUNDLE) (IOPCIMatch=$(SAFE_MATCH), matches nothing here)"
+
+validate-safe: safe-bundle
+	kextload -n -t -z $(SAFE_BUNDLE)
+
+# run the safe load/verify/unload (needs root): sudo sh load-safe.sh
+load-safe: safe-bundle
+	@echo "now run as root:  sudo sh $(CURDIR)/load-safe.sh"
+
+# ---- actually load the REAL (device-matching) kext; root; panic risk --
 load: kext
 	sudo cp -R $(BUNDLE) /tmp/ && sudo kextload -v /tmp/$(BUNDLE)
 
