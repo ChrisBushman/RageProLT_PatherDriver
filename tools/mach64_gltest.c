@@ -12,14 +12,24 @@
 #include <OpenGL/gl.h>
 #include <stdio.h>
 
-int main(void)
+int main(int argc, char **argv)
 {
-    CGLPixelFormatAttribute attribs[] = {
+    /* default: request ACCELERATED (our driver).  'sw' arg: drop it -> the
+     * framework uses a software renderer (a known-good config-node source we can
+     * capture under gdb to learn the exact node format). */
+    int sw = (argc > 1 && argv[1][0]=='s');
+    CGLPixelFormatAttribute accel_attribs[] = {
         kCGLPFAAccelerated,
         kCGLPFAColorSize, (CGLPixelFormatAttribute)32,
         kCGLPFADepthSize, (CGLPixelFormatAttribute)16,
         (CGLPixelFormatAttribute)0
     };
+    CGLPixelFormatAttribute sw_attribs[] = {
+        kCGLPFAColorSize, (CGLPixelFormatAttribute)32,
+        kCGLPFADepthSize, (CGLPixelFormatAttribute)16,
+        (CGLPixelFormatAttribute)0
+    };
+    CGLPixelFormatAttribute *attribs = sw ? sw_attribs : accel_attribs;
     CGLPixelFormatObj pix = 0; GLint npix = 0;
     CGLContextObj ctx = 0;
     CGLError e;
