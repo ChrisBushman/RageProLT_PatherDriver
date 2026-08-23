@@ -3,7 +3,10 @@ CC     ?= cc
 CFLAGS ?= -O2 -Wall -std=gnu99
 
 .PHONY: all clean
-all: mach64_peek mach64_poke mach64_fill mach64_tri mach64_gouraud mach64_dmatest
+all: mach64_peek mach64_poke mach64_fill mach64_tri mach64_gouraud mach64_dmatest mach64_ringtest
+
+mach64_ringtest: mach64_ringtest.c ../common/mach64_abi.h ../common/mach64_regs.h
+	$(CC) $(CFLAGS) -o $@ mach64_ringtest.c -framework IOKit
 
 mach64_tri: mach64_tri.c ../common/mach64_abi.h
 	$(CC) $(CFLAGS) -o $@ mach64_tri.c -framework IOKit
