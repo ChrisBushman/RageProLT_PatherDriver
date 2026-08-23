@@ -24,6 +24,19 @@ bool Mach64Accelerator::start(IOService *provider)
     fPCI->setMemoryEnable(true);
     fPCI->setBusMasterEnable(true);
 
+    /* Diagnostic: log every BAR's phys addr + size so we can identify the
+     * 4KB MMIO register block vs the 8MB framebuffer empirically. */
+    for (int bar = 0; bar < 6; bar++) {
+        IODeviceMemory *m =
+            fPCI->getDeviceMemoryWithRegister(kIOPCIConfigBaseAddress0 + bar * 4);
+        if (m)
+            IOLog("Mach64Accelerator: BAR%d phys=0x%08lx len=0x%lx\n", bar,
+                  (unsigned long)m->getPhysicalAddress(),
+                  (unsigned long)m->getLength());
+        else
+            IOLog("Mach64Accelerator: BAR%d (none)\n", bar);
+    }
+
     /* BAR layout (TODO verify on hardware via the device's assigned-addresses):
      *   BAR0 = linear framebuffer aperture, BAR2 = MMIO register aperture. */
     fFB   = fPCI->getDeviceMemoryWithRegister(kIOPCIConfigBaseAddress0);

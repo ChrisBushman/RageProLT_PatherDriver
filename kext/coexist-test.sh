@@ -20,6 +20,9 @@ rm -rf /tmp/$B; cp -R "$DIR/$B" /tmp/$B; chown -R root:wheel /tmp/$B
 echo "--- kextload -v (real GPU match, coexist category) ---"
 kextload -v /tmp/$B
 
+echo "--- kernel log: BAR map from start() ---"
+dmesg | grep -i "Mach64Accelerator" | tail -12
+
 echo "--- kextstat: should list com.local.Mach64Accelerator ---"
 kextstat | grep -i mach64 || echo "  NOT LOADED (unexpected)"
 
