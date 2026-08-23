@@ -27,6 +27,8 @@
 
 #define REG_WINDOW    0x7FF800u
 #define SCRATCH_REG1  0x0484
+#define PAT_REG0      0x0680   /* GUI drawing-engine pattern regs: the DRI's */
+#define PAT_REG1      0x0684   /* bm_dma_test target (reachable via GUI-master) */
 #define BUS_CNTL      0x04a0
 #define SRC_CNTL      0x05b4
 #define DST_HEIGHT_WIDTH 0x0518
@@ -48,6 +50,7 @@
 #define ADRINDEX(r)  ((unsigned)((r)>=0x400 ? (((r)-0x400)>>2) : (((r)>>2)|0x100)))
 #define TESTVAL      0xCAFEF00Du
 
+static void mb(void){ __asm__ volatile("sync; eieio" ::: "memory"); }
 static unsigned REGB, RING, CMD;
 static unsigned rd(unsigned o){ return OSReadLittleInt32((void*)REGB, o); }
 static void     wr(unsigned o, unsigned v){ OSWriteLittleInt32((void*)REGB, o, v); }
@@ -96,33 +99,41 @@ int main(int argc, char **argv)
     go = (argc>1 && strcmp(argv[1],"go")==0);
     if(!go){ printf("\nDRY RUN ok. Re-run with 'go' to actually activate DMA.\n"); goto out; }
 
-    /* command buffer: write SCRATCH_REG1=TESTVAL, then a SRC_CNTL=0 terminator.
-     * The DRI ends EVERY DMA buffer with SRC_CNTL=0 -- without it the bus master
-     * never flushes/commits the register write (engine walks the ring but the
-     * write doesn't land, exactly what we saw). */
-    cw(0,  ADRINDEX(SCRATCH_REG1));   /* header: count 0, reg index */
-    cw(4,  TESTVAL);
-    cw(8,  ADRINDEX(SRC_CNTL));       /* terminator: SRC_CNTL = 0 */
-    cw(12, 0);
+    /* command buffer: DMA-write PAT_REG0/PAT_REG1, exactly like the DRI's
+     * bm_dma_test.  Target the PATTERN registers (GUI drawing-engine block) --
+     * NOT scratch: the bus-master GUI path decodes GUI registers, which is
+     * almost certainly why SCRATCH_REG1 never changed even though the engine
+     * walked the ring.  Header = DMAREG(reg) | ((n_regs-1)<<16). */
+    cw(0,  ADRINDEX(PAT_REG0) | (1u<<16));  /* write 2 consecutive regs */
+    cw(4,  0x22222222u);                     /* -> PAT_REG0 */
+    cw(8,  0xAAAAAAAAu);                     /* -> PAT_REG1 */
+    cw(12, ADRINDEX(SRC_CNTL) | (0u<<16));   /* terminator: SRC_CNTL = 0 */
+    cw(16, 0);
 
-    /* descriptor: DMA the 16-byte command buffer to the BM_ADDR data port */
+    /* descriptor: DMA the 20-byte command buffer to the BM_ADDR data port */
     rw(0,  APERTURE_OFFSET + BM_ADDR);
     rw(4,  cmdbus);
-    rw(8,  16u | DMA_HOLD_OFFSET | DMA_EOL);
+    rw(8,  20u | DMA_HOLD_OFFSET | DMA_EOL);
     rw(12, 0);
 
-    wr(SCRATCH_REG1, 0);
-    before = rd(SCRATCH_REG1);
-    printf("SCRATCH_REG1 before = 0x%08x\n", before);
+    /* init test regs via MMIO (confirms plain register writes work first) */
+    wr(SRC_CNTL, 0);
+    wr(PAT_REG0, 0x11111111u);
+    wr(PAT_REG1, 0x11111111u);
+    widle();
+    before = rd(PAT_REG0);
+    printf("PAT before: PAT_REG0=0x%08x PAT_REG1=0x%08x (want 0x11111111 both)\n",
+           before, rd(PAT_REG1));
 
     save_bus=rd(BUS_CNTL); save_src=rd(SRC_CNTL); save_tbl=rd(BM_GUI_TABLE);
     printf("saved BUS_CNTL=0x%08x SRC_CNTL=0x%08x BM_GUI_TABLE=0x%08x\n", save_bus,save_src,save_tbl);
 
+    mb();                              /* flush cmd/ring stores to RAM */
     if(widle()<0) fprintf(stderr,"warn: not idle before DMA\n");
     wr(BUS_CNTL, (save_bus & ~BUS_MASTER_DIS) | BUS_EXT_REG_EN);
-    if(widle()<0) fprintf(stderr,"warn: not idle after bus enable\n");
     wr(BM_GUI_TABLE_CMD, ringbus /* | CIRCULAR_BUF_SIZE_16KB(0) */);
     wr(SRC_CNTL, SRC_BM_ENABLE | SRC_BM_SYNC | SRC_BM_OP_SYSTEM_TO_REG);
+    mb();
     wr(DST_HEIGHT_WIDTH, 0);           /* kick the transfer */
     if(widle()<0) fprintf(stderr,"warn: DMA didn't go idle (possible stall)\n");
 
@@ -131,14 +142,19 @@ int main(int argc, char **argv)
     printf("after kick: BM_GUI_TABLE=0x%08x (ring base 0x%08x) GUI_STAT=0x%08x\n",
            rd(BM_GUI_TABLE), ringbus, rd(GUI_STAT));
 
-    /* restore ATIRagePro's DMA state */
+    after = rd(PAT_REG0);
+    unsigned after1 = rd(PAT_REG1);
+
+    /* restore ATIRagePro's DMA state + pattern regs */
     wr(SRC_CNTL, save_src);
     wr(BM_GUI_TABLE_CMD, save_tbl & 0xfffffff0);
     wr(BUS_CNTL, save_bus);
+    wr(PAT_REG0, 0x11111111u);
+    wr(PAT_REG1, 0x11111111u);
 
-    after = rd(SCRATCH_REG1);
-    printf("SCRATCH_REG1 after  = 0x%08x (want 0x%08x)\n", after, TESTVAL);
-    printf("\n%s\n", after==TESTVAL
+    printf("PAT after:  PAT_REG0=0x%08x (want 0x22222222) PAT_REG1=0x%08x (want 0xaaaaaaaa)\n",
+           after, after1);
+    printf("\n%s\n", (after==0x22222222u && after1==0xAAAAAAAAu)
         ? "DMA RING WORKS: engine bus-master-executed our command buffer!"
         : "DMA did not take -- check bus address / coherency / activation");
 out:
