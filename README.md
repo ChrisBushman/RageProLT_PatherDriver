@@ -16,7 +16,9 @@ back to software. This project fills that one missing piece.
 | Kext: loads + coexists with ATIRagePro (distinct IOMatchCategory) | ✅ **verified on hardware** |
 | Hardware register **read** (`CONFIG_CHIP_ID=0xdc004c49`) | ✅ **verified on hardware** |
 | Hardware register **write** (scratch round-trip) | ✅ **verified on hardware** |
-| Engine command submission / first render | ⬜ next phase |
+| **2D draw engine executes our commands** (off-screen solid fill, readback-verified) | ✅ **verified on hardware** |
+| 3D setup engine / triangle | ⬜ next phase |
+| Wire into GLDriver plugin (real OpenGL apps) | ⬜ |
 | GLDriver plugin (`gldriver/`) | 🟡 skeleton — handshake transcribed, bodies TODO |
 
 Register aperture is the little-endian framebuffer window at `BAR0 + 0x7FF800`
