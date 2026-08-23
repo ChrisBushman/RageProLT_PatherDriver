@@ -88,7 +88,11 @@ int gldChoosePixelFormat(void **pf_out, const int *attribs)
     if (p.color_size == 0) p.color_size = 32;
     if (p.depth_size > 16) p.depth_size = 16;
 
-    out = (gld_pixel_format *)malloc(sizeof *out);
+    /* Oversized + zeroed: the framework reads the pf as a much larger struct
+     * (the real GLD pf is ~0x80+ bytes with pointer fields) -- a 28-byte buffer
+     * let it read off the end into garbage -> bus error.  Zero-fill keeps its
+     * reads in-bounds (NULL fields, not garbage) so we can see the next step. */
+    out = (gld_pixel_format *)calloc(1, 0x100);
     if (!out) return 0x2720;
     *out = p;
     *pf_out = out;
