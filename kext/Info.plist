@@ -40,6 +40,10 @@
       <key>IOProviderClass</key>     <string>IOPCIDevice</string>
       <key>IOPCIMatch</key>
       <string>0x4c491002 0x4c421002 0x4c501002</string>
+      <!-- Distinct from ATIRagePro's "IOAccelerator" category so IOKit starts
+           us ALONGSIDE it on the same IOPCIDevice (coexist, no takeover;
+           display stays up). -->
+      <key>IOMatchCategory</key>     <string>Mach64GLAccelerator</string>
       <!-- The GL user client class the plugin opens with type=1 -->
       <key>IOUserClientClass</key>   <string>Mach64GLUserClient</string>
     </dict>
