@@ -1,20 +1,17 @@
 /*
- * mach64_gouraud.c - find the per-vertex (gouraud) color config for the mach64
- * setup engine.  The DMA ring already draws the correct triangle SHAPE, but the
- * color comes back uniformly white (0xffffffff) -- the vertex ARGB isn't
- * reaching the color interpolator.
- *
- * Rather than one guess per hardware round-trip, this sweeps several state
- * combinations in a SINGLE run, each drawn via the bus-master DMA ring into its
- * own off-screen buffer, then reports the sampled colors so we can see which
- * knob turns on color interpolation.  Hypotheses under test:
- *   - vertex W (perspective): unset W -> color/W saturates to white
- *   - SETUP_CNTL 0 (mesa) vs 0x40 (our flat-triangle value)
- *   - SCALE_3D_CNTL minimal 0x100c1 vs mesa-full 0x0b4100cb
+ * mach64_gouraud.c - per-vertex (gouraud) 3D triangle via the bus-master DMA
+ * ring.  The setup engine interpolates the three vertex colors (RED/GREEN/BLUE
+ * corners) across the triangle; the pixel color comes from the 3D scaler
+ * (DP_SRC = BKGD/FRGD_SRC_3D), not the flat DP_FRGD_CLR.
  *
  * Vertices are submitted as a DMA register-write stream (proven in
- * mach64_dmatest); DP_SRC = BKGD/FRGD_SRC_3D so the pixel color is the scaler's
- * interpolated output.  Requires 'go'.  Build with -framework IOKit.
+ * mach64_dmatest); individual MMIO writes to VERTEX_n_ARGB don't latch.
+ *
+ * The state was isolated by a sweep (git history): the flat triangle's
+ * SETUP_CNTL=0x40 (LOG_MAX_INC_ADJ) broke color-gradient setup -> use 0; and
+ * the vertex must carry W=1.0 (the scaler's color interp is perspective-correct,
+ * so an unset W saturates every pixel to white).  Either fix alone works; we use
+ * both.  Requires 'go'.  Build with -framework IOKit.
  */
 #include <IOKit/IOKitLib.h>
 #include <libkern/OSByteOrder.h>
@@ -157,32 +154,22 @@ static void draw(unsigned targ, unsigned setup, unsigned scale, unsigned dpsrc, 
     widle();
 }
 
-/* sample the 3 near-vertex interior points + centroid, classify the result */
-static void report(int n, const char *desc, unsigned t)
-{
-    unsigned a=pixT(t,26,30), b=pixT(t,96,50), c=pixT(t,52,102), ce=pixT(t,58,58);
-    const char *verdict;
-    if(!a && !b && !c && !ce)                 verdict="EMPTY (no triangle)";
-    else if(a==0xffffffff&&b==0xffffffff&&c==0xffffffff) verdict="WHITE (color path off)";
-    else if(a!=b && b!=c && a!=c)             verdict="*** VARIES -> GOURAUD! ***";
-    else                                       verdict="FLAT (single color)";
-    printf("  [%d] %-34s v0=%08x v1=%08x v2=%08x cen=%08x  %s\n",
-           n, desc, a,b,c,ce, verdict);
-}
+/* Winning gouraud state (isolated by the state sweep):
+ *   SETUP_CNTL   = 0        <- the flat-triangle's 0x40 (LOG_MAX_INC_ADJ) broke
+ *                             color-gradient setup; 0 is mesa's value
+ *   SCALE_3D_CNTL= 0x100c1  <- 3D shade pipe (FCN_SHADE), minimal/clean
+ *   DP_SRC       = 0x0505   <- BKGD/FRGD_SRC_3D: pixel color from the scaler
+ *   full vertex incl W=1.0  <- perspective divide needs W (independently fixes it)
+ */
+#define G_SETUP  0x00000000u
+#define G_SCALE  0x000100c1u
+#define G_DPSRC  0x00000505u
+#define G_TARGET 0x600000u
 
 int main(int argc, char **argv)
 {
     io_service_t svc; io_connect_t conn; kern_return_t kr;
-    vm_address_t fb=0; vm_size_t fbs=0; unsigned cfg=0; int go,valid;
-    /* sweep table: {target, setup_cntl, scale_3d_cntl, dp_src, full_vertex} */
-    struct { unsigned targ,setup,scale,dpsrc; int full; const char *desc; } S[] = {
-        {0x600000u, 0x40, 0x000100c1u, 0x0505u, 0, "base: setup=40 scale=100c1 min"},
-        {0x610000u, 0x40, 0x000100c1u, 0x0505u, 1, "+W:   setup=40 scale=100c1 full"},
-        {0x620000u, 0x00, 0x000100c1u, 0x0505u, 1, "setup=0 scale=100c1 full+W"},
-        {0x630000u, 0x00, 0x0b4100cbu, 0x0505u, 1, "setup=0 scale=b4100cb full+W"},
-        {0x640000u, 0x00, 0x000100c1u, 0x0505u, 0, "setup=0 scale=100c1 min"},
-    };
-    int i, N = sizeof(S)/sizeof(S[0]);
+    vm_address_t fb=0; vm_size_t fbs=0; unsigned cfg=0; int go,valid,x,y;
 
     svc=IOServiceGetMatchingService(kIOMasterPortDefault,IOServiceMatching("Mach64Accelerator"));
     if(!svc){fprintf(stderr,"no service\n");return 1;}
@@ -198,13 +185,39 @@ int main(int argc, char **argv)
     valid = CMDBUS>=0x1000 && CMDBUS<RAM_LIMIT && RINGBUS>=0x1000 && RINGBUS<RAM_LIMIT;
     if(!valid){ printf("*** INVALID bus addr -- refusing DMA ***\n"); goto out; }
     go = (argc>1 && strcmp(argv[1],"go")==0);
-    if(!go){ printf("DRY RUN ok. Re-run with 'go' to draw the sweep.\n"); goto out; }
+    if(!go){ printf("DRY RUN ok. Re-run with 'go' to draw.\n"); goto out; }
 
     if(widle()<0){fprintf(stderr,"not idle\n");goto out;}
-    printf("gouraud state sweep: v0=RED v1=GREEN v2=BLUE, each via DMA ring\n");
-    printf("(want per-vertex interpolation: v0~red, v1~green, v2~blue)\n\n");
-    for(i=0;i<N;i++){ draw(S[i].targ,S[i].setup,S[i].scale,S[i].dpsrc,S[i].full); report(i,S[i].desc,S[i].targ); }
-    printf("\nAny row marked VARIES has working gouraud -> use that state.\n");
+    printf("gouraud triangle via DMA ring: v0=RED v1=GREEN v2=BLUE\n\n");
+    draw(G_TARGET, G_SETUP, G_SCALE, G_DPSRC, 1);
+
+    /* ASCII readback: dominant channel per covered pixel.  A red corner (v0),
+     * green corner (v1), blue corner (v2) with a blended interior = gouraud. */
+    {
+        int nfill=0,nR=0,nG=0,nB=0,classes;
+        printf("off-screen readback (R/G/B = dominant channel, '.' = empty):\n");
+        for(y=0;y<124;y+=4){
+            printf("  ");
+            for(x=0;x<124;x+=2){
+                unsigned v=pixT(G_TARGET,x,y);
+                if(!v){ putchar('.'); continue; }
+                unsigned r=(v>>16)&0xff, g=(v>>8)&0xff, b=v&0xff;
+                nfill++;
+                if(r>=g && r>=b){ putchar('R'); nR++; }
+                else if(g>=r && g>=b){ putchar('G'); nG++; }
+                else { putchar('B'); nB++; }
+            }
+            putchar('\n');
+        }
+        printf("\nsamples: near-v0=%08x near-v1=%08x near-v2=%08x centroid=%08x\n",
+               pixT(G_TARGET,26,30), pixT(G_TARGET,96,50), pixT(G_TARGET,52,102), pixT(G_TARGET,58,58));
+        printf("covered=%d  dominant R=%d G=%d B=%d\n", nfill, nR,nG,nB);
+        classes=(nR>0)+(nG>0)+(nB>0);
+        printf("\n%s\n", (nfill>50 && classes>=2)
+            ? "GOURAUD CONFIRMED: setup engine interpolated per-vertex colors via DMA!"
+            : (nfill>50 ? "shape drawn but single color -- gouraud didn't interpolate"
+                        : "triangle not present"));
+    }
 out:
     IOServiceClose(conn); return 0;
 }

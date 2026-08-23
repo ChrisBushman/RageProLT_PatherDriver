@@ -19,15 +19,46 @@ TRIGGER: ONE_OVER_AREA_UC(0x300) = floatbits(1.0/area)
 - The **setup engine gives coverage**; color comes from **`DP_FRGD_CLR`** (flat).
   `SCALE_3D_CNTL=0` gives an empty result (3D pipe off), confirming the 3D pipe
   does the rasterization.
-- **Gouraud (per-vertex color) is NOT working via MMIO**: with `DP_SRC=3D` the
-  color reads `0xffffffff` regardless of `dp_mix`/`scale_3d_cntl`/ARGB order.
-  The per-vertex ARGB doesn't latch into the interpolator through individual
-  MMIO register writes — it needs the **DMA-burst vertex packet** (the DRI path:
-  one packet writing Z/ARGB/X_Y as consecutive auto-incrementing registers).
-  Future work once the bus-master ring is up.
+- **Gouraud (per-vertex color) NOW WORKS via the DMA ring.**  See below.
 
 Implemented in `tools/mach64_tri.c`.  Below is the original pre-hardware
 analysis for reference.
+
+## ✅ WORKING on hardware (GOURAUD / per-vertex color)
+
+Verified on the Lombard: an RGB triangle (v0 red, v1 green, v2 blue) with the
+setup engine **interpolating** the three vertex colors — corners read back
+`ffd50623`/`ff12ce1e`/`ff1314d6` (R/G/B dominant), centroid `ff585055` (gray
+blend).  Implemented in `tools/mach64_gouraud.c`.
+
+Two things had to change vs the flat recipe, each independently sufficient (a
+state sweep isolated them):
+
+1. **`SETUP_CNTL = 0`, not `0x40`.**  The flat triangle set `LOG_MAX_INC_ADJ`
+   (`0x40`); that bit **breaks the color-gradient setup** (shape still
+   rasterizes, but every pixel comes out white `0xffffffff`).  mesa uses
+   `SETUP_CNTL=0`.  This was the actual bug — it had nothing to do with the
+   submission path.
+2. **Vertex must carry `W = 1.0`** (`0x3f800000`).  The scaler's color
+   interpolation is perspective-correct; an unset `W` divides the color by
+   garbage and saturates to white.  So write the **full** vertex block
+   `{S,T,W,SPEC,Z,ARGB,X_Y}` (packet header `ADRINDEX(VERTEX_n_S) | (6<<16)`),
+   not just `{Z,ARGB,X_Y}`.
+
+Everything else matches the flat recipe **except** the color source:
+
+```
+DP_SRC = 0x0505   (BKGD_SRC_3D|FRGD_SRC_3D -> pixel color from the interpolating
+                   3D scaler, instead of 0x101 flat-from-DP_FRGD_CLR)
+```
+
+Submission: the 3 vertex packets + `ONE_OVER_AREA_UC` trigger + `SRC_CNTL=0`
+terminator go through the **bus-master DMA ring** (see bus-master-ring.md) --
+individual MMIO writes to `VERTEX_n_ARGB` never latched.  Static 3D state
+(`SCALE_3D_CNTL=0x100c1`, `SETUP_CNTL=0`, `DP_SRC=0x0505`, scissor, pitch, etc.)
+is still set via MMIO before the DMA.
+
+**Full 3D primitive stack now proven on hardware: flat + gouraud triangles.**
 
 ---
 
