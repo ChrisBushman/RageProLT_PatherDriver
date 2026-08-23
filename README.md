@@ -10,14 +10,20 @@ back to software. This project fills that one missing piece.
 | Layer | State |
 |---|---|
 | mach64 3D register/command knowledge | ✅ complete (DRI + RRG, verified) |
-| Portable command-emission core (`common/`) | ✅ **builds + tested on host** |
+| Portable command-emission core (`common/`) | ✅ builds + tested on host **and real PPC** |
 | Plugin↔kext ABI (55 gld hooks, 17 selectors, 4 memory regions) | ✅ reverse-engineered (`docs/re-notes/ABI.md`) |
+| Kext: compiles / links / packages on Panther (gcc 3.3) | ✅ **verified on the Lombard** |
+| Kext: loads + coexists with ATIRagePro (distinct IOMatchCategory) | ✅ **verified on hardware** |
+| Hardware register **read** (`CONFIG_CHIP_ID=0xdc004c49`) | ✅ **verified on hardware** |
+| Hardware register **write** (scratch round-trip) | ✅ **verified on hardware** |
+| Engine command submission / first render | ⬜ next phase |
 | GLDriver plugin (`gldriver/`) | 🟡 skeleton — handshake transcribed, bodies TODO |
-| Kext user client (`kext/`) | 🟡 skeleton — selector table + memory contract transcribed |
-| Build on real Panther/PPC toolchain | ⬜ not yet attempted |
 
-`make` builds and runs `hosttest/` on this machine, proving the register
-encoding + emission logic (27-write textured triangle, `V3_X_Y` trigger last).
+Register aperture is the little-endian framebuffer window at `BAR0 + 0x7FF800`
+(NOT the optional BAR2 aux aperture, which is disabled and master-aborts).
+`tools/` has `mach64_peek` (register read) and `mach64_poke` (scratch write),
+both run on hardware.  `make` still builds/runs `hosttest/` for the portable
+emission core.
 
 ## Layout
 
