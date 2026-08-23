@@ -36,7 +36,6 @@ static const uint32_t gld_node_templates[GLD_NNODES][GLD_NODE_WORDS] = {
 
 int gldChoosePixelFormat(void **pf_out, const int *attribs)
 {
-    char *blk;
     uint32_t *node[GLD_NNODES];
     int i;
 
@@ -46,31 +45,32 @@ int gldChoosePixelFormat(void **pf_out, const int *attribs)
     if (!pf_out) return 0x271e;
     *pf_out = 0;
 
-    /* One contiguous block of GLD_NNODES nodes (0x40 each, padded past the 0x34
-     * the framework reads) so gldDestroyPixelFormat frees it with the head ptr.
-     * The framework only rewrites our TAIL's next (to append the next renderer);
-     * our internal chain stays within the block. */
-    blk = (char *)calloc(GLD_NNODES, 0x40);
-    if (!blk) return 0x2720;
+    /* Each node is a SEPARATE malloc: glcAddFormatToCache memcpy's every node
+     * into its own cache and then frees our originals one-by-one (free() on each
+     * list link) -- a contiguous block gave it mid-block pointers to free, which
+     * tripped malloc's "pointer not malloced" guard.  We do NOT free these
+     * ourselves (the framework owns them after return -> gldDestroyPixelFormat
+     * is a no-op).  0x40 bytes each (>= the 0x34 the framework reads/copies). */
     for (i = 0; i < GLD_NNODES; i++) {
-        node[i] = (uint32_t *)(blk + i * 0x40);
+        node[i] = (uint32_t *)calloc(1, 0x40);
+        if (!node[i]) return 0x2720;
         memcpy(node[i], gld_node_templates[i], GLD_NODE_WORDS * 4);
     }
     for (i = 0; i < GLD_NNODES - 1; i++)
         node[i][0] = (uint32_t)node[i + 1];   /* PPC32: pointer fits in a word */
     node[GLD_NNODES - 1][0] = 0;               /* our tail (framework appends here) */
 
-    *pf_out = blk;
-    gld_log("  -> ACCEPT: emitted %d captured config nodes, head=%p\n",
-            GLD_NNODES, (void *)blk);
+    *pf_out = node[0];
+    gld_log("  -> ACCEPT: emitted %d captured config nodes (separate allocs), head=%p\n",
+            GLD_NNODES, (void *)node[0]);
     return 0;
 }
 
 int gldDestroyPixelFormat(void *pf)
 {
-    /* Head pointer is the block base; one free releases all our nodes.  (The
-     * framework's appended nodes belong to the other renderer -- not ours to
-     * free -- and live outside this block, so we never touch them.) */
-    if (pf) free(pf);
+    /* No-op: glcAddFormatToCache already freed the nodes we returned (it takes
+     * ownership after copying them into its cache).  Freeing here would be a
+     * double free. */
+    (void)pf;
     return 0;
 }
