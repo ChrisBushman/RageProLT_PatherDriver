@@ -64,6 +64,8 @@ int main(int argc, char **argv)
     unsigned char table[0x80]; gld_render_fn render_tris;
     unsigned char *va; void *SURF; int attribs[] = { 8,32, 12,16, 5, 73, 0 };
 
+    setbuf(stdout, NULL);   /* unbuffered: over SSH we must see WHERE it stops */
+
     url = CFURLCreateFromFileSystemRepresentation(NULL, (const UInt8 *)path, strlen(path), true);
     b = CFBundleCreate(NULL, url);
     if (!b) { fprintf(stderr, "CFBundleCreate failed: %s\n", path); return 1; }
@@ -89,21 +91,32 @@ int main(int argc, char **argv)
     printf("gldCreateContext -> %d, ctx=%p connect=0x%x\n", rc, (void*)ctx, ctx?ctx->connect:0);
     if (rc || !ctx) { fprintf(stderr, "create failed (is the kext loaded?)\n"); return 1; }
 
-    g_srt(ctx, TARGET_OFF, PITCH_PIX);
+    g_srt(ctx, TARGET_OFF, PITCH_PIX);        /* no MMIO: sets shadow state only */
     SURF = ctx->regs;                         /* MACH64_MEM_SURFACE mapping */
-    for (y=0;y<128;y++) for (x=0;x<128;x++)
-        OSWriteLittleInt32(SURF, TARGET_OFF + y*ROW_BYTES + x*4, 0);
 
     memset(table, 0, sizeof table);
     g_update(ctx, table, 0);
     render_tris = *(gld_render_fn *)(table + 0x28);
-    printf("gldUpdateDispatch -> table[0x28]=%p\n\n", (void*)render_tris);
+    printf("gldUpdateDispatch -> table[0x28]=%p\n", (void*)render_tris);
 
+    /* Everything above touches NO engine registers (kext owns the engine).  The
+     * render below activates bus-master DMA on the shared engine, so it is gated
+     * behind an explicit 'render' arg -- run the safe lifecycle check first. */
+    if (!(argc > 2 && strcmp(argv[2], "render") == 0)) {
+        printf("\nLIFECYCLE OK (safe mode, no DMA). Re-run with 'render' to draw.\n");
+        g_destroy(ctx); g_destroypf(pf);
+        printf("gldDestroyContext + gldDestroyPixelFormat OK\n");
+        return 0;
+    }
+
+    for (y=0;y<128;y++) for (x=0;x<128;x++)
+        OSWriteLittleInt32(SURF, TARGET_OFF + y*ROW_BYTES + x*4, 0);
     va = calloc(3, MACH64_GLIVERTEX_STRIDE);
     put_vertex(va + 0*MACH64_GLIVERTEX_STRIDE,  20,  16, 0xFFFF0000u);
     put_vertex(va + 1*MACH64_GLIVERTEX_STRIDE, 110,  44, 0xFF00FF00u);
     put_vertex(va + 2*MACH64_GLIVERTEX_STRIDE,  50, 116, 0xFF0000FFu);
 
+    printf("\ncalling table[0x28](ctx, verts, 3) -> render -> kext ring\n");
     render_tris(ctx, va, 3);
     g_finish(ctx);
 

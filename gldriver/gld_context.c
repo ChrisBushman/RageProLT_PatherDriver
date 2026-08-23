@@ -74,10 +74,12 @@ int gldCreateContext(gld_context **outp, void *pixfmt, void *shared,
                                   &ctx->device_info[0], &ctx->device_info[1],
                                   &ctx->device_info[2]);
 
-    /* Map the four hardware regions (types & order from the disassembly). */
-    IOByteCount sz;
-    IOConnectMapMemory(ctx->connect, MACH64_MEM_REGISTERS, mach_task_self(),
-                       (vm_address_t *)&ctx->cmd_regs, &sz, kIOMapAnywhere | kIOMapInhibitCache);
+    /* Map the hardware regions we actually use.  NOTE: we deliberately do NOT
+     * map type 0 (MACH64_MEM_REGISTERS = BAR2, the disabled aux aperture that
+     * master-aborts on this board) -- unlike the reference driver, our register
+     * access lives in the kext (rotateCommandBuffer), so the userspace plugin
+     * never needs it.  Mapping it is pointless and risks wedging the bus. */
+    IOByteCount sz; (void)sz;
     IOConnectMapMemory(ctx->connect, MACH64_MEM_SURFACE, mach_task_self(),
                        (vm_address_t *)&ctx->regs, (IOByteCount *)&ctx->regs_size, kIOMapAnywhere | kIOMapInhibitCache);
     IOConnectMapMemory(ctx->connect, MACH64_MEM_CONTROL, mach_task_self(),
