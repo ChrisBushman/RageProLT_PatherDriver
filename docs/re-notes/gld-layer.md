@@ -29,19 +29,44 @@ Key facts locked in by this:
 - `mach64_priv` backend (shadow state + dirty + last_stamp) hangs off
   `gld_context.backend`; state re-emitted only when dirty.
 
-## ⛔ Still stubbed: the GLEngine <-> gld dispatch ABI
+## ✅ Render dispatch PROVEN on hardware (mach64_primtest)
 
-The one piece we can't derive from our own hardware work.  Unknowns:
-- what `gldUpdateDispatch` installs (function-pointer slots + order),
-- how GLEngine hands vertices to the plugin (array layout, the
-  Alloc/CompleteVertexBuffer calling convention),
-- exact `gldGetRendererInfo` caps struct + `gldChoosePixelFormat` attribs.
+The render-slot bodies (`gld_prims.c`) + `gldUpdateDispatch` (`gld_dispatch.c`)
+are implemented and validated: a synthetic 0x100-stride vertex array driven
+THROUGH the dispatch table (install -> fetch table[0x28] -> call it, the way
+GLEngine does) drew the gouraud triangle via the kext ring (covered=507, R/G/B
+balanced).  This confirms all at once:
+- `gldUpdateDispatch` installs the render funcs at the recovered slot offsets
+  (`table[0x28]` held our `mach64_render_triangles`, `table[0x58]`=Finish).
+- calling through the slot invokes the body with `f(ctx, verts, count)`.
+- **the recovered incoming vertex layout is CORRECT** — `mach64_read_vertex`
+  read X_Y@0x30 / ARGB@0x34 / Z@0x38 from the 0x100-stride vertex and it drew.
+- render body -> `mach64_draw_triangle` -> m64_emit -> ring -> pixels.
 
-**Reference for this:** `ATIRage128GLDriver.bundle/Contents/MacOS/
-ATIRage128GLDriver` (Mach-O bundle ppc, on /Volumes/macUSB) — the sibling driver
-that DOES ship a GL bundle.  Disassemble its `gldUpdateDispatch` + vertex entry
-points to recover the ABI, then wire GLEngine's primitive callbacks to
-`mach64_draw_triangle`.  That turns the proven core into a loadable bundle.
+Triangle family complete (triangles/strip/fan/polygon/quads/quad_strip).
+Points/lines are TODO (setup engine is triangle-only -> need sprite/quad
+expansion).  Indexed (elts) vector reuses the array bodies for now.
+
+## ⛔ Remaining before a GLEngine-loadable bundle
+
+The dispatch ABI is now RECOVERED (slots, calling convention, vertex layout —
+below) and the render path is proven.  What's left is the context/format
+handshake + packaging, none of it a hardware unknown:
+- `gldChoosePixelFormat` attribs + `gldGetRendererInfo` caps struct: finish
+  from the reference bundle so `OpenGL.framework` accepts our renderer.
+- `gldCreateContext`: bind the drawable's surface as the render target
+  (`mach64_set_render_target` from get_surface_info) and install our dispatch.
+- the **build-vertex hook**: what fills the 0x100 incoming vertex (does the
+  float->fixed x*4 + colour pack).  In Apple's driver this is a callback GLEngine
+  calls before the render slots; we either provide one or advertise a vertex
+  format we can consume directly.  Our render body currently assumes the
+  recovered pre-packed layout (proven with a synthetic array).
+- points/lines expansion; indexed (elts) path; texture/blend/depth state.
+- export the 55 gld* symbols + Info.plist; drop the bundle where the framework
+  finds it and let it load.
+
+**Reference:** `ATIRage128GLDriver.bundle/Contents/MacOS/ATIRage128GLDriver`
+(Mach-O bundle ppc, /Volumes/macUSB).
 
 ### Dispatch-table layout (first pass, from disassembly)
 
