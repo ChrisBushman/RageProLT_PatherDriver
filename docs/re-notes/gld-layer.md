@@ -108,9 +108,51 @@ state re-setup if unchanged), **0xac** = command-buffer base, **0xb0** = cmdbuf
 current ptr, **0xb4** = cmdbuf end, **0x74/0x80** = a float scale (depth /
 one-over-area). Vertex stride in the incoming array = **0x44 (68 bytes)**.
 
-Wiring plan: implement the ~10 render slots as loops that pull `count` verts (at
-stride 0x44) from `start`, decompose per primitive, and call our
-`mach64_draw_triangle`; point 0x58/0x5c at gldFinish/gldFlush; 0x4c at our
-submit.  The remaining unknown is the exact incoming vertex struct layout at
-stride 0x44 — recover it from gldCreateVertexArray (0x8254) / the emit funcs'
-field reads.
+Wiring plan: implement the ~10 render slots as loops that pull `count` verts
+from `start`, decompose per primitive, and call our `mach64_draw_triangle`;
+point 0x58/0x5c at gldFinish/gldFlush; 0x4c at our submit.
+
+### Incoming vertex layout (RECOVERED from the TRIANGLES emit, slot 0x28)
+
+gldCreateVertexArray/Modify/Flush are STUBS (`li r3,0; blr`) — the Rage128 driver
+does NOT implement vertex arrays; GLEngine uses the immediate render-dispatch
+path. So the layout comes from how the render funcs copy each incoming vertex
+into the command buffer (0x5d28c..0x5d428).
+
+- **Incoming vertex stride = 0x100 (256 bytes)** (`addi r30, r30, 0x100` at the
+  loop back-edge). This is the big Apple gli/driver vertex.
+- **Outgoing hardware vertex = 0x44 (17 dwords)** per vertex in the command
+  buffer, written with **`stwbrx`** (byte-reversed = little-endian; confirms the
+  plugin does the BE→LE swap, not the kext).
+- Apple's command buffer uses **vendor-opcode packets** (header top byte 0xc0…,
+  plus `0x3b7` and `(count<<16)|regidx` words) — NOT the raw-ADRINDEX format our
+  kext proved. We keep our simpler format; this table is only for the field
+  SEMANTICS.
+
+Copy order maps to the mach64 setup-FIFO order (S,T,W,SPEC,Z,ARGB,X_Y,…), giving
+the incoming-vertex field offsets:
+
+| hw field | incoming offset | notes |
+|----------|-----------------|-------|
+| S  (tex0 s)  | 0x00 | float, copied raw |
+| T  (tex0 t)  | 0x04 | float, copied raw |
+| W            | 0x08 | float + `ctx[0x74]` bias (W or depth-range adj — TBD) |
+| SPEC_ARGB    | 0x0c | |
+| Z            | 0x38 | depth |
+| **ARGB**     | 0x34 | packed primary colour (hardware-ready) |
+| **X_Y**      | 0x30 | packed fixed-point screen pos (hardware-ready) |
+| (4th pos/sec)| 0x3c | |
+| tex1 S,T,W   | 0x58,0x54,0x50 | secondary texture unit |
+| tex? / fog   | 0x4c, 0x80,0x84, 0x90,0x94,0x9c | extended attrs (multitexture) |
+
+**Key result:** X_Y (0x30), ARGB (0x34), Z (0x38) arrive **already packed to
+hardware format** — an upstream build-vertex step (a dispatch callback, not the
+stubbed vertex-array API) does the float→fixed x*4 and colour packing. That's
+exactly what our `mach64_pack_vertex` + `m64_vertex` produce, so our design is
+aligned: our render-slot bodies read in[0x30]/in[0x34]/in[0x38] straight into the
+hw vertex (or, since we own the build step, use our own layout). S,T,W are floats
+for texturing; for the untextured gouraud path only Z/ARGB/X_Y (+ W=1.0) matter.
+
+Confidence: stride 0x100 and the offset→FIFO-order copy are solid (directly
+disassembled); the S/T/W/SPEC vs Z/ARGB/X_Y naming follows the mach64 FIFO order
+and is well-supported; the extended tex/fog fields (0x4c/0x80+) are inferred.
