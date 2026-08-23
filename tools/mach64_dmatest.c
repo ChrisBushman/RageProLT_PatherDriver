@@ -20,7 +20,10 @@
 #include <libkern/OSByteOrder.h>
 #include <mach/mach.h>
 #include <stdio.h>
+#include <string.h>
 #include "../common/mach64_abi.h"
+
+#define RAM_LIMIT  0x20000000u   /* 512MB; bus addr must be valid RAM */
 
 #define REG_WINDOW    0x7FF800u
 #define SCRATCH_REG1  0x0484
@@ -61,12 +64,13 @@ static unsigned mapmem(io_connect_t c, unsigned type)
     return a;
 }
 
-int main(void)
+int main(int argc, char **argv)
 {
     io_service_t svc; io_connect_t conn; kern_return_t kr;
     vm_address_t fb=0; vm_size_t fbs=0;
     unsigned cmdbus=0, ringbus=0, cfg=0;
     unsigned save_bus, save_src, save_tbl, before, after;
+    int valid, go;
 
     svc=IOServiceGetMatchingService(kIOMasterPortDefault,IOServiceMatching("Mach64Accelerator"));
     if(!svc){fprintf(stderr,"no service\n");return 1;}
@@ -80,8 +84,17 @@ int main(void)
 
     /* get_config -> bus addresses (this build) */
     IOConnectMethodScalarIScalarO(conn, kMach64Sel_get_config, 0, 3, &cmdbus, &ringbus, &cfg);
-    printf("cmdbuf bus=0x%08x  ring bus=0x%08x\n", cmdbus, ringbus);
-    if(!cmdbus||!ringbus){fprintf(stderr,"no bus addresses\n");goto out;}
+    printf("cmdbuf bus=0x%08x  ring bus=0x%08x  (RAM limit 0x%08x)\n", cmdbus, ringbus, RAM_LIMIT);
+
+    /* HARD SAFETY GUARD: never activate DMA with an out-of-range bus address
+     * (that panicked the kernel last time -- addr was ~0xd0320000 > RAM). */
+    valid = cmdbus>=0x1000 && cmdbus<RAM_LIMIT && ringbus>=0x1000 && ringbus<RAM_LIMIT;
+    printf("bus addresses: %s\n", valid ? "VALID (in RAM)" :
+           "*** INVALID -- refusing to activate DMA ***");
+    if(!valid) goto out;
+
+    go = (argc>1 && strcmp(argv[1],"go")==0);
+    if(!go){ printf("\nDRY RUN ok. Re-run with 'go' to actually activate DMA.\n"); goto out; }
 
     /* command buffer: single reg write SCRATCH_REG1 = TESTVAL */
     cw(0, ADRINDEX(SCRATCH_REG1));   /* header: count 0, reg index */

@@ -62,11 +62,15 @@ bool Mach64Accelerator::start(IOService *provider)
     fRing   = IOBufferMemoryDescriptor::withOptions(dmaOpts, 0x4000, PAGE_SIZE);
     if (!fControl || !fCmdBuf || !fRing) return false;
 
+    /* prepare() wires the pages so getPhysicalSegment returns REAL physical
+     * addresses (without it we got ~0xd0320000, above the 512MB RAM -> panic). */
+    fCmdBuf->prepare(kIODirectionOutIn);
+    fRing->prepare(kIODirectionOutIn);
     IOByteCount seg;
     fCmdBufBus = fCmdBuf->getPhysicalSegment(0, &seg);
     fRingBus   = fRing->getPhysicalSegment(0, &seg);
-    IOLog("Mach64Accelerator: cmdbuf bus=0x%08lx ring bus=0x%08lx\n",
-          (unsigned long)fCmdBufBus, (unsigned long)fRingBus);
+    IOLog("Mach64Accelerator: cmdbuf bus=0x%08lx ring bus=0x%08lx (physmem=0x%lx)\n",
+          (unsigned long)fCmdBufBus, (unsigned long)fRingBus, (unsigned long)0x20000000);
 
     fStamp   = 0;
     /* Real values come from reading CONFIG_CHIP_ID / memory config; the plugin
@@ -89,8 +93,8 @@ void Mach64Accelerator::free(void)
     if (fRegs)    { fRegs->release();    fRegs = 0; }
     if (fFB)      { fFB->release();      fFB = 0; }
     if (fControl) { fControl->release(); fControl = 0; }
-    if (fCmdBuf)  { fCmdBuf->release();  fCmdBuf = 0; }
-    if (fRing)    { fRing->release();    fRing = 0; }
+    if (fCmdBuf)  { fCmdBuf->complete(); fCmdBuf->release(); fCmdBuf = 0; }
+    if (fRing)    { fRing->complete();   fRing->release();   fRing = 0; }
     super::free();
 }
 
