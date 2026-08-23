@@ -77,13 +77,13 @@ int gldCreateContext(gld_context **outp, void *pixfmt, void *shared,
     /* Map the four hardware regions (types & order from the disassembly). */
     IOByteCount sz;
     IOConnectMapMemory(ctx->connect, MACH64_MEM_REGISTERS, mach_task_self(),
-                       (vm_address_t *)&ctx->cmd_regs, &sz, kIOMapAnywhere);
+                       (vm_address_t *)&ctx->cmd_regs, &sz, kIOMapAnywhere | kIOMapInhibitCache);
     IOConnectMapMemory(ctx->connect, MACH64_MEM_SURFACE, mach_task_self(),
-                       (vm_address_t *)&ctx->regs, (IOByteCount *)&ctx->regs_size, kIOMapAnywhere);
+                       (vm_address_t *)&ctx->regs, (IOByteCount *)&ctx->regs_size, kIOMapAnywhere | kIOMapInhibitCache);
     IOConnectMapMemory(ctx->connect, MACH64_MEM_CONTROL, mach_task_self(),
-                       (vm_address_t *)&ctx->surface, (IOByteCount *)&ctx->surface_size, kIOMapAnywhere);
+                       (vm_address_t *)&ctx->surface, (IOByteCount *)&ctx->surface_size, kIOMapAnywhere | kIOMapInhibitCache);
     IOConnectMapMemory(ctx->connect, MACH64_MEM_CMDBUF, mach_task_self(),
-                       (vm_address_t *)&ctx->fb, (IOByteCount *)&ctx->fb_size, kIOMapAnywhere);
+                       (vm_address_t *)&ctx->fb, (IOByteCount *)&ctx->fb_size, kIOMapAnywhere | kIOMapInhibitCache);
 
     /* Allocate + initialize our backend (shadow registers, gouraud defaults).
      * Kept separate from Apple's 0x200 struct so we can grow it freely. */
