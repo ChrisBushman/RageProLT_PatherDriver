@@ -1,22 +1,20 @@
 /*
- * mach64_gouraud.c - per-vertex (gouraud) 3D triangle via the REAL bus-master
- * DMA ring (proven in mach64_dmatest).  The setup engine interpolates the three
- * vertex colors across the triangle; the pixel color comes from the 3D scaler
- * (DP_SRC = BKGD/FRGD_SRC_3D), not the flat DP_FRGD_CLR.
+ * mach64_gouraud.c - find the per-vertex (gouraud) color config for the mach64
+ * setup engine.  The DMA ring already draws the correct triangle SHAPE, but the
+ * color comes back uniformly white (0xffffffff) -- the vertex ARGB isn't
+ * reaching the color interpolator.
  *
- * Why DMA: individual MMIO writes to VERTEX_n_ARGB don't latch into the
- * interpolator (flat triangle works, gouraud reads back white).  The DRI submits
- * the vertices as a register-write STREAM through the bus-master GUI path
- * ("Mach64's vertex data is actually register writes", drm_mach64_state.c) --
- * which we now know reaches the GUI drawing-engine block.
+ * Rather than one guess per hardware round-trip, this sweeps several state
+ * combinations in a SINGLE run, each drawn via the bus-master DMA ring into its
+ * own off-screen buffer, then reports the sampled colors so we can see which
+ * knob turns on color interpolation.  Hypotheses under test:
+ *   - vertex W (perspective): unset W -> color/W saturates to white
+ *   - SETUP_CNTL 0 (mesa) vs 0x40 (our flat-triangle value)
+ *   - SCALE_3D_CNTL minimal 0x100c1 vs mesa-full 0x0b4100cb
  *
- * Flow: set static 3D state via MMIO -> build a DMA command buffer with the 3
- * vertex packets + the ONE_OVER_AREA_UC trigger + a SRC_CNTL=0 terminator ->
- * point a ring descriptor at it -> quiesce/save ATIRagePro's DMA regs ->
- * activate bus-master + kick -> restore -> read back the off-screen gradient.
- *
- * Requires 'go' to actually activate DMA (same safety model as mach64_dmatest).
- * Build with -framework IOKit.
+ * Vertices are submitted as a DMA register-write stream (proven in
+ * mach64_dmatest); DP_SRC = BKGD/FRGD_SRC_3D so the pixel color is the scaler's
+ * interpolated output.  Requires 'go'.  Build with -framework IOKit.
  */
 #include <IOKit/IOKitLib.h>
 #include <libkern/OSByteOrder.h>
@@ -29,13 +27,11 @@
 #define REG_WINDOW    0x7FF800u
 #define APERTURE_OFFSET 0x7ff800u
 
-/* 3D state registers (verified working in mach64_tri.c) */
 #define SETUP_CNTL       0x0304
 #define ONE_OVER_AREA_UC 0x0300
 #define DST_OFF_PITCH    0x0500
 #define Z_CNTL           0x054c
 #define SCALE_3D_CNTL    0x05fc
-#define DP_FRGD_CLR      0x06c4
 #define SC_LEFT_RIGHT    0x06a8
 #define SC_TOP_BOTTOM    0x06b4
 #define DP_WRITE_MASK    0x06c8
@@ -45,9 +41,9 @@
 #define CLR_CMP_CNTL     0x0708
 #define FIFO_STAT        0x0710
 #define GUI_STAT         0x0738
-#define VTX_Z(n)         (0x0240 + (n)*0x20 + 0x10)   /* VERTEX_1/2/3_Z */
+#define VTX_BASE(n)      (0x0240 + (n)*0x20)    /* S,T,W,SPEC,Z,ARGB,X_Y block */
+#define VTX_Z(n)         (VTX_BASE(n) + 0x10)
 
-/* bus-master DMA registers */
 #define BUS_CNTL         0x04a0
 #define SRC_CNTL         0x05b4
 #define DST_HEIGHT_WIDTH 0x0518
@@ -67,11 +63,11 @@
 #define GUI_ACTIVE       0x00000001u
 #define PITCH_PIX        128
 #define ROW_BYTES        (PITCH_PIX*4)
-#define TARGET_OFF       0x600000u
+#define ONE_F            0x3f800000u             /* 1.0f */
 #define ADRINDEX(r)  ((unsigned)((r) >= 0x400 ? (((r)-0x400)>>2) : (((r)>>2)|0x100)))
 
 static void mb(void){ __asm__ volatile("sync; eieio" ::: "memory"); }
-static unsigned REGB, FB, RING, CMD;
+static unsigned REGB, FB, RING, CMD, CMDBUS, RINGBUS;
 static unsigned rd(unsigned o){ return OSReadLittleInt32((void*)REGB, o); }
 static void     wr(unsigned o, unsigned v){ OSWriteLittleInt32((void*)REGB, o, v); }
 static void     rw(unsigned o, unsigned v){ OSWriteLittleInt32((void*)RING, o, v); }
@@ -88,21 +84,105 @@ static unsigned mapmem(io_connect_t c, unsigned type)
     return a;
 }
 
-static const unsigned ctx_regs[] = {
-    SCALE_3D_CNTL,SETUP_CNTL,Z_CNTL,DP_PIX_WIDTH,DST_OFF_PITCH,DP_FRGD_CLR,
-    SC_LEFT_RIGHT,SC_TOP_BOTTOM,DP_WRITE_MASK,DP_MIX,DP_SRC,CLR_CMP_CNTL };
-#define NCTX (sizeof(ctx_regs)/sizeof(ctx_regs[0]))
 static const int TX[3]={20,110,50}, TY[3]={16,44,116};
 static const unsigned VC[3]={0xFFFF0000u,0xFF00FF00u,0xFF0000FFu};  /* R,G,B */
-static unsigned pix(int x,int y){ return OSReadLittleInt32((void*)FB, TARGET_OFF + y*ROW_BYTES + x*4); }
+static unsigned pixT(unsigned t,int x,int y){ return OSReadLittleInt32((void*)FB, t + y*ROW_BYTES + x*4); }
+
+/* draw the RGB triangle into off-screen buffer `targ` with the given state,
+ * vertices submitted via the DMA ring.  full=1 writes the whole vertex block
+ * (incl W=1.0); full=0 writes only {Z,ARGB,X_Y}. */
+static void draw(unsigned targ, unsigned setup, unsigned scale, unsigned dpsrc, int full)
+{
+    int i,x,y,xx[3],yy[3]; double area; float ooa; unsigned oob, off, save_bus,save_src,save_tbl;
+
+    for(y=0;y<128;y++) for(x=0;x<128;x++) OSWriteLittleInt32((void*)FB, targ + y*ROW_BYTES + x*4, 0);
+    for(i=0;i<3;i++){ xx[i]=TX[i]*4; yy[i]=TY[i]*4; }
+    area=(1.0/16.0)*((double)(xx[0]-xx[2])*(yy[1]-yy[2])-(double)(yy[0]-yy[2])*(xx[1]-xx[2]));
+    ooa=(float)(1.0/area); memcpy(&oob,&ooa,4);
+
+    widle();
+    ewr(SCALE_3D_CNTL, scale);
+    ewr(SETUP_CNTL,    setup);
+    ewr(Z_CNTL,        0);
+    ewr(DP_PIX_WIDTH,  0x60060666);
+    ewr(DST_OFF_PITCH, ((PITCH_PIX/8)<<22)|(targ>>3));
+    ewr(SC_LEFT_RIGHT, 0x1fff0000);
+    ewr(SC_TOP_BOTTOM, 0x3fff0000);
+    ewr(DP_WRITE_MASK, 0xffffffff);
+    ewr(CLR_CMP_CNTL,  0);
+    ewr(DP_MIX,        0x00070007);
+    ewr(DP_SRC,        dpsrc);
+    widle();
+
+    /* command buffer: 3 vertex packets + trigger + terminator */
+    off = 0;
+    for(i=0;i<3;i++){
+        if(full){
+            cw(off, ADRINDEX(VTX_BASE(i)) | (6u<<16)); off+=4;  /* S,T,W,SPEC,Z,ARGB,X_Y */
+            cw(off, 0);                                off+=4;  /* S    */
+            cw(off, 0);                                off+=4;  /* T    */
+            cw(off, ONE_F);                            off+=4;  /* W=1.0 */
+            cw(off, 0);                                off+=4;  /* SPEC_ARGB */
+            cw(off, 0);                                off+=4;  /* Z    */
+            cw(off, VC[i]);                            off+=4;  /* ARGB */
+            cw(off, (xx[i]<<16)|(yy[i]&0xffff));       off+=4;  /* X_Y  */
+        } else {
+            cw(off, ADRINDEX(VTX_Z(i)) | (2u<<16));    off+=4;  /* Z,ARGB,X_Y */
+            cw(off, 0);                                off+=4;
+            cw(off, VC[i]);                            off+=4;
+            cw(off, (xx[i]<<16)|(yy[i]&0xffff));       off+=4;
+        }
+    }
+    cw(off, ADRINDEX(ONE_OVER_AREA_UC) | (0u<<16));    off+=4;
+    cw(off, oob);                                      off+=4;
+    cw(off, ADRINDEX(SRC_CNTL) | (0u<<16));            off+=4;
+    cw(off, 0);                                        off+=4;
+
+    rw(0, APERTURE_OFFSET + BM_ADDR);
+    rw(4, CMDBUS);
+    rw(8, off | DMA_HOLD_OFFSET | DMA_EOL);
+    rw(12, 0);
+
+    save_bus=rd(BUS_CNTL); save_src=rd(SRC_CNTL); save_tbl=rd(BM_GUI_TABLE);
+    mb(); widle();
+    wr(BUS_CNTL, (save_bus & ~BUS_MASTER_DIS) | BUS_EXT_REG_EN);
+    wr(BM_GUI_TABLE_CMD, RINGBUS);
+    wr(SRC_CNTL, SRC_BM_ENABLE | SRC_BM_SYNC | SRC_BM_OP_SYSTEM_TO_REG);
+    mb();
+    wr(DST_HEIGHT_WIDTH, 0);           /* kick */
+    widle();
+    wr(SRC_CNTL, save_src);
+    wr(BM_GUI_TABLE_CMD, save_tbl & 0xfffffff0);
+    wr(BUS_CNTL, save_bus);
+    widle();
+}
+
+/* sample the 3 near-vertex interior points + centroid, classify the result */
+static void report(int n, const char *desc, unsigned t)
+{
+    unsigned a=pixT(t,26,30), b=pixT(t,96,50), c=pixT(t,52,102), ce=pixT(t,58,58);
+    const char *verdict;
+    if(!a && !b && !c && !ce)                 verdict="EMPTY (no triangle)";
+    else if(a==0xffffffff&&b==0xffffffff&&c==0xffffffff) verdict="WHITE (color path off)";
+    else if(a!=b && b!=c && a!=c)             verdict="*** VARIES -> GOURAUD! ***";
+    else                                       verdict="FLAT (single color)";
+    printf("  [%d] %-34s v0=%08x v1=%08x v2=%08x cen=%08x  %s\n",
+           n, desc, a,b,c,ce, verdict);
+}
 
 int main(int argc, char **argv)
 {
     io_service_t svc; io_connect_t conn; kern_return_t kr;
-    vm_address_t fb=0; vm_size_t fbs=0; unsigned saved[NCTX];
-    unsigned cmdbus=0, ringbus=0, cfg=0, off, count;
-    unsigned save_bus, save_src, save_tbl;
-    int i,x,y,xx[3],yy[3],go,valid; double area; float ooa; unsigned oob;
+    vm_address_t fb=0; vm_size_t fbs=0; unsigned cfg=0; int go,valid;
+    /* sweep table: {target, setup_cntl, scale_3d_cntl, dp_src, full_vertex} */
+    struct { unsigned targ,setup,scale,dpsrc; int full; const char *desc; } S[] = {
+        {0x600000u, 0x40, 0x000100c1u, 0x0505u, 0, "base: setup=40 scale=100c1 min"},
+        {0x610000u, 0x40, 0x000100c1u, 0x0505u, 1, "+W:   setup=40 scale=100c1 full"},
+        {0x620000u, 0x00, 0x000100c1u, 0x0505u, 1, "setup=0 scale=100c1 full+W"},
+        {0x630000u, 0x00, 0x0b4100cbu, 0x0505u, 1, "setup=0 scale=b4100cb full+W"},
+        {0x640000u, 0x00, 0x000100c1u, 0x0505u, 0, "setup=0 scale=100c1 min"},
+    };
+    int i, N = sizeof(S)/sizeof(S[0]);
 
     svc=IOServiceGetMatchingService(kIOMasterPortDefault,IOServiceMatching("Mach64Accelerator"));
     if(!svc){fprintf(stderr,"no service\n");return 1;}
@@ -113,108 +193,18 @@ int main(int argc, char **argv)
     CMD=mapmem(conn,MACH64_MEM_CMDBUF);
     RING=mapmem(conn,MACH64_MEM_RING);
     if(!CMD||!RING){fprintf(stderr,"map cmd/ring failed\n");goto out;}
-
-    IOConnectMethodScalarIScalarO(conn, kMach64Sel_get_config, 0, 3, &cmdbus, &ringbus, &cfg);
-    printf("cmdbuf bus=0x%08x  ring bus=0x%08x\n", cmdbus, ringbus);
-    valid = cmdbus>=0x1000 && cmdbus<RAM_LIMIT && ringbus>=0x1000 && ringbus<RAM_LIMIT;
-    if(!valid){ printf("*** INVALID bus addr -- refusing to activate DMA ***\n"); goto out; }
+    IOConnectMethodScalarIScalarO(conn, kMach64Sel_get_config, 0, 3, &CMDBUS, &RINGBUS, &cfg);
+    printf("cmdbuf bus=0x%08x  ring bus=0x%08x\n", CMDBUS, RINGBUS);
+    valid = CMDBUS>=0x1000 && CMDBUS<RAM_LIMIT && RINGBUS>=0x1000 && RINGBUS<RAM_LIMIT;
+    if(!valid){ printf("*** INVALID bus addr -- refusing DMA ***\n"); goto out; }
     go = (argc>1 && strcmp(argv[1],"go")==0);
-    if(!go){ printf("DRY RUN ok (addresses valid). Re-run with 'go' to draw.\n"); goto out; }
+    if(!go){ printf("DRY RUN ok. Re-run with 'go' to draw the sweep.\n"); goto out; }
 
     if(widle()<0){fprintf(stderr,"not idle\n");goto out;}
-    for(i=0;i<(int)NCTX;i++) saved[i]=rd(ctx_regs[i]);
-    for(y=0;y<128;y++) for(x=0;x<128;x++) OSWriteLittleInt32((void*)FB, TARGET_OFF + y*ROW_BYTES + x*4, 0);
-    for(i=0;i<3;i++){ xx[i]=TX[i]*4; yy[i]=TY[i]*4; }
-    area=(1.0/16.0)*((double)(xx[0]-xx[2])*(yy[1]-yy[2])-(double)(yy[0]-yy[2])*(xx[1]-xx[2]));
-    ooa=(float)(1.0/area); memcpy(&oob,&ooa,4);
-    printf("gouraud triangle via DMA ring: v0=RED v1=GREEN v2=BLUE\n\n");
-
-    /* static 3D state via MMIO -- same as the working flat triangle, except
-     * DP_SRC selects the interpolating 3D scaler (gouraud) not DP_FRGD_CLR */
-    ewr(SCALE_3D_CNTL, 0x000100c1);
-    ewr(SETUP_CNTL,    0x00000040);      /* FLAT_SHADE bits clear -> smooth */
-    ewr(Z_CNTL,        0);
-    ewr(DP_PIX_WIDTH,  0x60060666);      /* ARGB8888 */
-    ewr(DST_OFF_PITCH, ((PITCH_PIX/8)<<22)|(TARGET_OFF>>3));
-    ewr(SC_LEFT_RIGHT, 0x1fff0000);
-    ewr(SC_TOP_BOTTOM, 0x3fff0000);
-    ewr(DP_WRITE_MASK, 0xffffffff);
-    ewr(CLR_CMP_CNTL,  0);
-    ewr(DP_MIX,        0x00070007);
-    ewr(DP_SRC,        (5u<<0)|(5u<<8)); /* BKGD/FRGD_SRC_3D = 0x0505 (gouraud) */
-    widle();
-
-    /* DMA command buffer: 3 vertex packets + trigger + terminator.
-     * Each vertex packet = header (3 consecutive regs) then Z, ARGB, X_Y:
-     *   header = ADRINDEX(VERTEX_n_Z) | ((3-1)<<16) */
-    off = 0;
-    for(i=0;i<3;i++){
-        cw(off, ADRINDEX(VTX_Z(i)) | (2u<<16));      off+=4;  /* Z,ARGB,X_Y */
-        cw(off, 0);                                  off+=4;  /* VERTEX_n_Z   */
-        cw(off, VC[i]);                              off+=4;  /* VERTEX_n_ARGB*/
-        cw(off, (xx[i]<<16)|(yy[i]&0xffff));         off+=4;  /* VERTEX_n_X_Y */
-    }
-    cw(off, ADRINDEX(ONE_OVER_AREA_UC) | (0u<<16));  off+=4;  /* trigger */
-    cw(off, oob);                                    off+=4;
-    cw(off, ADRINDEX(SRC_CNTL) | (0u<<16));          off+=4;  /* terminator */
-    cw(off, 0);                                      off+=4;
-    count = off;   /* byte count of the command buffer */
-
-    /* descriptor -> DMA the command buffer to the BM_ADDR data port */
-    rw(0,  APERTURE_OFFSET + BM_ADDR);
-    rw(4,  cmdbus);
-    rw(8,  count | DMA_HOLD_OFFSET | DMA_EOL);
-    rw(12, 0);
-
-    /* quiesce + save ATIRagePro's DMA state, activate, kick */
-    save_bus=rd(BUS_CNTL); save_src=rd(SRC_CNTL); save_tbl=rd(BM_GUI_TABLE);
-    mb();
-    if(widle()<0) fprintf(stderr,"warn: not idle before DMA\n");
-    wr(BUS_CNTL, (save_bus & ~BUS_MASTER_DIS) | BUS_EXT_REG_EN);
-    wr(BM_GUI_TABLE_CMD, ringbus);
-    wr(SRC_CNTL, SRC_BM_ENABLE | SRC_BM_SYNC | SRC_BM_OP_SYSTEM_TO_REG);
-    mb();
-    wr(DST_HEIGHT_WIDTH, 0);              /* kick */
-    if(widle()<0) fprintf(stderr,"warn: DMA didn't go idle (possible stall)\n");
-    printf("after kick: BM_GUI_TABLE=0x%08x (ring base 0x%08x) GUI_STAT=0x%08x\n\n",
-           rd(BM_GUI_TABLE), ringbus, rd(GUI_STAT));
-
-    /* restore ATIRagePro's DMA state + our 3D context */
-    wr(SRC_CNTL, save_src);
-    wr(BM_GUI_TABLE_CMD, save_tbl & 0xfffffff0);
-    wr(BUS_CNTL, save_bus);
-    for(i=0;i<(int)NCTX;i++){ wfifo(1); wr(ctx_regs[i],saved[i]); }
-    widle();
-
-    /* ASCII readback: dominant channel per covered pixel (R/G/B).  A gradient
-     * (>=2 distinct dominant channels) proves per-vertex color interpolation. */
-    {
-        int nfill=0, nR=0,nG=0,nB=0;
-        printf("off-screen readback (R/G/B = dominant channel, '.' = empty):\n");
-        for(y=0;y<124;y+=4){
-            printf("  ");
-            for(x=0;x<124;x+=2){
-                unsigned v=pix(x,y);
-                if(!v){ putchar('.'); continue; }
-                unsigned r=(v>>16)&0xff, g=(v>>8)&0xff, b=v&0xff;
-                nfill++;
-                if(r>=g && r>=b){ putchar('R'); nR++; }
-                else if(g>=r && g>=b){ putchar('G'); nG++; }
-                else { putchar('B'); nB++; }
-            }
-            putchar('\n');
-        }
-        printf("\nsamples: near-v0=0x%08x near-v1=0x%08x near-v2=0x%08x centroid=0x%08x\n",
-               pix(TX[0]+6,TY[0]+14), pix(TX[1]-14,TY[1]+6), pix(TX[2]+2,TY[2]-14), pix(58,58));
-        printf("covered=%d  dominant R=%d G=%d B=%d\n", nfill, nR,nG,nB);
-        {
-            int classes = (nR>0)+(nG>0)+(nB>0);
-            printf("\n%s\n", (nfill>50 && classes>=2)
-                ? "GOURAUD CONFIRMED: setup engine interpolated per-vertex colors via DMA!"
-                : (nfill>50 ? "shape drawn but single color -- gouraud didn't interpolate"
-                            : "triangle not present"));
-        }
-    }
+    printf("gouraud state sweep: v0=RED v1=GREEN v2=BLUE, each via DMA ring\n");
+    printf("(want per-vertex interpolation: v0~red, v1~green, v2~blue)\n\n");
+    for(i=0;i<N;i++){ draw(S[i].targ,S[i].setup,S[i].scale,S[i].dpsrc,S[i].full); report(i,S[i].desc,S[i].targ); }
+    printf("\nAny row marked VARIES has working gouraud -> use that state.\n");
 out:
     IOServiceClose(conn); return 0;
 }
