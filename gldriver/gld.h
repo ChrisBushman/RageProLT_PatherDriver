@@ -129,6 +129,7 @@ void gldUpdateDispatch(gld_context *ctx, void *table, uint32_t flags);
 int  gldAttachDrawable(gld_context *ctx, int type, void *drawable, uint32_t flags);
 const char *gldGetString(gld_context *ctx, uint32_t name);
 int  gldGetError(gld_context *ctx);
+int  gldGetVersion(int *v0, int *v1, int *v2, int *v3);  /* the discovery gate */
 int  gldGetInteger(gld_context *ctx, uint32_t pname, int *params);
 int  gldSetInteger(gld_context *ctx, uint32_t pname, int value);
 void gldInitDispatch(gld_context *ctx, void *table, uint32_t flags);

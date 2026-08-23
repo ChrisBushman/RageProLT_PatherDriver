@@ -66,6 +66,20 @@ const char *gldGetString(gld_context *ctx, uint32_t name)
     }
 }
 
+/* gldGetVersion: GLEngine looks this up by name IMMEDIATELY after
+ * gldInitializeLibrary and BAILS (never enumerating the renderer) if it is
+ * absent -- this was THE discovery gate.  Fills 4 version-component outputs;
+ * values taken from the reference bundle (2, 4, 0xb, 0x1000). */
+int gldGetVersion(int *v0, int *v1, int *v2, int *v3)
+{
+    gld_log("gldGetVersion()\n");
+    if (v0) *v0 = 2;
+    if (v1) *v1 = 4;
+    if (v2) *v2 = 0xb;
+    if (v3) *v3 = 0x1000;
+    return 1;
+}
+
 int gldGetError(gld_context *ctx) { (void)ctx; gld_log("gldGetError()\n"); return 0; }
 
 int gldGetInteger(gld_context *ctx, uint32_t pname, int *params)
