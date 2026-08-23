@@ -96,14 +96,19 @@ int main(int argc, char **argv)
     go = (argc>1 && strcmp(argv[1],"go")==0);
     if(!go){ printf("\nDRY RUN ok. Re-run with 'go' to actually activate DMA.\n"); goto out; }
 
-    /* command buffer: single reg write SCRATCH_REG1 = TESTVAL */
-    cw(0, ADRINDEX(SCRATCH_REG1));   /* header: count 0, reg index */
-    cw(4, TESTVAL);
+    /* command buffer: write SCRATCH_REG1=TESTVAL, then a SRC_CNTL=0 terminator.
+     * The DRI ends EVERY DMA buffer with SRC_CNTL=0 -- without it the bus master
+     * never flushes/commits the register write (engine walks the ring but the
+     * write doesn't land, exactly what we saw). */
+    cw(0,  ADRINDEX(SCRATCH_REG1));   /* header: count 0, reg index */
+    cw(4,  TESTVAL);
+    cw(8,  ADRINDEX(SRC_CNTL));       /* terminator: SRC_CNTL = 0 */
+    cw(12, 0);
 
-    /* descriptor: DMA the 8-byte command buffer to the BM_ADDR data port */
+    /* descriptor: DMA the 16-byte command buffer to the BM_ADDR data port */
     rw(0,  APERTURE_OFFSET + BM_ADDR);
     rw(4,  cmdbus);
-    rw(8,  8u | DMA_HOLD_OFFSET | DMA_EOL);
+    rw(8,  16u | DMA_HOLD_OFFSET | DMA_EOL);
     rw(12, 0);
 
     wr(SCRATCH_REG1, 0);
