@@ -86,6 +86,27 @@ int  mach64_draw_triangle(gld_context *ctx, const m64_vertex *v0,
                           const m64_vertex *v1, const m64_vertex *v2);
 uint32_t mach64_submit(gld_context *ctx, m64_cmdbuf *cb);
 
+/* ---- render-slot bodies + dispatch install (gld_prims.c/gld_dispatch.c)
+ * GLEngine calls these through the dispatch table with the recovered signature
+ * f(ctx, verts, count); `verts` points at the first of `count` incoming gli
+ * vertices at stride MACH64_GLIVERTEX_STRIDE.  See docs/re-notes/gld-layer.md. */
+#define MACH64_GLIVERTEX_STRIDE  0x100   /* incoming vertex stride (recovered) */
+typedef void (*gld_render_fn)(gld_context *ctx, const void *verts, uint32_t count);
+
+void mach64_read_vertex(const void *v, m64_vertex *out);   /* gli vtx -> hw vtx */
+void mach64_render_points     (gld_context *, const void *, uint32_t);
+void mach64_render_lines      (gld_context *, const void *, uint32_t);
+void mach64_render_line_strip (gld_context *, const void *, uint32_t);
+void mach64_render_line_loop  (gld_context *, const void *, uint32_t);
+void mach64_render_triangles  (gld_context *, const void *, uint32_t);
+void mach64_render_tri_strip  (gld_context *, const void *, uint32_t);
+void mach64_render_tri_fan    (gld_context *, const void *, uint32_t);
+void mach64_render_polygon    (gld_context *, const void *, uint32_t);
+void mach64_render_quads      (gld_context *, const void *, uint32_t);
+void mach64_render_quad_strip (gld_context *, const void *, uint32_t);
+
+void gldUpdateDispatch(gld_context *ctx, void *table, uint32_t flags);
+
 /* ---- The gld* entry points (subset; full list in ABI.md) ------------ */
 int  gldInitializeLibrary(void *);
 void gldTerminateLibrary(void);
@@ -94,7 +115,7 @@ int  gldChoosePixelFormat(void **pf, const int *attribs);
 int  gldCreateContext(gld_context **out, void *pixfmt, void *shared,
                       void *share_io, void *a7, void *a8, void *a9);
 int  gldDestroyContext(gld_context *ctx);
-void gldUpdateDispatch(gld_context *ctx, void *dispatch_table);
+/* gldUpdateDispatch declared above with the recovered 3-arg signature.    */
 /* vertex path -> new_vertex_buffer/delete_vertex_buffer selectors        */
 void *gldAllocVertexBuffer(gld_context *ctx, uint32_t size);
 int   gldCompleteVertexBuffer(gld_context *ctx, void *vb);
