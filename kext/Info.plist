@@ -5,11 +5,15 @@
   Mach64Accelerator kext Info.plist (skeleton).
 
   IOPCIMatch entries: vendor 0x1002 (ATI) + Rage LT Pro device IDs.
-    0x4c42 'LB'  3D Rage LT Pro (AGP)   <- verify against the Lombard's card
-    0x4c49 'LI'  3D Rage LT Pro
-    0x4c50 'LP'  3D Rage LT Pro (PCI)
-  Confirm the actual device id on the target with:  ioreg -l | grep -i display
-  or from Open Firmware.  The Lombard uses a Rage LT Pro variant on PCI.
+    0x4c49 'LI'  3D Rage LT Pro  <-- VERIFIED on this Lombard (rev 0xdc)
+    0x4c42 'LB'  3D Rage LT Pro (AGP)   } kept as fallbacks for other
+    0x4c50 'LP'  3D Rage LT Pro (PCI)   } LT Pro board variants
+
+  Verified via ioreg on the target 2026-08-22:
+    node  ATY,LTProParent@11  (IOPCIDevice, PCI dev 0x11)
+    vendor-id=0x1002  device-id=0x4c49  revision-id=0xdc
+    model="ATY,LT-C"  compatible="ATY,264LTPro"  MEMSIZE=0x800000 (8MB)
+    two heads: ATY,264LTProA / ATY,264LTProB (dual CRTC)
 -->
 <plist version="1.0">
 <dict>
@@ -31,7 +35,7 @@
       <key>IOClass</key>             <string>Mach64Accelerator</string>
       <key>IOProviderClass</key>     <string>IOPCIDevice</string>
       <key>IOPCIMatch</key>
-      <string>0x4c421002 0x4c491002 0x4c501002</string>
+      <string>0x4c491002 0x4c421002 0x4c501002</string>
       <!-- The GL user client class the plugin opens with type=1 -->
       <key>IOUserClientClass</key>   <string>Mach64GLUserClient</string>
     </dict>
