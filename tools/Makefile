@@ -3,7 +3,12 @@ CC     ?= cc
 CFLAGS ?= -O2 -Wall -std=gnu99
 
 .PHONY: all clean
-all: mach64_peek mach64_poke mach64_fill mach64_tri mach64_gouraud mach64_dmatest mach64_ringtest
+all: mach64_peek mach64_poke mach64_fill mach64_tri mach64_gouraud mach64_dmatest mach64_ringtest mach64_gldtest
+
+# links the REAL gld translation sources to prove them on hardware
+GLD_SRC := ../gldriver/gld_render.c ../gldriver/gld_state.c ../common/mach64_emit.c
+mach64_gldtest: mach64_gldtest.c $(GLD_SRC) ../gldriver/gld.h ../common/mach64_abi.h ../common/mach64_regs.h
+	$(CC) $(CFLAGS) -I.. -o $@ mach64_gldtest.c $(GLD_SRC) -framework IOKit
 
 mach64_ringtest: mach64_ringtest.c ../common/mach64_abi.h ../common/mach64_regs.h
 	$(CC) $(CFLAGS) -o $@ mach64_ringtest.c -framework IOKit
