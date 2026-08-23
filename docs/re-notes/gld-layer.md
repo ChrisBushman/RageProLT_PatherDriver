@@ -42,3 +42,26 @@ ATIRage128GLDriver` (Mach-O bundle ppc, on /Volumes/macUSB) — the sibling driv
 that DOES ship a GL bundle.  Disassemble its `gldUpdateDispatch` + vertex entry
 points to recover the ABI, then wire GLEngine's primitive callbacks to
 `mach64_draw_triangle`.  That turns the proven core into a loadable bundle.
+
+### Dispatch-table layout (first pass, from disassembly)
+
+`gldUpdateDispatch(gld_ctx *r3, void *table_r4, ... r5)` fills a dispatch table
+(arg2, r30) with function pointers, choosing variants from state bits at
+`ctx+0x2c` (`0x20`/`0x400`/`0x800` = texture / tex-unit-0 / tex-unit-1 enables —
+the same variant selection mesa does via `setup_tab[]` in mesa_mach64_vb.c).
+
+Table slots written (byte offsets into the dispatch struct): 0x18, 0x1c, 0x20,
+0x24, 0x28, 0x2c, 0x30, 0x34, 0x38, 0x3c, 0x40, 0x44, 0x48, 0x4c, 0x58, 0x5c,
+0x60.  Pointers are INTERNAL (stripped) render/vertex-emit functions, not the
+exported `gld*` symbols — so the slot OFFSETS are the ABI; the bodies are ours to
+write.  `gldUpdateDispatch` also calls helpers at 0x4da4, 0x6899c, 0x72f0,
+0x6269c, 0xd5e0 (state upload / buffer setup).  Next: map each slot to the GL op
+it services (per-primitive vs per-vertex), and disassemble gldCreateVertexArray
+(0x8254)/gldAllocVertexBuffer (0xdf90) for the vertex-array layout.
+
+RE tooling notes: llvm-`otool -tv` chokes on this old PPC Mach-O ("symbol table
+extends beyond the end of the file") but `nm` + capstone work; in `__text`,
+**file offset == vaddr** (addr 0x13cc == offset 0x13cc); PIC base = the
+`bcl/bdnzl` target loaded by `mflr` (here r31=0x60bb4), then
+`addis rX,r31,HI; lwz rY,LO(rX)` loads a data-section pointer.  See the
+osx-ppc reverse-engineering skill.
