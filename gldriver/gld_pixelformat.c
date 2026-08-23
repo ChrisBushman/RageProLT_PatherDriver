@@ -1,108 +1,76 @@
 /*
  * gld_pixelformat.c - gldChoosePixelFormat / gldDestroyPixelFormat.
  *
- * OpenGL.framework calls gldChoosePixelFormat(pf_out, attribs) to ask whether we
- * can support a set of pixel-format attributes; we parse the attribs, build our
- * private gld_pixel_format, and return it (the framework hands it back to
- * gldCreateContext, then frees it via gldDestroyPixelFormat).
+ * OpenGL.framework calls gldChoosePixelFormat(pf_out, attribs) to ask which
+ * pixel-format configs our renderer offers; we return a linked list of config
+ * nodes.  gliChoosePixelFormat links our list into a combined list (walking to
+ * our tail and appending the next renderer), then glcPluginChoosePixelFormat's
+ * filter matches each node against the request to compute npix.
  *
- * attribs = a 0-terminated int32 array.  Token semantics recovered from the
- * reference gldChoosePixelFormat jump table (docs/re-notes/gld-layer.md):
- * boolean tokens stand alone; value tokens are followed by one int32 and the
- * driver keeps the max; unknown tokens are rejected.  (Error codes match the
- * reference: 0x271e bad arg, 0x2710 unsupported attr, 0x2720 out of memory.)
+ * NODE FORMAT (0x34 bytes / 13 words) -- recovered by dumping a live framework
+ * pf list under gdb (tools/capture-node.gdb): the accelerated request enumerated
+ * a second renderer whose valid nodes sat right after our (empty) one.  Word[0]
+ * is the linked-list next pointer; words[1..12] encode the config.  See the
+ * per-field notes in docs/re-notes.  We emit the captured configs verbatim as
+ * the configs OUR (accelerated) renderer offers -- the framework's matcher then
+ * accepts the one matching the app's request (color 32 / depth 16) -> npix > 0.
  */
 #include "gld.h"
 #include <stdlib.h>
 #include <string.h>
 
-/* GLI/CGL pixel-format attribute tokens (recovered) */
-#define GLD_PFA_DOUBLEBUFFER  5     /* boolean -> flags bit3 */
-#define GLD_PFA_STEREO        6     /* boolean -> flags bit1 */
-#define GLD_PFA_AUX_BUFFERS   7     /* value */
-#define GLD_PFA_COLOR_SIZE    8     /* value */
-#define GLD_PFA_ALPHA_SIZE    11    /* value */
-#define GLD_PFA_DEPTH_SIZE    12    /* value */
-#define GLD_PFA_STENCIL_SIZE  13    /* value */
-#define GLD_PFA_ACCUM_SIZE    14    /* value */
-#define GLD_PFA_SAMPLE_BUF    0x14  /* value  (multisample group 0x14..0x1a) */
-#define GLD_PFA_SAMPLES       0x15  /* value */
-#define GLD_PFA_DISPLAY_MASK  0x54  /* value */
-#define GLD_PFA_ACCELERATED   73    /* boolean (we are) */
-
-/* value-taking tokens the reference reads a following int32 for.  Keeping this
- * in sync with the jump table is what stops the parser from desyncing on an
- * attribute we don't specifically handle. */
-static int attr_takes_value(int tok)
-{
-    switch (tok) {
-    case GLD_PFA_AUX_BUFFERS: case GLD_PFA_COLOR_SIZE: case GLD_PFA_ALPHA_SIZE:
-    case GLD_PFA_DEPTH_SIZE:  case GLD_PFA_STENCIL_SIZE: case GLD_PFA_ACCUM_SIZE:
-    case 0x14: case 0x15: case 0x16: case 0x17: case 0x18: case 0x19: case 0x1a:
-    case GLD_PFA_DISPLAY_MASK:
-        return 1;
-    default:
-        return 0;
-    }
-}
+/* Captured valid config nodes (words [1..12]; [0]=next, set at runtime).  From
+ * the live pf-list dump -- these are configs the framework's matcher accepts.
+ * node4's word[11] (0x2c) held a renderer-private pointer (0xfffaf0) in the
+ * capture; we zero it so the framework never derefs a pointer into a renderer
+ * that isn't ours. */
+#define GLD_NODE_WORDS 13
+#define GLD_NNODES     4
+static const uint32_t gld_node_templates[GLD_NNODES][GLD_NODE_WORDS] = {
+  /* next   [1]  0x04   [2]  0x08   [3] [4] 0x10    [5]0x14     [6] 0x18  [7]0x1c [8]0x20 [9][10][11] [12]0x30 */
+  { 0, 0x00020241, 0x000006dd, 0, 0x00000200, 0x00000000, 0x00000400, 0x00000001, 4, 0,0,0, 7 },
+  { 0, 0x00020242, 0x000006dd, 0, 0x00000200, 0x00000000, 0x00001000, 0x00000001, 4, 0,0,0, 7 },
+  { 0, 0x00020248, 0x000006dd, 0, 0x00004000, 0x00000000, 0x00001000, 0x00000001, 4, 0,0,0, 7 },
+  { 0, 0x00020400, 0x000006dd, 0, 0x00008000, 0x20000000, 0x00001000, 0x00000080, 4, 0,0,0, 7 },
+};
 
 int gldChoosePixelFormat(void **pf_out, const int *attribs)
 {
-    gld_pixel_format p;
-    gld_pixel_format *out;
-    const int *a = attribs;
+    char *blk;
+    uint32_t *node[GLD_NNODES];
+    int i;
 
     gld_log("gldChoosePixelFormat(attribs=%p):", (void*)attribs);
-    { int i; for (i=0; attribs && i<48 && attribs[i]; i++) gld_log(" %d", attribs[i]); }
+    { int k; for (k=0; attribs && k<48 && attribs[k]; k++) gld_log(" %d", attribs[k]); }
     gld_log(" [end]\n");
     if (!pf_out) return 0x271e;
     *pf_out = 0;
-    memset(&p, 0, sizeof p);
 
-    while (a && *a) {
-        int tok = *a++;
-        int v;
-        switch (tok) {
-        case GLD_PFA_DOUBLEBUFFER: p.flags |= GLD_PF_DOUBLEBUFFER; break;
-        case GLD_PFA_STEREO:       p.flags |= GLD_PF_STEREO;       break;
-        case GLD_PFA_ACCELERATED:  break;                 /* yes, accelerated */
-        case GLD_PFA_AUX_BUFFERS:  p.aux_buffers  = (uint32_t)*a++; break;
-        case GLD_PFA_COLOR_SIZE:   v=*a++; if((uint32_t)v>p.color_size)   p.color_size=v;   break;
-        case GLD_PFA_ALPHA_SIZE:   v=*a++; if((uint32_t)v>p.alpha_size)   p.alpha_size=v;   break;
-        case GLD_PFA_DEPTH_SIZE:   v=*a++; if((uint32_t)v>p.depth_size)   p.depth_size=v;   break;
-        case GLD_PFA_STENCIL_SIZE: v=*a++; if((uint32_t)v>p.stencil_size) p.stencil_size=v; break;
-        case GLD_PFA_ACCUM_SIZE:   v=*a++; if((uint32_t)v>p.accum_size)   p.accum_size=v;   break;
-        default:
-            /* Be LENIENT: accept unknown attributes rather than rejecting the
-             * whole format (the framework's GLD token set is richer than ours).
-             * Skip a following value if we know this token takes one. */
-            gld_log("  attr: unknown tok=%d%s\n", tok,
-                    attr_takes_value(tok) ? " (+value, skipped)" : "");
-            if (attr_takes_value(tok)) (void)*a++;
-            break;
-        }
+    /* One contiguous block of GLD_NNODES nodes (0x40 each, padded past the 0x34
+     * the framework reads) so gldDestroyPixelFormat frees it with the head ptr.
+     * The framework only rewrites our TAIL's next (to append the next renderer);
+     * our internal chain stays within the block. */
+    blk = (char *)calloc(GLD_NNODES, 0x40);
+    if (!blk) return 0x2720;
+    for (i = 0; i < GLD_NNODES; i++) {
+        node[i] = (uint32_t *)(blk + i * 0x40);
+        memcpy(node[i], gld_node_templates[i], GLD_NODE_WORDS * 4);
     }
+    for (i = 0; i < GLD_NNODES - 1; i++)
+        node[i][0] = (uint32_t)node[i + 1];   /* PPC32: pointer fits in a word */
+    node[GLD_NNODES - 1][0] = 0;               /* our tail (framework appends here) */
 
-    /* Capability clamp for this hardware: 32bpp ARGB8888 render target, optional
-     * 16-bit depth; no hw stencil/accum (recorded but not offered). */
-    if (p.color_size == 0) p.color_size = 32;
-    if (p.depth_size > 16) p.depth_size = 16;
-
-    /* Oversized + zeroed: the framework reads the pf as a much larger struct
-     * (the real GLD pf is ~0x80+ bytes with pointer fields) -- a 28-byte buffer
-     * let it read off the end into garbage -> bus error.  Zero-fill keeps its
-     * reads in-bounds (NULL fields, not garbage) so we can see the next step. */
-    out = (gld_pixel_format *)calloc(1, 0x100);
-    if (!out) return 0x2720;
-    *out = p;
-    *pf_out = out;
-    gld_log("  -> ACCEPT color=%u alpha=%u depth=%u flags=0x%x pf=%p\n",
-            p.color_size, p.alpha_size, p.depth_size, p.flags, (void*)out);
+    *pf_out = blk;
+    gld_log("  -> ACCEPT: emitted %d captured config nodes, head=%p\n",
+            GLD_NNODES, (void *)blk);
     return 0;
 }
 
 int gldDestroyPixelFormat(void *pf)
 {
+    /* Head pointer is the block base; one free releases all our nodes.  (The
+     * framework's appended nodes belong to the other renderer -- not ours to
+     * free -- and live outside this block, so we never touch them.) */
     if (pf) free(pf);
     return 0;
 }
