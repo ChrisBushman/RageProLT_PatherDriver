@@ -10,9 +10,15 @@
 #include "Mach64Accelerator.h"
 #include "Mach64GLUserClient.h"
 #include <IOKit/IOLib.h>
+#include <libkern/OSByteOrder.h>
+#include "../common/mach64_regs.h"
 
 #define super IOService
 OSDefineMetaClassAndStructors(Mach64Accelerator, IOService)
+
+/* PPC store barrier: flush our uncached ring/command writes to RAM and order
+ * them before the MMIO kick.  Mirrors the mb() in the proven userspace tools. */
+static inline void mach64_sync(void) { __asm__ volatile("sync; eieio" ::: "memory"); }
 
 bool Mach64Accelerator::start(IOService *provider)
 {
@@ -74,6 +80,24 @@ bool Mach64Accelerator::start(IOService *provider)
     IOLog("Mach64Accelerator: cmdbuf bus=0x%08lx ring bus=0x%08lx (physmem=0x%lx)\n",
           (unsigned long)fCmdBufBus, (unsigned long)fRingBus, (unsigned long)0x20000000);
 
+    /* Kernel-side DMA submission maps (see the proven mach64_gouraud path):
+     *  - registers live in the last 2KB of BAR0 (NOT BAR2, which master-aborts);
+     *    map inhibit-cache so kernel MMIO on PPC doesn't machine-check.
+     *  - map the ring uncached too, so descriptors we write reach RAM before the
+     *    kick without a separate dcache flush. */
+    fRegMap  = fFB->map(kIOMapInhibitCache);
+    fRingMap = fRing->map(kIOMapInhibitCache);
+    if (!fRegMap || !fRingMap) {
+        IOLog("Mach64Accelerator: failed to map regs/ring into the kernel\n");
+        return false;
+    }
+    fRegBase = (volatile void *)(fRegMap->getVirtualAddress() + MACH64_REG_WINDOW);
+    fRingKVA = (volatile void *)(fRingMap->getVirtualAddress());
+    fLock    = IOLockAlloc();
+    if (!fLock) return false;
+    fCompletedStamp = 0;
+    fCmdBufSize     = 0x10000;   /* must match the fCmdBuf allocation above */
+
     fStamp   = 0;
     /* Real values come from reading CONFIG_CHIP_ID / memory config; the plugin
      * only inspects bit 1 of config0 (see gldCreateContext). */
@@ -92,12 +116,89 @@ void Mach64Accelerator::stop(IOService *provider)
 
 void Mach64Accelerator::free(void)
 {
+    /* release the maps before the descriptors they cover */
+    if (fRegMap)  { fRegMap->release();  fRegMap = 0; fRegBase = 0; }
+    if (fRingMap) { fRingMap->release(); fRingMap = 0; fRingKVA = 0; }
+    if (fLock)    { IOLockFree(fLock);   fLock = 0; }
     if (fRegs)    { fRegs->release();    fRegs = 0; }
     if (fFB)      { fFB->release();      fFB = 0; }
     if (fControl) { fControl->release(); fControl = 0; }
     if (fCmdBuf)  { fCmdBuf->complete(); fCmdBuf->release(); fCmdBuf = 0; }
     if (fRing)    { fRing->complete();   fRing->release();   fRing = 0; }
     super::free();
+}
+
+/* ---- register / ring MMIO (little-endian window, see mach64_regs.h) ---- */
+UInt32 Mach64Accelerator::regRead(UInt32 off) const
+{ return OSReadLittleInt32((void *)fRegBase, off); }
+
+void Mach64Accelerator::regWrite(UInt32 off, UInt32 v) const
+{ OSWriteLittleInt32((void *)fRegBase, off, v); }
+
+void Mach64Accelerator::ringWrite(UInt32 off, UInt32 v) const
+{ OSWriteLittleInt32((void *)fRingKVA, off, v); }
+
+/* wait until >= `entries` FIFO slots are free (same gating as the tools) */
+bool Mach64Accelerator::waitFifo(int entries) const
+{
+    for (int i = 0; i < 100000; i++) {
+        if ((regRead(MACH64_FIFO_STAT) & MACH64_FIFO_SLOT_MASK)
+                <= (UInt32)(0x8000 >> entries))
+            return true;
+        IODelay(1);
+    }
+    return false;
+}
+
+bool Mach64Accelerator::waitIdle(void) const
+{
+    if (!waitFifo(16)) return false;
+    for (int i = 0; i < 100000; i++) {
+        if (!(regRead(MACH64_GUI_STAT) & MACH64_GUI_ACTIVE)) return true;
+        IODelay(1);
+    }
+    return false;
+}
+
+/* The proven bus-master submit: point a ring descriptor at the client's filled
+ * command buffer, quiesce + save ATIRagePro's DMA regs, activate + kick, wait
+ * for idle, restore.  `byteCount` = bytes of register-write stream (which must
+ * already end in a SRC_CNTL=0 terminator, appended by the GL plugin). */
+IOReturn Mach64Accelerator::submitCommandBuffer(UInt32 byteCount)
+{
+    ringWrite(0,  MACH64_APERTURE_OFFSET + MACH64_BM_ADDR);
+    ringWrite(4,  (UInt32)fCmdBufBus);
+    ringWrite(8,  byteCount | MACH64_DMA_HOLD_OFFSET | MACH64_DMA_EOL);
+    ringWrite(12, 0);
+
+    /* No HW lock is shared with ATIRagePro, so an async collision is possible
+     * between save and restore -> display glitch/reboot; acceptable headless
+     * (see bus-master-ring.md).  A real coexistence story needs the DRI-style
+     * hardware lock or full device takeover. */
+    UInt32 saveBus = regRead(MACH64_BUS_CNTL);
+    UInt32 saveSrc = regRead(MACH64_SRC_CNTL);
+    UInt32 saveTbl = regRead(MACH64_BM_GUI_TABLE);
+
+    mach64_sync();                       /* push descriptor to RAM before kick */
+    if (!waitIdle())
+        IOLog("Mach64Accelerator: engine not idle before DMA\n");
+
+    regWrite(MACH64_BUS_CNTL,
+             (saveBus & ~MACH64_BUS_MASTER_DIS) | MACH64_BUS_EXT_REG_EN);
+    regWrite(MACH64_BM_GUI_TABLE_CMD,
+             (UInt32)fRingBus | MACH64_CIRCULAR_BUF_SIZE_16KB);
+    regWrite(MACH64_SRC_CNTL,
+             MACH64_SRC_BM_ENABLE | MACH64_SRC_BM_SYNC | MACH64_SRC_BM_OP_SYSTEM_TO_REG);
+    mach64_sync();
+    regWrite(MACH64_DST_HEIGHT_WIDTH, 0);   /* kick the transfer */
+    bool ok = waitIdle();
+
+    /* restore ATIRagePro's DMA state */
+    regWrite(MACH64_SRC_CNTL, saveSrc);
+    regWrite(MACH64_BM_GUI_TABLE_CMD, saveTbl & 0xfffffff0);
+    regWrite(MACH64_BUS_CNTL, saveBus);
+
+    return ok ? kIOReturnSuccess : kIOReturnTimeout;
 }
 
 /* ---- regions ---- */
@@ -121,29 +222,58 @@ UInt32 Mach64Accelerator::allocContextBuffer(Mach64GLUserClient *c)
     return ++fStamp;   /* opaque handle; real impl allocates per-engine state */
 }
 
-/* ---- submission / fences (stubs until the ring/MMIO path lands) ---- */
+/* ---- submission / fences (the proven DMA ring) ---- */
+
+/* Submit the register-write stream the client wrote into the type-4 command
+ * buffer (bytes [0, size), ending in a SRC_CNTL=0 terminator) and return a
+ * stamp the client can wait_for_stamp() on.  new_vertex_buffer() calls this to
+ * "kick the previous buffer"; in the single-buffer synchronous model the client
+ * simply refills from offset 0 for the next batch. */
 UInt32 Mach64Accelerator::rotateCommandBuffer(Mach64GLUserClient *c, UInt32 size)
 {
-    (void)c; (void)size;
-    /* Real impl: submit the filled buffer to BM_ADDR / the DMA ring
-     * (byte-reversing to LE), return the next buffer id. */
-    return ++fStamp;
+    (void)c;
+    if (size == 0 || size > fCmdBufSize || (size & 3))
+        return fCompletedStamp;      /* nothing valid to submit */
+
+    IOLockLock(fLock);
+    UInt32 stamp = ++fStamp;
+    IOReturn r = submitCommandBuffer(size);
+    /* Synchronous today: the quiesce model owns the engine only between save and
+     * restore, so the DMA has already retired here.  TODO for CPU/GPU overlap:
+     * split fCmdBuf into two halves, alternate per stamp, and retire stamps by
+     * polling BM_GUI_TABLE instead of blocking in submitCommandBuffer(). */
+    if (r == kIOReturnSuccess)
+        fCompletedStamp = stamp;
+    else
+        IOLog("Mach64Accelerator: DMA submit failed (0x%x)\n", r);
+    IOLockUnlock(fLock);
+    return stamp;
 }
 
 IOReturn Mach64Accelerator::freeCommandBuffer(Mach64GLUserClient *c, UInt32 id)
 {
     (void)c; (void)id;
-    return kIOReturnSuccess;
+    return kIOReturnSuccess;   /* single buffer: nothing to reclaim yet */
 }
 
+/* Fence on a submission stamp.  Signed compare tolerates 32-bit wraparound.
+ * Structured as a real wait so it stays correct once submission goes async;
+ * with synchronous submits the stamp is already retired on entry. */
 IOReturn Mach64Accelerator::waitForStamp(UInt32 stamp)
 {
-    (void)stamp;
-    return kIOReturnSuccess;   /* real impl polls the completion stamp */
+    for (int i = 0; i < 100000; i++) {
+        if ((SInt32)(fCompletedStamp - stamp) >= 0)
+            return kIOReturnSuccess;
+        IODelay(10);
+    }
+    return kIOReturnTimeout;
 }
 
-IOReturn Mach64Accelerator::waitForIdle(void)  { return kIOReturnSuccess; }
-UInt32   Mach64Accelerator::engineStatus(void) { return 0; }
+IOReturn Mach64Accelerator::waitForIdle(void)
+{ return waitIdle() ? kIOReturnSuccess : kIOReturnTimeout; }
+
+UInt32 Mach64Accelerator::engineStatus(void)
+{ return regRead(MACH64_GUI_STAT); }
 
 IOReturn Mach64Accelerator::setSurface(Mach64GLUserClient *c,
                                        UInt32 a, UInt32 b, UInt32 cc, UInt32 d)

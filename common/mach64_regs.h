@@ -13,7 +13,11 @@
 #ifndef MACH64_REGS_H
 #define MACH64_REGS_H
 
+/* Values are plain integer-literal macros -- no typedefs needed.  Only pull in
+ * <stdint.h> for host/userspace builds; the kext compiles -nostdinc (KERNEL). */
+#if !defined(KERNEL)
 #include <stdint.h>
+#endif
 
 /* ---- Setup / raster state ------------------------------------------- */
 #define MACH64_SETUP_CNTL       0x0304  /* flat/smooth shade, solid fill  */
@@ -58,7 +62,45 @@
 
 /* Verified solid/gouraud untextured no-depth triangle state (3d-triangle.md) */
 #define MACH64_SCALE_3D_CNTL_SOLID  0x000100c1u  /* shade, opaque, no tex/fog */
-#define MACH64_SETUP_CNTL_SMOOTH    0x00000040u  /* LOG_MAX_INC_ADJ, smooth   */
+/* SETUP_CNTL: use 0 for BOTH flat and gouraud.  The flat triangle happened to
+ * work with 0x40 (LOG_MAX_INC_ADJ) because its colour came from DP_FRGD_CLR, but
+ * that bit BREAKS the per-vertex colour-gradient setup (gouraud reads back solid
+ * white).  0 is mesa's value.  VERIFIED on hardware -- see 3d-triangle.md. */
+#define MACH64_SETUP_CNTL_SHADE     0x00000000u
+#define MACH64_SETUP_CNTL_SMOOTH    0x00000000u  /* deprecated alias of _SHADE */
+
+/* DP_SRC colour source: flat (from DP_FRGD_CLR) vs 3D scaler (interpolated) */
+#define MACH64_DP_SRC               0x06d8
+#define MACH64_DP_SRC_FLAT          0x00000101u  /* FRGD/BKGD_SRC_FRGD_CLR    */
+#define MACH64_DP_SRC_3D            0x00000505u  /* BKGD/FRGD_SRC_3D (gouraud)*/
+#define MACH64_DP_MIX               0x06d4
+#define MACH64_DP_MIX_SS            0x00070007u  /* BKGD_MIX_S | FRGD_MIX_S   */
+#define MACH64_DP_FRGD_CLR          0x06c4
+#define MACH64_CLR_CMP_CNTL         0x0708
+
+/* ---- Bus-master DMA control (VERIFIED ring, bus-master-ring.md) -------
+ * The engine bus-master-reads a descriptor ring (BM_GUI_TABLE) and, per
+ * descriptor, DMAs a register-write stream to the BM_ADDR data port.  These are
+ * the regs the submission path saves/restores + programs. */
+#define MACH64_BUS_CNTL             0x04a0
+#define MACH64_BUS_MSTR_RESET       (1u << 1)
+#define MACH64_BUS_FLUSH_BUF        (1u << 2)
+#define MACH64_BUS_MASTER_DIS       (1u << 6)
+#define MACH64_BUS_EXT_REG_EN       (1u << 27)
+#define MACH64_SRC_CNTL             0x05b4
+#define MACH64_SRC_BM_ENABLE        (1u << 8)
+#define MACH64_SRC_BM_SYNC          (1u << 9)
+#define MACH64_SRC_BM_OP_SYSTEM_TO_REG (3u << 10)
+#define MACH64_DST_HEIGHT_WIDTH     0x0518  /* write 0 = kick the transfer    */
+#define MACH64_BM_GUI_TABLE_CMD     0x064c  /* ring base | CIRCULAR_BUF_SIZE  */
+#define MACH64_BM_GUI_TABLE         0x01b8  /* current descriptor ptr (RO)    */
+#define MACH64_CIRCULAR_BUF_SIZE_16KB (0u << 0)  /* the "16KB" encoding is 0  */
+
+/* ---- Engine status (FIFO / idle gating) ----------------------------- */
+#define MACH64_FIFO_STAT            0x0710
+#define MACH64_FIFO_SLOT_MASK       0x0000ffffu
+#define MACH64_GUI_STAT             0x0738
+#define MACH64_GUI_ACTIVE           0x00000001u
 
 #define MACH64_VERTEX_SLOT(n)   (0x0240 + ((n) * 0x20))  /* n = 0,1,2      */
 #define MACH64_V_S              0x00

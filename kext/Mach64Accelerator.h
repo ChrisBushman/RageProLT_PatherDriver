@@ -16,6 +16,7 @@
 #include <IOKit/pci/IOPCIDevice.h>
 #include <IOKit/IODeviceMemory.h>
 #include <IOKit/IOBufferMemoryDescriptor.h>
+#include <IOKit/IOLib.h>
 
 class Mach64GLUserClient;
 
@@ -34,6 +35,23 @@ class Mach64Accelerator : public IOService
     UInt32                    fStamp;     // fence counter
     UInt32                    fConfig0;   // chip config words (get_config)
     UInt32                    fConfig1;
+
+    // ---- kernel-side DMA submission state (the proven ring path) --------
+    IOMemoryMap              *fRegMap;    // uncached kernel map of BAR0
+    volatile void            *fRegBase;   // fRegMap VA + MACH64_REG_WINDOW
+    IOMemoryMap              *fRingMap;   // uncached kernel map of the ring
+    volatile void            *fRingKVA;   // fRingMap VA (write descriptors here)
+    IOLock                   *fLock;      // serialize submits from our clients
+    volatile UInt32           fCompletedStamp; // highest retired stamp
+    UInt32                    fCmdBufSize;     // bytes in the command buffer
+
+    // ---- register / ring MMIO helpers (little-endian, see mach64_regs.h) --
+    UInt32 regRead (UInt32 off) const;
+    void   regWrite(UInt32 off, UInt32 v) const;
+    void   ringWrite(UInt32 off, UInt32 v) const;
+    bool   waitFifo(int entries) const;   // >= `entries` free FIFO slots
+    bool   waitIdle(void) const;          // GUI engine idle
+    IOReturn submitCommandBuffer(UInt32 byteCount);  // the quiesce+kick sequence
 
 public:
     virtual bool start(IOService *provider);
