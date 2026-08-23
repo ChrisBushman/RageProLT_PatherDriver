@@ -16,9 +16,11 @@ KINC     := -I$(KFRAME)/Headers -I$(KFRAME)/PrivateHeaders -I. -I..
 KDEF     := -DKERNEL -DKERNEL_PRIVATE -DDRIVER_PRIVATE -DAPPLE -DNeXT
 # -static: generate non-PIC code for kernel/static linking (no __picsymbolstub
 #          sections, which `ld -static -r` rejects).
+# -mlong-branch: emit long call sequences so branches to kernel symbols don't
+#          overflow the PPC 24-bit displacement at kld load time.
 # -fapple-kext: correct C++ ABI / vtable layout for a loadable kext (gcc 3.3).
-KCXX     := -static -fno-rtti -fno-exceptions -fcheck-new -fno-builtin -fapple-kext
-KCC      := -static -fno-builtin
+KCXX     := -static -mlong-branch -fno-rtti -fno-exceptions -fcheck-new -fno-builtin -fapple-kext
+KCC      := -static -mlong-branch -fno-builtin
 
 EXEC     := Mach64Accelerator
 BUNDLE   := $(EXEC).kext
