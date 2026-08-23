@@ -72,6 +72,23 @@ INSTALLS the callbacks (here `gldUpdateDispatch(ctx, table, ...)`):
   N texture units, etc. Cross-reference the open-source sibling (e.g. Mesa/DRI)
   whose `setup_tab[]`-style variant table mirrors the same bits.
 
+## Classify primitive/render functions by their count guard
+
+When a dispatch table holds many similar unnamed render functions (one per GL
+primitive), you don't need to fully read each — classify by the **minimum-vertex
+guard** at the top: `cmpwi <count_reg>, K; ble <exit>` means "needs > K verts",
+which pins the primitive family:
+- `count>0` → points (1/vtx) · `count>1` → lines (2) · `count>2` → triangles (3)
+  · `count>3` → quads (4).
+Then the grouping mask disambiguates within a family:
+- `rlwinm rX,rX,0,0,0x1e` = round to even → independent pairs (GL_LINES) or
+  quad-strip; `rlwinm ...,0,0x1d` = round to mult-of-4 → GL_QUADS.
+An **extra argument** (e.g. a 4th param used as an index buffer) distinguishes a
+DrawElements/indexed variant from a sequential DrawArrays one — so a doubled set
+of point/line/triangle funcs usually means two dispatch vectors (verts vs elts).
+Also note struct offsets the funcs read (command-buffer ptr/end, current
+primitive type, vertex stride) — that recovers the object layout for free.
+
 ## General approach
 
 1. `nm` → export map + addresses; sort by address for boundaries.
