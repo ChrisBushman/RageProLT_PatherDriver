@@ -19,13 +19,17 @@
 <dict>
   <key>CFBundleIdentifier</key>          <string>com.local.Mach64Accelerator</string>
   <key>CFBundleName</key>                <string>Mach64Accelerator</string>
+  <key>CFBundleExecutable</key>          <string>Mach64Accelerator</string>
   <key>CFBundleVersion</key>             <string>0.1</string>
+  <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
+  <key>CFBundleSignature</key>           <string>????</string>
   <key>CFBundlePackageType</key>         <string>KEXT</string>
+  <!-- 10.3-era dependency names/versions (from ATIRagePro.kext), NOT the
+       10.4+ com.apple.kpi.* names. -->
   <key>OSBundleLibraries</key>
   <dict>
-    <key>com.apple.kpi.iokit</key>       <string>1.0</string>
-    <key>com.apple.iokit.IOPCIFamily</key><string>1.0</string>
-    <key>com.apple.iokit.IOGraphicsFamily</key><string>1.0</string>
+    <key>com.apple.kernel.iokit</key>       <string>1.0.0b1</string>
+    <key>com.apple.iokit.IOPCIFamily</key>  <string>1.0.0b1</string>
   </dict>
   <key>IOKitPersonalities</key>
   <dict>
