@@ -52,7 +52,9 @@ int gldChoosePixelFormat(void **pf_out, const int *attribs)
     gld_pixel_format *out;
     const int *a = attribs;
 
-    gld_log("gldChoosePixelFormat(attribs=%p)\n", (void*)attribs);
+    gld_log("gldChoosePixelFormat(attribs=%p):", (void*)attribs);
+    { int i; for (i=0; attribs && i<48 && attribs[i]; i++) gld_log(" %d", attribs[i]); }
+    gld_log(" [end]\n");
     if (!pf_out) return 0x271e;
     *pf_out = 0;
     memset(&p, 0, sizeof p);
@@ -71,10 +73,13 @@ int gldChoosePixelFormat(void **pf_out, const int *attribs)
         case GLD_PFA_STENCIL_SIZE: v=*a++; if((uint32_t)v>p.stencil_size) p.stencil_size=v; break;
         case GLD_PFA_ACCUM_SIZE:   v=*a++; if((uint32_t)v>p.accum_size)   p.accum_size=v;   break;
         default:
-            if (attr_takes_value(tok)) { (void)*a++; break; }  /* skip its value */
-            /* Unknown boolean attribute: the reference REJECTS it. Match that so
-             * the framework won't hand us a format we can't honour. */
-            return 0x2710;
+            /* Be LENIENT: accept unknown attributes rather than rejecting the
+             * whole format (the framework's GLD token set is richer than ours).
+             * Skip a following value if we know this token takes one. */
+            gld_log("  attr: unknown tok=%d%s\n", tok,
+                    attr_takes_value(tok) ? " (+value, skipped)" : "");
+            if (attr_takes_value(tok)) (void)*a++;
+            break;
         }
     }
 
@@ -87,6 +92,8 @@ int gldChoosePixelFormat(void **pf_out, const int *attribs)
     if (!out) return 0x2720;
     *out = p;
     *pf_out = out;
+    gld_log("  -> ACCEPT color=%u alpha=%u depth=%u flags=0x%x pf=%p\n",
+            p.color_size, p.alpha_size, p.depth_size, p.flags, (void*)out);
     return 0;
 }
 
