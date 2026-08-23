@@ -49,6 +49,17 @@
  *   +0x10 Z   +0x14 ARGB          +0x18 X_Y   (X_Y written LAST -> triggers)
  * Writing VERTEX_3_X_Y fires the triangle through the setup engine.
  */
+/* ONE_OVER_AREA_UC is the triangle TRIGGER: written last, after all 3 vertices,
+ * = IEEE-float bits of 1.0/signed_area.  (NOT VERTEX_3_X_Y.)  See
+ * docs/re-notes/3d-triangle.md. */
+#define MACH64_ONE_OVER_AREA_UC 0x0300
+#define MACH64_SC_LEFT_RIGHT    0x06a8
+#define MACH64_SC_TOP_BOTTOM    0x06b4
+
+/* Verified solid/gouraud untextured no-depth triangle state (3d-triangle.md) */
+#define MACH64_SCALE_3D_CNTL_SOLID  0x000100c1u  /* shade, opaque, no tex/fog */
+#define MACH64_SETUP_CNTL_SMOOTH    0x00000040u  /* LOG_MAX_INC_ADJ, smooth   */
+
 #define MACH64_VERTEX_SLOT(n)   (0x0240 + ((n) * 0x20))  /* n = 0,1,2      */
 #define MACH64_V_S              0x00
 #define MACH64_V_T              0x04

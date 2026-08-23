@@ -54,5 +54,9 @@ void m64_emit_triangle(m64_cmdbuf *cb, const m64_vertex *v0,
 {
     m64_emit_vertex(cb, 0, v0);
     m64_emit_vertex(cb, 1, v1);
-    m64_emit_vertex(cb, 2, v2);  /* slot-2 X_Y fires the triangle */
+    m64_emit_vertex(cb, 2, v2);
+    /* NOTE: the real hardware trigger is ONE_OVER_AREA_UC (0x300), written
+     * last = IEEE-float bits of 1.0/signed_area -- NOT VERTEX_3_X_Y.  The
+     * caller must compute the reciprocal area and emit it to fire the setup
+     * engine.  See docs/re-notes/3d-triangle.md. */
 }
