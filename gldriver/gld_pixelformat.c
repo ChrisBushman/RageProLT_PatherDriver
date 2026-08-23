@@ -52,6 +52,7 @@ int gldChoosePixelFormat(void **pf_out, const int *attribs)
     gld_pixel_format *out;
     const int *a = attribs;
 
+    gld_log("gldChoosePixelFormat(attribs=%p)\n", (void*)attribs);
     if (!pf_out) return 0x271e;
     *pf_out = 0;
     memset(&p, 0, sizeof p);

@@ -33,6 +33,7 @@
 void gldUpdateDispatch(gld_context *ctx, void *table, uint32_t flags)
 {
     (void)ctx; (void)flags;   /* single untextured variant for now */
+    gld_log("gldUpdateDispatch(table=%p flags=0x%x)\n", table, flags);
 
     SET(SLOT_POINTS,     mach64_render_points);
     SET(SLOT_LINES,      mach64_render_lines);

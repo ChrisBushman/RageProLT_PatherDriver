@@ -56,6 +56,7 @@ int gldAttachDrawable(gld_context *ctx, int type, void *drawable, uint32_t flags
 const char *gldGetString(gld_context *ctx, uint32_t name)
 {
     (void)ctx;
+    gld_log("gldGetString(name=0x%x)\n", name);
     switch (name) {
     case 0x1f00: return "RageProLT Project";              /* GL_VENDOR    */
     case 0x1f01: return "ATI Rage LT Pro (mach64)";       /* GL_RENDERER  */
@@ -65,22 +66,24 @@ const char *gldGetString(gld_context *ctx, uint32_t name)
     }
 }
 
-int gldGetError(gld_context *ctx) { (void)ctx; return 0; }   /* GL_NO_ERROR */
+int gldGetError(gld_context *ctx) { (void)ctx; gld_log("gldGetError()\n"); return 0; }
 
 int gldGetInteger(gld_context *ctx, uint32_t pname, int *params)
 {
-    (void)ctx; (void)pname;
+    (void)ctx;
+    gld_log("gldGetInteger(pname=0x%x)\n", pname);
     if (params) *params = 0;
     return 0;
 }
 
 int gldSetInteger(gld_context *ctx, uint32_t pname, int value)
-{ (void)ctx; (void)pname; (void)value; return 0; }
+{ (void)ctx; gld_log("gldSetInteger(pname=0x%x val=%d)\n", pname, value); return 0; }
 
 /* gldInitDispatch: initial dispatch-table setup (pairs with gldUpdateDispatch).
  * Install our render slots so the table is usable from the start. */
 void gldInitDispatch(gld_context *ctx, void *table, uint32_t flags)
 {
+    gld_log("gldInitDispatch(table=%p flags=0x%x)\n", table, flags);
     gldUpdateDispatch(ctx, table, flags);
 }
 
@@ -91,7 +94,7 @@ int gldFlushBuffer(gld_context *ctx, void *drawable)
 
 /* ---- feature stubs: present so GLEngine's lookups are non-NULL; only called
  * if the app uses the feature.  Return 0 (NULL/success). --------------- */
-#define GLD_STUB(name) int name(void) { return 0; }
+#define GLD_STUB(name) int name(void) { gld_log(#name "()\n"); return 0; }
 GLD_STUB(gldCreateBuffer)          GLD_STUB(gldDestroyBuffer)
 GLD_STUB(gldCreateFence)           GLD_STUB(gldDestroyFence)
 GLD_STUB(gldCreatePipelineProgram) GLD_STUB(gldDestroyPipelineProgram)
