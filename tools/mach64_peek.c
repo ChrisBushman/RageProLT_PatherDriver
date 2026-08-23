@@ -1,25 +1,24 @@
 /*
- * mach64_peek.c - first MMIO read: open the Mach64Accelerator user client, map
- * the register aperture (MACH64_MEM_REGISTERS), and read CONFIG_CHIP_ID.
+ * mach64_peek.c - SAFE isolation test: map the FRAMEBUFFER (VRAM) aperture and
+ * read a few dwords.
  *
- * Its low 16 bits (CFG_CHIP_TYPE) should be 0x4c49 for the Rage LT Pro 'LI',
- * which proves we mapped the real registers.  Reads are side-effect-free, so
- * this is safe to run while ATIRagePro is driving the display.
+ * Why VRAM and not registers: VRAM is fully-decoded memory, so a read can't
+ * master-abort / machine-check the way a stray register-offset read can.  This
+ * isolates one question: does userspace IOConnectMapMemory of a device BAR +
+ * CPU read work at all on this setup?
+ *   - reads succeed  -> mapping path is sound; the earlier hang was the
+ *                       register offset/aperture, which we tackle next.
+ *   - hangs          -> userspace device mapping itself is the problem; we
+ *                       switch to in-kernel register reads via a method call.
  *
- * Reads each register both native (big-endian) and little-endian, because the
- * mach64 register file is little-endian and we don't yet know whether this
- * Mac aperture is pre-swapped.  Userspace tool; build with -framework IOKit.
+ * Reads are side-effect-free (VRAM the display driver already wrote), so this
+ * is safe alongside ATIRagePro.  Build with -framework IOKit.
  */
 #include <IOKit/IOKitLib.h>
 #include <libkern/OSByteOrder.h>
 #include <mach/mach.h>
 #include <stdio.h>
 #include "../common/mach64_abi.h"
-
-#define CONFIG_CHIP_ID  0x04e0
-#define CONFIG_CNTL     0x04dc
-#define SCRATCH_REG0    0x0480
-#define GUI_STAT        0x0738
 
 int main(void)
 {
@@ -28,14 +27,7 @@ int main(void)
     kern_return_t  kr;
     vm_address_t   addr = 0;
     vm_size_t      size = 0;
-    unsigned       i, id_le, id_be;
-
-    struct { const char *name; unsigned off; } regs[] = {
-        { "CONFIG_CHIP_ID", CONFIG_CHIP_ID },
-        { "CONFIG_CNTL",    CONFIG_CNTL    },
-        { "SCRATCH_REG0",   SCRATCH_REG0   },
-        { "GUI_STAT",       GUI_STAT       },
-    };
+    unsigned       i;
 
     svc = IOServiceGetMatchingService(kIOMasterPortDefault,
                                       IOServiceMatching("Mach64Accelerator"));
@@ -49,35 +41,34 @@ int main(void)
         fprintf(stderr, "IOServiceOpen failed: 0x%x\n", kr);
         return 1;
     }
-    kr = IOConnectMapMemory(conn, MACH64_MEM_REGISTERS, mach_task_self(),
-                            &addr, &size, kIOMapAnywhere);
+
+    /* Map the framebuffer/VRAM aperture (type 1).  Cache-inhibited. */
+    kr = IOConnectMapMemory(conn, MACH64_MEM_SURFACE, mach_task_self(),
+                            &addr, &size, kIOMapAnywhere | kIOMapInhibitCache);
     if (kr != KERN_SUCCESS) {
-        fprintf(stderr, "IOConnectMapMemory(registers) failed: 0x%x\n", kr);
+        fprintf(stderr, "IOConnectMapMemory(framebuffer) failed: 0x%x\n", kr);
         IOServiceClose(conn);
         return 1;
     }
-    printf("mapped %lu bytes of registers at 0x%lx\n\n",
-           (unsigned long)size, (unsigned long)addr);
+    printf("mapped %lu bytes of VRAM at 0x%lx\n", (unsigned long)size,
+           (unsigned long)addr);
+    printf("about to read first dword...\n");
+    fflush(stdout);
 
-    for (i = 0; i < sizeof(regs)/sizeof(regs[0]); i++) {
-        unsigned raw = *(volatile unsigned *)(addr + regs[i].off);
-        unsigned le  = OSReadLittleInt32((void *)addr, regs[i].off);
-        printf("%-14s @0x%03x  raw(BE)=0x%08x  LE=0x%08x\n",
-               regs[i].name, regs[i].off, raw, le);
+    /* Read 8 dwords of VRAM.  Non-zero/varied => real framebuffer content. */
+    for (i = 0; i < 8; i++) {
+        unsigned v = *(volatile unsigned *)(addr + i * 4);
+        printf("  VRAM[0x%02x] = 0x%08x\n", i * 4, v);
+        fflush(stdout);
     }
+    /* A sample deeper in, still safely inside the 16MB aperture. */
+    if (size > 0x100000) {
+        unsigned v = *(volatile unsigned *)(addr + 0x100000);
+        printf("  VRAM[0x100000] = 0x%08x\n", v);
+    }
+    printf("VRAM read OK -- userspace device mapping works.\n");
 
-    id_le = OSReadLittleInt32((void *)addr, CONFIG_CHIP_ID);
-    id_be = *(volatile unsigned *)(addr + CONFIG_CHIP_ID);
-    printf("\nchip type: LE-low16=0x%04x  BE-low16=0x%04x  (expect 0x4c49)\n",
-           id_le & 0xffff, id_be & 0xffff);
-    if ((id_le & 0xffff) == 0x4c49)
-        printf("CONFIRMED: real mach64 registers, little-endian access\n");
-    else if ((id_be & 0xffff) == 0x4c49)
-        printf("CONFIRMED: real mach64 registers, big-endian (pre-swapped) access\n");
-    else
-        printf("neither matches 0x4c49 - aperture/offset needs review\n");
-
-    IOConnectUnmapMemory(conn, MACH64_MEM_REGISTERS, mach_task_self(), addr);
+    IOConnectUnmapMemory(conn, MACH64_MEM_SURFACE, mach_task_self(), addr);
     IOServiceClose(conn);
     return 0;
 }

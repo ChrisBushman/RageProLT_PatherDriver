@@ -62,9 +62,10 @@ IOReturn
 Mach64GLUserClient::clientMemoryForType(UInt32 type, IOOptionBits *opts,
                                         IOMemoryDescriptor **mem)
 {
+    *opts = kIOMapInhibitCache;   // default for all: never leave *opts garbage,
+                                  // and device memory must be uncached on PPC
     switch (type) {
     case MACH64_MEM_REGISTERS:                 // 0 : MMIO register aperture
-        *opts = 0;
         *mem  = fProvider->registerAperture(); // IODeviceMemory (fixed BAR)
         break;
     case MACH64_MEM_SURFACE:                   // 1 : VRAM render surface
