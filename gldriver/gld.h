@@ -42,6 +42,12 @@ typedef struct {
 #define GLD_PF_DOUBLEBUFFER  0x1
 #define GLD_PF_STEREO        0x2
 typedef struct {
+    /* Framework-owned header: GLEngine treats offset 0 as a linked-list "next"
+     * pointer (0 = single format; it derefs it if non-zero -> our old layout put
+     * color_size here and it bus-errored) and writes flag words into +0x04/+0x08.
+     * Leave this zeroed and let the framework decorate it. */
+    uint8_t  _fw[0x40];
+    /* Our parsed attributes live after the framework header. */
     uint32_t color_size;    /* GLD_PFA_COLOR_SIZE   (bits)                 */
     uint32_t alpha_size;    /* GLD_PFA_ALPHA_SIZE                          */
     uint32_t depth_size;    /* GLD_PFA_DEPTH_SIZE   (0 = no depth)         */
