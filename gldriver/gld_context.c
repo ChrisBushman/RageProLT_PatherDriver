@@ -85,12 +85,30 @@ int gldCreateContext(gld_context **outp, void *pixfmt, void *shared,
     IOConnectMapMemory(ctx->connect, MACH64_MEM_CMDBUF, mach_task_self(),
                        (vm_address_t *)&ctx->fb, (IOByteCount *)&ctx->fb_size, kIOMapAnywhere);
 
+    /* Allocate + initialize our backend (shadow registers, gouraud defaults).
+     * Kept separate from Apple's 0x200 struct so we can grow it freely. */
+    ctx->backend = calloc(1, sizeof(mach64_priv));
+    if (!ctx->backend) { IOServiceClose(ctx->connect); free(ctx); return 0x2720; }
+    mach64_init_state((mach64_priv *)ctx->backend);
+
     /* TODO: decode pixfmt -> ctx->fmt_caps / ctx->mode_word (disasm 0x48fc),
-     *       init default GL state, wire the dispatch table (gldUpdateDispatch),
-     *       and finish context init.  The state/vertex bodies then reuse
-     *       common/mach64_emit.c against the type-4 command buffer (ctx->fb). */
+     *       bind the drawable's surface as the render target
+     *       (mach64_set_render_target from ctx->regs/get_surface_info), and wire
+     *       the dispatch table (gldUpdateDispatch) so GLEngine's primitive
+     *       callbacks reach mach64_draw_triangle. */
     (void)pixfmt;
 
     *outp = ctx;
+    return 0;
+}
+
+/* ---- gldDestroyContext: tear down the handshake --------------------- */
+int gldDestroyContext(gld_context *ctx)
+{
+    if (!ctx) return 0;
+    if (ctx->backend) { free(ctx->backend); ctx->backend = 0; }
+    /* TODO: IOConnectUnmapMemory the four regions before closing. */
+    if (ctx->connect) IOServiceClose(ctx->connect);
+    free(ctx);
     return 0;
 }

@@ -13,7 +13,8 @@
 #define GLD_H
 
 #include <stdint.h>
-#include <mach/mach.h>   /* io_connect_t etc. (IOKit user side)            */
+#include <IOKit/IOKitLib.h>   /* io_connect_t + IOConnectMethod* (user side) */
+#include "../common/mach64_emit.h"
 
 /* ---- Renderer capability struct filled by gldGetRendererInfo ---------
  * Offsets recovered from ATIRage128GLDriver`gldGetRendererInfo.  The
@@ -51,8 +52,39 @@ typedef struct {
     void        *fb;               /* 0xd0 type 4 command buffer          */
     uint32_t     fb_size;          /* 0xd4                                */
     void        *cmd_regs;         /* 0xdc type 0 register aperture       */
-    uint8_t      _tail[0x200 - 0xe0];
+    void        *backend;          /* 0xe0 our mach64_priv (see below)    */
+    uint8_t      _tail[0x200 - 0xe0 - sizeof(void *)];
 } gld_context;
+
+/* ---- Our per-context backend state (hung off gld_context.backend) -----
+ * Not part of Apple's 0x200 struct -- allocated separately so we can grow it. */
+#define MACH64_DIRTY_STATE   0x1     /* re-emit the state block next draw   */
+
+typedef struct {
+    m64_state  hw;                 /* shadow of the engine's raster state  */
+    uint32_t   dirty;              /* MACH64_DIRTY_* flags                 */
+    uint32_t   last_stamp;         /* newest new_vertex_buffer stamp       */
+    uint32_t   target_off;         /* current render target byte offset    */
+    uint32_t   target_pitch;       /* current render target pitch (pixels) */
+    uint32_t   scratch[1024];      /* host-order command-buffer staging    */
+} mach64_priv;
+
+static __inline__ mach64_priv *MACH64_PRIV(gld_context *c)
+{ return (mach64_priv *)c->backend; }
+
+/* ---- state translation (gld_state.c): GL state -> m64_state ---------- */
+void mach64_init_state(mach64_priv *p);
+void mach64_set_render_target(gld_context *ctx, uint32_t off, uint32_t pitch_px);
+void mach64_set_shade_model(gld_context *ctx, int smooth);  /* GL_SMOOTH? */
+void mach64_set_depth_test(gld_context *ctx, int enable, uint32_t gl_func);
+void mach64_set_scissor(gld_context *ctx, int x, int y, int w, int h);
+
+/* ---- geometry translation + submission (gld_render.c) --------------- */
+void mach64_pack_vertex(m64_vertex *out, float x, float y, float z,
+                        float w, uint32_t argb);
+int  mach64_draw_triangle(gld_context *ctx, const m64_vertex *v0,
+                          const m64_vertex *v1, const m64_vertex *v2);
+uint32_t mach64_submit(gld_context *ctx, m64_cmdbuf *cb);
 
 /* ---- The gld* entry points (subset; full list in ABI.md) ------------ */
 int  gldInitializeLibrary(void *);

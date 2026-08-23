@@ -1,11 +1,11 @@
 /*
  * test_triangle.c - host-buildable verification of the portable emission core.
  *
- * Builds the state block + one textured triangle exactly as the GLDriver
- * plugin would, then dumps the resulting (reg, value) command stream and
- * checks invariants.  Runs on any host (x86_64/arm64) - no hardware, no
- * IOKit - so the register-encoding and emission logic can be validated
- * before it is ever cross-compiled for PPC/Panther.
+ * Builds the state block + one gouraud triangle exactly as the GLDriver plugin
+ * would (mach64_emit.c, aligned to the proven ring path), decodes the resulting
+ * register-write PACKET stream, verifies invariants, and checks the little-
+ * endian writeout.  Runs on any host (no hardware, no IOKit) so the encoding and
+ * emission logic can be validated before it is cross-compiled for PPC/Panther.
  */
 #include <stdio.h>
 #include <string.h>
@@ -15,93 +15,129 @@
 /* Reverse ADRINDEX() so we can print the original register offset. */
 static uint32_t deindex(uint32_t idx)
 {
-    if (idx & 0x0100)                 /* block1: (r>>2)|0x100 */
+    if (idx & 0x0100)                     /* block1: (r>>2)|0x100 */
         return (idx & 0xff) << 2;
-    return (idx << 2) + MACH64_DWMREG0; /* block0 */
+    return (idx << 2) + MACH64_DWMREG0;   /* block0: (r-0x400)>>2 */
 }
 
 static const char *regname(uint32_t reg)
 {
     switch (reg) {
-    case MACH64_Z_OFF_PITCH:    return "Z_OFF_PITCH";
-    case MACH64_Z_CNTL:         return "Z_CNTL";
-    case MACH64_ALPHA_TST_CNTL: return "ALPHA_TST_CNTL";
-    case MACH64_SCALE_3D_CNTL:  return "SCALE_3D_CNTL";
-    case MACH64_SETUP_CNTL:     return "SETUP_CNTL";
-    case MACH64_TEX_SIZE_PITCH: return "TEX_SIZE_PITCH";
-    case MACH64_TEX_CNTL:       return "TEX_CNTL";
-    case MACH64_DP_PIX_WIDTH:   return "DP_PIX_WIDTH";
-    case MACH64_DST_OFF_PITCH:  return "DST_OFF_PITCH";
+    case MACH64_SCALE_3D_CNTL:   return "SCALE_3D_CNTL";
+    case MACH64_SETUP_CNTL:      return "SETUP_CNTL";
+    case MACH64_Z_CNTL:          return "Z_CNTL";
+    case MACH64_DP_PIX_WIDTH:    return "DP_PIX_WIDTH";
+    case MACH64_DST_OFF_PITCH:   return "DST_OFF_PITCH";
+    case MACH64_SC_LEFT_RIGHT:   return "SC_LEFT_RIGHT";
+    case MACH64_SC_TOP_BOTTOM:   return "SC_TOP_BOTTOM";
+    case MACH64_DP_WRITE_MASK:   return "DP_WRITE_MASK";
+    case MACH64_CLR_CMP_CNTL:    return "CLR_CMP_CNTL";
+    case MACH64_DP_MIX:          return "DP_MIX";
+    case MACH64_DP_SRC:          return "DP_SRC";
+    case MACH64_ONE_OVER_AREA_UC:return "ONE_OVER_AREA_UC";
+    case MACH64_SRC_CNTL:        return "SRC_CNTL(term)";
     }
-    /* vertex slot fields */
     for (int s = 0; s < 3; s++) {
         uint32_t b = MACH64_VERTEX_SLOT(s);
-        if (reg == b + MACH64_V_S)    { static char t[16]; snprintf(t,16,"V%d_S",s+1);    return t; }
-        if (reg == b + MACH64_V_T)    { static char t[16]; snprintf(t,16,"V%d_T",s+1);    return t; }
-        if (reg == b + MACH64_V_W)    { static char t[16]; snprintf(t,16,"V%d_W",s+1);    return t; }
-        if (reg == b + MACH64_V_Z)    { static char t[16]; snprintf(t,16,"V%d_Z",s+1);    return t; }
-        if (reg == b + MACH64_V_ARGB) { static char t[16]; snprintf(t,16,"V%d_ARGB",s+1); return t; }
-        if (reg == b + MACH64_V_X_Y)  { static char t[16]; snprintf(t,16,"V%d_X_Y",s+1);  return t; }
+        if (reg == b + MACH64_V_S)         { static char t[16]; snprintf(t,16,"V%d_S",s+1);    return t; }
+        if (reg == b + MACH64_V_T)         { static char t[16]; snprintf(t,16,"V%d_T",s+1);    return t; }
+        if (reg == b + MACH64_V_W)         { static char t[16]; snprintf(t,16,"V%d_W",s+1);    return t; }
+        if (reg == b + MACH64_V_SPEC_ARGB) { static char t[16]; snprintf(t,16,"V%d_SPEC",s+1); return t; }
+        if (reg == b + MACH64_V_Z)         { static char t[16]; snprintf(t,16,"V%d_Z",s+1);    return t; }
+        if (reg == b + MACH64_V_ARGB)      { static char t[16]; snprintf(t,16,"V%d_ARGB",s+1); return t; }
+        if (reg == b + MACH64_V_X_Y)       { static char t[16]; snprintf(t,16,"V%d_X_Y",s+1);  return t; }
     }
     return "?";
 }
+
+/* pack an (x,y) pixel coordinate the way the setup engine wants it */
+static int32_t xy(int x, int y) { return ((x*4) << 16) | ((y*4) & 0xffff); }
 
 int main(void)
 {
     uint32_t storage[256];
     m64_cmdbuf cb;
+    m64_state st;
+    int npackets = 0, nregs = 0, tri_ok, fail = 0;
+    size_t i;
+
     m64_cb_init(&cb, storage, 256);
 
-    /* A plausible state: smooth-shaded, Z-test LEQUAL, textured, dithered. */
-    m64_state st;
+    /* The proven opaque untextured gouraud state (3d-triangle.md). */
     memset(&st, 0, sizeof st);
-    st.z_cntl        = MACH64_Z_EN | MACH64_Z_TEST_LEQUAL;
-    st.scale_3d_cntl = MACH64_SCALE_PIX_EXPAND_DYNAMIC_RANGE | MACH64_DITHER_EN;
-    st.setup_cntl    = 0;                /* smooth shade                    */
-    st.dst_off_pitch = (0x0a /*pitch*/ << 22) | 0x00000; /* back buffer     */
-    st.z_off_pitch   = (0x0a << 22) | 0x40000;
-    st.dp_pix_width  = 0x00060606;       /* 16bpp RGB565 typical            */
+    st.scale_3d_cntl = MACH64_SCALE_3D_CNTL_SOLID;
+    st.setup_cntl    = MACH64_SETUP_CNTL_SHADE;      /* 0, not 0x40 */
+    st.z_cntl        = 0;
+    st.dp_pix_width  = 0x60060666;
+    st.dst_off_pitch = ((128/8) << 22) | (0x600000 >> 3);
+    st.sc_left_right = 0x1fff0000;
+    st.sc_top_bottom = 0x3fff0000;
+    st.dp_write_mask = 0xffffffff;
+    st.clr_cmp_cntl  = 0;
+    st.dp_mix        = MACH64_DP_MIX_SS;
+    st.dp_src        = MACH64_DP_SRC_3D;
 
-    /* Post-transform triangle (values illustrative). */
-    m64_vertex v0 = { .x_y=(50<<16)|50,  .z=0, .w=0x10000, .s=0,       .t=0,       .argb=0xffff0000 };
-    m64_vertex v1 = { .x_y=(200<<16)|60, .z=0, .w=0x10000, .s=0x10000, .t=0,       .argb=0xff00ff00 };
-    m64_vertex v2 = { .x_y=(120<<16)|200,.z=0, .w=0x10000, .s=0x8000,  .t=0x10000, .argb=0xff0000ff };
+    /* Post-transform RGB triangle (W=1.0f = 0x3f800000). */
+    m64_vertex v0 = { xy(20,16),  0, 0x3f800000, 0,0, 0, 0xffff0000 };
+    m64_vertex v1 = { xy(110,44), 0, 0x3f800000, 0,0, 0, 0xff00ff00 };
+    m64_vertex v2 = { xy(50,116), 0, 0x3f800000, 0,0, 0, 0xff0000ff };
 
     m64_emit_state(&cb, &st);
-    size_t state_dwords = cb.n;
-    m64_emit_triangle(&cb, &v0, &v1, &v2);
+    tri_ok = m64_emit_triangle(&cb, &v0, &v1, &v2);
+    m64_emit_terminator(&cb);
 
-    /* Dump the stream. */
-    printf("command stream: %zu dwords (%zu register writes)\n\n",
-           cb.n, cb.n / 2);
-    for (size_t i = 0; i < cb.n; i += 2) {
-        uint32_t reg = deindex(cb.buf[i]);
-        printf("  [%2zu] ADRINDEX=0x%03x  reg=0x%04x %-14s = 0x%08x\n",
-               i/2, cb.buf[i], reg, regname(reg), cb.buf[i+1]);
+    /* Decode the packet stream. */
+    printf("command stream: %zu dwords\n\n", cb.n);
+    i = 0;
+    while (i < cb.n) {
+        uint32_t hdr = cb.buf[i++];
+        int count = ((hdr >> 16) & 0xff) + 1;
+        uint32_t reg = deindex(hdr & 0xffff);
+        int k;
+        npackets++;
+        printf("  packet: ADRINDEX=0x%03x  %d reg(s) from 0x%04x %-16s\n",
+               hdr & 0xffff, count, reg, regname(reg));
+        for (k = 0; k < count && i < cb.n; k++, i++) {
+            printf("      0x%04x %-16s = 0x%08x\n",
+                   reg + k*4, regname(reg + k*4), cb.buf[i]);
+            nregs++;
+        }
     }
 
     /* ---- invariants -------------------------------------------------- */
-    int fail = 0;
-    if (cb.overflow) { printf("\nFAIL: buffer overflow\n"); fail = 1; }
+    if (cb.overflow) { printf("\nFAIL: overflow\n"); fail = 1; }
+    if (!tri_ok)     { printf("\nFAIL: triangle reported degenerate\n"); fail = 1; }
 
-    /* state = 9 regs, triangle = 3 vtx x 6 regs = 18; total 27 pairs. */
-    if (cb.n / 2 != 9 + 18) { printf("\nFAIL: expected 27 writes, got %zu\n", cb.n/2); fail = 1; }
-    if (state_dwords / 2 != 9) { printf("\nFAIL: state != 9 writes\n"); fail = 1; }
+    /* 11 state + 3 vertices(7 each) + 1 trigger + 1 terminator = 16 packets;
+     * 11 + 21 + 1 + 1 = 34 registers. */
+    if (npackets != 16) { printf("\nFAIL: expected 16 packets, got %d\n", npackets); fail = 1; }
+    if (nregs   != 34)  { printf("\nFAIL: expected 34 register writes, got %d\n", nregs); fail = 1; }
 
-    /* The very last write MUST be VERTEX_3_X_Y (the draw trigger). */
-    uint32_t last_reg = deindex(cb.buf[cb.n - 2]);
-    if (last_reg != MACH64_VERTEX_SLOT(2) + MACH64_V_X_Y) {
-        printf("\nFAIL: last write is 0x%04x, expected V3_X_Y 0x%04x\n",
-               last_reg, MACH64_VERTEX_SLOT(2) + MACH64_V_X_Y);
-        fail = 1;
+    /* The terminator MUST be last and target SRC_CNTL=0 (flushes the ring). */
+    {
+        uint32_t last_hdr = cb.buf[cb.n - 2];
+        if (deindex(last_hdr & 0xffff) != MACH64_SRC_CNTL || cb.buf[cb.n-1] != 0) {
+            printf("\nFAIL: stream must end with SRC_CNTL=0 terminator\n"); fail = 1;
+        }
     }
 
-    /* Spot-check the ADRINDEX encoding of a known register. */
+    /* ADRINDEX spot checks (block0 vs block1). */
     if (MACH64_ADRINDEX(MACH64_SCALE_3D_CNTL) != ((0x05fc - 0x400) >> 2)) {
         printf("\nFAIL: ADRINDEX(SCALE_3D_CNTL) wrong\n"); fail = 1;
     }
-    if (MACH64_ADRINDEX(MACH64_SETUP_CNTL) != ((0x0304 >> 2) | 0x0100)) {
-        printf("\nFAIL: ADRINDEX(SETUP_CNTL block1) wrong\n"); fail = 1;
+    if (MACH64_ADRINDEX(MACH64_VERTEX_SLOT(0)) != ((0x0240 >> 2) | 0x0100)) {
+        printf("\nFAIL: ADRINDEX(VERTEX_1 block1) wrong\n"); fail = 1;
+    }
+
+    /* Little-endian writeout: first dword of the buffer, byte-reversed. */
+    {
+        unsigned char le[256*4];
+        size_t bytes = m64_cb_write_le(&cb, le);
+        uint32_t d0 = cb.buf[0];
+        if (bytes != cb.n * 4) { printf("\nFAIL: LE byte count\n"); fail = 1; }
+        if (le[0] != (d0 & 0xff) || le[3] != ((d0 >> 24) & 0xff)) {
+            printf("\nFAIL: LE writeout not little-endian\n"); fail = 1;
+        }
     }
 
     printf("\n%s\n", fail ? "*** TESTS FAILED ***" : "all invariants passed");
