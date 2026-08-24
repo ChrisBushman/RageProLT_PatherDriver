@@ -42,8 +42,10 @@ int gldAttachDrawable(gld_context *ctx, int type, void *drawable, uint32_t flags
         return 0x2715;
     if (drawable) {
         const uint32_t *d = (const uint32_t *)drawable;
-        gld_log("  drawable[0..3] = 0x%08x 0x%08x 0x%08x 0x%08x\n",
-                d[0], d[1], d[2], d[3]);
+        int i;
+        for (i = 0; i < 16; i += 4)
+            gld_log("  drawable[%2d..%2d] = 0x%08x 0x%08x 0x%08x 0x%08x\n",
+                    i, i+3, d[i], d[i+1], d[i+2], d[i+3]);
     }
     /* Placeholder: bind our proven off-screen target so the render pipeline runs
      * end-to-end under the framework.  Real windowed binding comes once the CGS
