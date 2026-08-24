@@ -30,7 +30,7 @@
 
 #define SET(off, fn)  (*(void **)((unsigned char *)table + (off)) = (void *)(fn))
 
-void gldUpdateDispatch(gld_context *ctx, void *table, uint32_t flags)
+int gldUpdateDispatch(gld_context *ctx, void *table, uint32_t flags)
 {
     (void)ctx; (void)flags;   /* single untextured variant for now */
     gld_log("gldUpdateDispatch(table=%p flags=0x%x) caller=%p arg5[0..2]=0x%x 0x%x 0x%x\n",
@@ -67,4 +67,10 @@ void gldUpdateDispatch(gld_context *ctx, void *table, uint32_t flags)
 
     gld_log("  slot[0x28]=%p slot[0x48]=%p installed at table+off\n",
             (void *)mach64_render_triangles, (void *)mach64_render_triangles);
+
+    /* MUST return 0: GLEngine compares this return (r3) to a cached flag to
+     * decide whether to keep our hardware dispatch or reconfigure to software
+     * (GLEngine 0x46d4).  A void return left garbage in r3 -> not-equal ->
+     * software reinstall over our slots every draw.  Reference returns 0. */
+    return 0;
 }

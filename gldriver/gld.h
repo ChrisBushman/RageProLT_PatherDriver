@@ -140,7 +140,7 @@ void mach64_render_quad_strip (gld_context *, const void *, uint32_t);
 void mach64_dispatch_complete (gld_context *, const void *, uint32_t);
 void mach64_dispatch_render_ctl(gld_context *, const void *, uint32_t);
 
-void gldUpdateDispatch(gld_context *ctx, void *table, uint32_t flags);
+int gldUpdateDispatch(gld_context *ctx, void *table, uint32_t flags);
 
 /* ---- core entry points the framework requires (gld_entry.c) ---------
  * Recovered signatures / GL conventions; refined empirically via gld_log. */
