@@ -59,25 +59,35 @@ typedef struct {
 
 /* ---- Our per-context object (mirrors the 0x200-byte struct malloc'd by
  * gldCreateContext).  Only the fields the handshake touches are named. */
+/* Apple's per-context object: a 0x200-byte struct with a FIXED field layout that
+ * BOTH GLEngine and the driver read/write (recovered from ati128gld
+ * gldCreateContext @0x4648).  Offsets MUST match exactly or GLEngine reads
+ * garbage where it expects render state.  Padding makes each named field land at
+ * its true offset; GLEngine-only fields (share ptrs @0x0c-0x18, drawable @0x20,
+ * flags @0x24/0x28, target @0x94, dims @0x1f0/0x1f4, misc state) live in the
+ * _padXX gaps and are written by gldAttachDrawable via raw offsets. */
 typedef struct {
     uint32_t     renderer_index;   /* 0x00                                */
     io_connect_t connect;          /* 0x04 IOServiceOpen result           */
     uint32_t     chip_flag;        /* 0x08                                */
-    /* ... shared ctx + create args at 0x0c/0x10/0x14/0x18 ...            */
-    uint32_t     fmt_caps;         /* 0x2c decoded pixel format           */
+    uint32_t     _pad0c[(0x2c-0x0c)/4];   /* 0x0c..0x2b GLEngine share/drawable/flags */
+    uint32_t     fmt_caps;         /* 0x2c decoded pixel-format caps       */
     uint32_t     mode_word;        /* 0x30                                */
     uint32_t     device_info[3];   /* 0x34..0x3c  <- get_config (sel 3)   */
-    /* mapped regions (IOConnectMapMemory):                               */
-    void        *regs;             /* 0xb8 type 1 surface? see abi note   */
+    uint32_t     _pad40[(0xb8-0x40)/4];   /* 0x40..0xb7 GLEngine render state  */
+    void        *regs;             /* 0xb8 mapped region type 1            */
     uint32_t     regs_size;        /* 0xbc                                */
     void        *surface;          /* 0xc0 type 2                         */
     uint32_t     surface_size;     /* 0xc4                                */
+    uint32_t     _padc8[2];        /* 0xc8,0xcc                           */
     void        *fb;               /* 0xd0 type 4 command buffer          */
     uint32_t     fb_size;          /* 0xd4                                */
+    uint32_t     _padd8;           /* 0xd8                                */
     void        *cmd_regs;         /* 0xdc type 0 register aperture       */
-    void        *backend;          /* 0xe0 our mach64_priv (see below)    */
-    uint8_t      _tail[0x200 - 0xe0 - sizeof(void *)];
+    void        *backend;          /* 0xe0 our mach64_priv (driver-private slot) */
+    uint8_t      _tail[0x200 - 0xe4];     /* 0xe4..0x1ff (incl target/dims) */
 } gld_context;
+typedef char _gld_ctx_size_check[(sizeof(gld_context)==0x200)?1:-1];
 
 /* ---- Our per-context backend state (hung off gld_context.backend) -----
  * Not part of Apple's 0x200 struct -- allocated separately so we can grow it. */
