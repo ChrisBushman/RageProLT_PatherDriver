@@ -31,12 +31,21 @@
  * captured configs came from the software "Generic" renderer so they lack it;
  * we OR it in (0x6dd -> 0x7dd) to mark our configs as accelerated. */
 #define GLD_NODE_ACCEL 0x000007dd
+
+/* node[0x04]: bits 16-23 = 0x02 (a gliCreateContext gate), bits 8-15 = RENDERER
+ * TYPE CODE gliCreateContext looks up in GLEngine's registry ([renderer+0x104]),
+ * bits 0-7 = per-config id.  Runtime trace proved OUR renderer is registered at
+ * type 0x1000 (software Generic = 0x200/0x400).  The captured nodes claimed the
+ * software 0x200/0x400 -> context creation picked software; stamping type 0x1000
+ * (byte 0x10 at bits 8-15) makes gliCreateContext instantiate OUR renderer, so
+ * gldCreateContext finally gets called.  (The CGL scorer skips the node[0x04]
+ * match when the request doesn't set it, so the winning score is unaffected.) */
 static const uint32_t gld_node_templates[GLD_NNODES][GLD_NODE_WORDS] = {
   /* next   [1]  0x04   [2]  0x08         [3] [4] 0x10    [5]0x14     [6] 0x18  [7]0x1c [8]0x20 [9][10][11] [12]0x30 */
-  { 0, 0x00020241, GLD_NODE_ACCEL, 0, 0x00000200, 0x00000000, 0x00000400, 0x00000001, 4, 0,0,0, 7 },
-  { 0, 0x00020242, GLD_NODE_ACCEL, 0, 0x00000200, 0x00000000, 0x00001000, 0x00000001, 4, 0,0,0, 7 },
-  { 0, 0x00020248, GLD_NODE_ACCEL, 0, 0x00004000, 0x00000000, 0x00001000, 0x00000001, 4, 0,0,0, 7 },
-  { 0, 0x00020400, GLD_NODE_ACCEL, 0, 0x00008000, 0x20000000, 0x00001000, 0x00000080, 4, 0,0,0, 7 },
+  { 0, 0x00021041, GLD_NODE_ACCEL, 0, 0x00000200, 0x00000000, 0x00000400, 0x00000001, 4, 0,0,0, 7 },
+  { 0, 0x00021042, GLD_NODE_ACCEL, 0, 0x00000200, 0x00000000, 0x00001000, 0x00000001, 4, 0,0,0, 7 },
+  { 0, 0x00021048, GLD_NODE_ACCEL, 0, 0x00004000, 0x00000000, 0x00001000, 0x00000001, 4, 0,0,0, 7 },
+  { 0, 0x00021000, GLD_NODE_ACCEL, 0, 0x00008000, 0x20000000, 0x00001000, 0x00000080, 4, 0,0,0, 7 },
 };
 
 int gldChoosePixelFormat(void **pf_out, const int *attribs)
