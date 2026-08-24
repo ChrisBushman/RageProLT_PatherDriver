@@ -43,15 +43,20 @@ int main(void)
      * The log (mach64_render_triangles + vtx0) shows if the dispatch fired. */
     glViewport(0, 0, 1024, 768);
     glClearColor(0.1f, 0.2f, 0.4f, 1.f);
-    glClear(GL_COLOR_BUFFER_BIT);          /* apps clear first; sets up render state */
-    glBegin(GL_TRIANGLES);
-        glColor3f(1.f, 0.f, 0.f); glVertex2f(-0.5f, -0.5f);
-        glColor3f(0.f, 1.f, 0.f); glVertex2f( 0.5f, -0.5f);
-        glColor3f(0.f, 0.f, 1.f); glVertex2f( 0.0f,  0.5f);
-    glEnd();
+    glClear(GL_COLOR_BUFFER_BIT);
+    {   /* vertex-array path (glDrawArrays) -- dispatches differently than the
+         * immediate-mode glBegin/glEnd flush that no-ops in GLEngine. */
+        static const GLfloat verts[6]  = { -0.5f,-0.5f,  0.5f,-0.5f,  0.0f,0.5f };
+        static const GLfloat cols[9]   = { 1,0,0,  0,1,0,  0,0,1 };
+        glEnableClientState(GL_VERTEX_ARRAY);
+        glVertexPointer(2, GL_FLOAT, 0, verts);
+        glEnableClientState(GL_COLOR_ARRAY);
+        glColorPointer(3, GL_FLOAT, 0, cols);
+        glDrawArrays(GL_TRIANGLES, 0, 3);
+    }
     glFlush();
     glFinish();
-    printf("drew triangle (with clear)\n");
+    printf("drew triangle (glDrawArrays)\n");
 
     aglSetCurrentContext(NULL);
     aglSetDrawable(ctx, NULL);            /* exits full-screen / releases capture */
