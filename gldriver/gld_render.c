@@ -219,6 +219,13 @@ static uint32_t mach64_gli(gld_context *ctx)
     return 0;
 }
 
+/* Read a 32-bit gli field (0 if the gli can't be located). */
+uint32_t mach64_gli_u32(gld_context *ctx, uint32_t off)
+{
+    uint32_t g = mach64_gli(ctx);
+    return g ? *(const uint32_t *)(uintptr_t)(g + off) : 0;
+}
+
 /* Follow the app's GL depth state.  GLEngine stores it in the gli (recovered by
  * diffing depth configs, tools/mach64_depthstate):
  *   gli+0x6340 bit24 = GL_DEPTH_TEST enable

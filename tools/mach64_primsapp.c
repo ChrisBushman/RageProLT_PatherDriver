@@ -29,6 +29,8 @@ int main(void)
 
     glViewport(0, 0, 1024, 768);
     glDisable(GL_DEPTH_TEST);
+    glPointSize(9.0f);          /* driver reads these from the gli now */
+    glLineWidth(4.0f);
     glClearColor(0.08f, 0.08f, 0.10f, 1.f);
     glClear(GL_COLOR_BUFFER_BIT);
     glEnableClientState(GL_VERTEX_ARRAY);

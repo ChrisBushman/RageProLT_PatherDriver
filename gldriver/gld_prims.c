@@ -70,12 +70,23 @@ static void pack_at(const void *vp, float gx, float gy, float fb_h, m64_vertex *
     mach64_pack_vertex(o, gx, fb_h - gy, depth, w, argb);
 }
 
-/* One point -> a 2s x 2s quad (two same-winding triangles) centred on it. */
-static void draw_point(gld_context *ctx, const void *vp, float fb_h)
+/* Read a gli float field (glPointSize@0x6630 / glLineWidth@0x6394), defaulting
+ * to 1.0.  Returns the GL size clamped to a sane minimum. */
+static float gli_size(gld_context *ctx, uint32_t off)
+{
+    uint32_t bits = mach64_gli_u32(ctx, off);
+    float f;
+    if (!bits) return 1.0f;
+    __builtin_memcpy(&f, &bits, 4);
+    return (f >= 1.0f) ? f : 1.0f;
+}
+
+/* One point -> a size x size quad (two same-winding triangles) centred on it.
+ * s is the half-extent (GL point size is the diameter). */
+static void draw_point(gld_context *ctx, const void *vp, float fb_h, float s)
 {
     const unsigned char *v = (const unsigned char *)vp;
     float x = *(const float *)(v + GVOFF_X), y = *(const float *)(v + GVOFF_Y);
-    const float s = 1.0f;                        /* half extent (~2px point) */
     m64_vertex a, b, c, d;
     pack_at(vp, x - s, y - s, fb_h, &a);
     pack_at(vp, x + s, y - s, fb_h, &b);
@@ -87,14 +98,14 @@ static void draw_point(gld_context *ctx, const void *vp, float fb_h)
 
 /* One line v0->v1 -> a width-2 quad, offset perpendicular to the major axis
  * (offset in Y for x-major lines, in X for y-major), per Mesa mach64_draw_line. */
-static void draw_line(gld_context *ctx, const void *v0, const void *v1, float fb_h)
+static void draw_line(gld_context *ctx, const void *v0, const void *v1,
+                      float fb_h, float wdt)
 {
     float x0 = *(const float *)((const unsigned char *)v0 + GVOFF_X);
     float y0 = *(const float *)((const unsigned char *)v0 + GVOFF_Y);
     float x1 = *(const float *)((const unsigned char *)v1 + GVOFF_X);
     float y1 = *(const float *)((const unsigned char *)v1 + GVOFF_Y);
     float adx = x1 - x0, ady = y1 - y0, ix, iy;
-    const float wdt = 1.0f;                      /* half width (~2px line) */
     m64_vertex A, B, C, D;
     if (adx < 0) adx = -adx;
     if (ady < 0) ady = -ady;
@@ -176,28 +187,33 @@ void mach64_render_quad_strip(gld_context *ctx, const void *v, uint32_t n)
  * the ring; the validated triangle family above is complete. ------------ */
 #define FB_H(ctx) ((float)*(const uint32_t *)((const unsigned char *)(ctx) + 0x1f4))
 
+/* gli offsets recovered by diffing point-size/line-width configs (tools/
+ * mach64_ptlnstate): glPointSize float @0x6630, glLineWidth float @0x6394. */
+#define GLI_POINT_SIZE  0x6630
+#define GLI_LINE_WIDTH  0x6394
+
 void mach64_render_points(gld_context *ctx, const void *v, uint32_t n)
 {
-    float fb_h = FB_H(ctx); uint32_t i;
+    float fb_h = FB_H(ctx), s = gli_size(ctx, GLI_POINT_SIZE) * 0.5f; uint32_t i;
     mach64_sync_depth_from_gli(ctx);
-    for (i = 0; i < n; i++) draw_point(ctx, VTX(v, i), fb_h);
+    for (i = 0; i < n; i++) draw_point(ctx, VTX(v, i), fb_h, s);
 }
 void mach64_render_lines(gld_context *ctx, const void *v, uint32_t n)
 {
-    float fb_h = FB_H(ctx); uint32_t i;
+    float fb_h = FB_H(ctx), w = gli_size(ctx, GLI_LINE_WIDTH) * 0.5f; uint32_t i;
     mach64_sync_depth_from_gli(ctx);
-    for (i = 0; i + 2 <= n; i += 2) draw_line(ctx, VTX(v, i), VTX(v, i+1), fb_h);
+    for (i = 0; i + 2 <= n; i += 2) draw_line(ctx, VTX(v, i), VTX(v, i+1), fb_h, w);
 }
 void mach64_render_line_strip(gld_context *ctx, const void *v, uint32_t n)
 {
-    float fb_h = FB_H(ctx); uint32_t i;
+    float fb_h = FB_H(ctx), w = gli_size(ctx, GLI_LINE_WIDTH) * 0.5f; uint32_t i;
     mach64_sync_depth_from_gli(ctx);
-    for (i = 1; i < n; i++) draw_line(ctx, VTX(v, i-1), VTX(v, i), fb_h);
+    for (i = 1; i < n; i++) draw_line(ctx, VTX(v, i-1), VTX(v, i), fb_h, w);
 }
 void mach64_render_line_loop(gld_context *ctx, const void *v, uint32_t n)
 {
-    float fb_h = FB_H(ctx); uint32_t i;
+    float fb_h = FB_H(ctx), w = gli_size(ctx, GLI_LINE_WIDTH) * 0.5f; uint32_t i;
     mach64_sync_depth_from_gli(ctx);
-    for (i = 1; i < n; i++) draw_line(ctx, VTX(v, i-1), VTX(v, i), fb_h);
-    if (n > 2) draw_line(ctx, VTX(v, n-1), VTX(v, 0), fb_h);   /* close the loop */
+    for (i = 1; i < n; i++) draw_line(ctx, VTX(v, i-1), VTX(v, i), fb_h, w);
+    if (n > 2) draw_line(ctx, VTX(v, n-1), VTX(v, 0), fb_h, w);   /* close the loop */
 }
