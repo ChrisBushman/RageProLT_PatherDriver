@@ -6,6 +6,10 @@
 set pagination off
 set width 0
 set height 0
+# glDrawArrays lives in a shared lib not mapped until runtime; run to main first
+# so the framework symbols are loaded, THEN set the breakpoint.
+break main
+run
 break glDrawArrays
 commands
   silent
@@ -28,5 +32,5 @@ commands
   printf "=== DONE steps=%d calls=%d ===\n", $n, $calls
   quit
 end
-run
+continue
 quit
