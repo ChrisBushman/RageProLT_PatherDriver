@@ -26,11 +26,15 @@
  * that isn't ours. */
 #define GLD_NODE_WORDS 13
 #define GLD_NNODES     4
-/* node[0x08] bit 0x100 = the HARDWARE/ACCELERATED marker: cglChoosePixelFormat's
- * primary scoring loop skips any node without it (andi. 0x100 / beq).  The
- * captured configs came from the software "Generic" renderer so they lack it;
- * we OR it in (0x6dd -> 0x7dd) to mark our configs as accelerated. */
-#define GLD_NODE_ACCEL 0x000007dd
+/* node[0x08] = the config CAPABILITY bitmask.  The scorer disqualifies a node
+ * unless request[0x08] is a SUBSET (andc. request,~node -> reject), so node[0x08]
+ * must advertise every capability any request can ask for.  Bits recovered by
+ * dumping request[0x08] at the scorer:
+ *   0x100 = HARDWARE/ACCELERATED (also gates the primary scoring loop + a +0x258
+ *           score bonus); the captured software "Generic" configs lacked it.
+ *   0x002 = FULL-SCREEN capability (full-screen requests set request[0x08]=0x502).
+ * Base captured value 0x6dd | 0x100 (accel) | 0x002 (fullscreen) = 0x7df. */
+#define GLD_NODE_ACCEL 0x000007df
 
 /* node[0x04]: bits 16-23 = 0x02 (a gliCreateContext gate), bits 8-15 = RENDERER
  * TYPE CODE gliCreateContext looks up in GLEngine's registry ([renderer+0x104]),
