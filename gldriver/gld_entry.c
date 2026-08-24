@@ -93,15 +93,14 @@ int gldAttachDrawable(gld_context *ctx, int type, void *drawable, uint32_t flags
 
         mach64_set_render_target(ctx, base_bytes, fb_pitch_px);
 
-        /* DEPTH (step 1 - safe live probe): bind a Z buffer past the visible
-         * framebuffer and enable Z with Z_TEST_ALWAYS + Z write.  ALWAYS passes,
-         * so geometry renders normally -- this only proves the corrected Z_CNTL
-         * / Z_OFF_PITCH path executes on hardware WITHOUT wedging the engine.
-         * Z buffer: 16-bit, same pitch as the FB, at VRAM 0x400000 (fb is base
-         * 0x1000 + 1024x768x4 ~ 0x301000, so no overlap).  Switch to GL_LESS +
-         * real per-vertex Z + a Z clear once this is confirmed safe. */
+        /* DEPTH: bind a 16-bit Z buffer past the visible framebuffer (fb is base
+         * 0x1000 + 1024x768x4 ~ 0x301000, so 0x400000 doesn't overlap), enable
+         * GL_LESS + Z write, and clear it to far.  Real per-vertex Z now comes
+         * from the NDC z in mach64_read_vertex, so overlapping geometry occludes
+         * correctly (Z_CNTL/vertex-Z/Z_OFF_PITCH all verified vs the RRG spec). */
         mach64_set_zbuffer(ctx, 0x400000u, fb_pitch_px);
-        mach64_set_depth_test(ctx, 1, 0x0207 /* GL_ALWAYS */);
+        mach64_set_depth_test(ctx, 1, 0x0201 /* GL_LESS */);
+        mach64_clear_zbuffer(ctx);
 
         /* EXPERIMENT (root-cause validation): GLEngine leaves its drawable
          * descriptor gli[0x789c] ALL-ZEROS for our HW surface (surface-binding

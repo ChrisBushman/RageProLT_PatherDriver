@@ -78,6 +78,10 @@
 #define MACH64_DP_MIX_SS            0x00070007u  /* BKGD_MIX_S | FRGD_MIX_S   */
 #define MACH64_DP_FRGD_CLR          0x06c4
 #define MACH64_CLR_CMP_CNTL         0x0708
+/* GUI (2D) solid-fill regs -- used to clear the Z buffer via the engine */
+#define MACH64_DST_X_Y              0x06e8
+#define MACH64_DST_WIDTH_HEIGHT     0x06ec
+#define MACH64_GUI_TRAJ_CNTL        0x0730
 
 /* ---- Bus-master DMA control (VERIFIED ring, bus-master-ring.md) -------
  * The engine bus-master-reads a descriptor ring (BM_GUI_TABLE) and, per

@@ -19,6 +19,7 @@
 #include <IOKit/IOKitLib.h>
 #include "gld.h"
 #include "../common/mach64_abi.h"
+#include "../common/mach64_regs.h"
 
 /* ---- geometry: post-T&L float vertex -> hardware m64_vertex ----------
  * GLEngine gives window-space x,y (pixels, top-left origin), z, w, and a packed
@@ -61,6 +62,37 @@ uint32_t mach64_submit(gld_context *ctx, m64_cmdbuf *cb)
                                   1, 1, (int)bytes, &bufferID);
     p->last_stamp = bufferID;
     return bufferID;
+}
+
+/* Clear the bound Z buffer to far (0xffff) via a 2D solid fill through the DMA
+ * path (proven mach64_fill register sequence).  The 16-bit Z buffer is filled
+ * as 32bpp 0xffffffff (= two 0xffff Z values), so the fill is z_pitch/2 wide.
+ * Marks the 3D state dirty so the next triangle re-emits the render state. */
+void mach64_clear_zbuffer(gld_context *ctx)
+{
+    mach64_priv *p = MACH64_PRIV(ctx);
+    m64_cmdbuf cb;
+    uint32_t zoff = p->z_off;
+    uint32_t w32  = p->z_pitch / 2;                 /* 16-bit px -> 32-bit px */
+    uint32_t h    = *(const uint32_t *)((const char *)ctx + 0x1f4);  /* height */
+    if (!zoff || !w32 || !h) return;
+    m64_cb_init(&cb, p->scratch, sizeof(p->scratch) / sizeof(p->scratch[0]));
+    m64_reg(&cb, MACH64_Z_CNTL,          0);              /* Z off for the fill */
+    m64_reg(&cb, MACH64_SCALE_3D_CNTL,   0);
+    m64_reg(&cb, MACH64_GUI_TRAJ_CNTL,   (1u<<0) | (1u<<1));   /* L->R, T->B */
+    m64_reg(&cb, MACH64_DP_PIX_WIDTH,    0x60060666u);   /* 32bpp */
+    m64_reg(&cb, MACH64_DP_FRGD_CLR,     0xffffffffu);   /* Z far */
+    m64_reg(&cb, MACH64_DP_WRITE_MASK,   0xffffffffu);
+    m64_reg(&cb, MACH64_DP_MIX,          (3u<<0) | (7u<<16));  /* BKGD_MIX_D|FRGD_MIX_S */
+    m64_reg(&cb, MACH64_DP_SRC,          (1u<<0) | (1u<<8));   /* both srcs = FRGD_CLR */
+    m64_reg(&cb, MACH64_SC_LEFT_RIGHT,   (0x1fffu<<16) | 0);
+    m64_reg(&cb, MACH64_SC_TOP_BOTTOM,   (0x1fffu<<16) | 0);
+    m64_reg(&cb, MACH64_CLR_CMP_CNTL,    0);
+    m64_reg(&cb, MACH64_DST_OFF_PITCH,   ((w32 / 8) << 22) | (zoff >> 3));
+    m64_reg(&cb, MACH64_DST_X_Y,         0);
+    m64_reg(&cb, MACH64_DST_WIDTH_HEIGHT, (h << 16) | w32);    /* triggers the fill */
+    mach64_submit(ctx, &cb);
+    p->dirty |= MACH64_DIRTY_STATE;
 }
 
 /* ---- one triangle: the core draw path -------------------------------
