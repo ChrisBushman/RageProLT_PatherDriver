@@ -147,6 +147,15 @@ void mach64_render_triangles(gld_context *ctx, const void *v, uint32_t n)
 void mach64_render_tri_strip(gld_context *ctx, const void *v, uint32_t n)
 {
     uint32_t i;
+    /* TEXCOORD HUNT: dump v[0] fully so the app's distinctive S/T can be located. */
+    if (v && n) { const unsigned char *q = (const unsigned char *)v; uint32_t j;
+        gld_log("TEXHUNT tri_strip n=%u:\n", n);
+        for (j = 0; j < 0x100; j += 0x20)
+            gld_log("  v0+0x%02x: %08x %08x %08x %08x %08x %08x %08x %08x\n", j,
+                *(const uint32_t*)(q+j+0x00),*(const uint32_t*)(q+j+0x04),
+                *(const uint32_t*)(q+j+0x08),*(const uint32_t*)(q+j+0x0c),
+                *(const uint32_t*)(q+j+0x10),*(const uint32_t*)(q+j+0x14),
+                *(const uint32_t*)(q+j+0x18),*(const uint32_t*)(q+j+0x1c)); }
     mach64_sync_depth_from_gli(ctx);   /* Z_CNTL follows the app's GL depth state */
     for (i = 2; i < n; i++)                      /* flip winding on odd tris */
         if (i & 1) emit_tri(ctx, v, i-1, i-2, i);

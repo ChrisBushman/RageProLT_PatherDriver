@@ -16,6 +16,7 @@
 #include "../common/mach64_abi.h"   /* kMach64Sel_* selector indices */
 #include <stdio.h>
 #include <stdarg.h>
+#include <stdlib.h>
 
 /* ---- diagnostic log ------------------------------------------------- */
 void gld_log(const char *fmt, ...)
@@ -242,11 +243,41 @@ GLD_STUB(gldGetPipelineProgramInfo)
 GLD_STUB(gldCreateQuery)           GLD_STUB(gldDestroyQuery)
 GLD_STUB(gldGetQueryInfo)
 GLD_STUB(gldCreateShared)          GLD_STUB(gldDestroyShared)
-GLD_STUB(gldCreateTexture)         GLD_STUB(gldDeleteTexture)
-GLD_STUB(gldCreateTextureLevel)    GLD_STUB(gldDeleteTextureLevel)
-GLD_STUB(gldModifyTexture)         GLD_STUB(gldModifyTextureLevel)
-GLD_STUB(gldGetTextureLevel)       GLD_STUB(gldGetTextureLevelInfo)
-GLD_STUB(gldIsTextureResident)
+/* ---- Texture path (INVESTIGATION) --------------------------------------
+ * Return a valid 0x40-byte texture-object (faithful to the reference
+ * gldCreateTexture, ati128gld 0x6838) so GLEngine sets up texturing and emits
+ * per-vertex texcoords we can locate; log every texture call + its args to map
+ * how GLEngine delivers pixels.  Not a real upload yet. */
+void gldCreateTexture(void *ctx, void **out, void *shared)
+{
+    unsigned char *t = (unsigned char *)calloc(1, 0x40);
+    (void)ctx;
+    if (t) {
+        *(uint32_t *)(t + 0x04) = 3;
+        *(uint32_t *)(t + 0x30) = (uint32_t)(uintptr_t)shared;   /* format/shared */
+        *(uint32_t *)(t + 0x18) = (uint32_t)(uintptr_t)(t + 0x1c);  /* list head */
+        *(uint32_t *)(t + 0x20) = (uint32_t)(uintptr_t)(t + 0x18);
+        t[0x38] = 0xff; t[0x39] = 0x23;
+    }
+    gld_log("gldCreateTexture(out=%p shared=%p) -> texobj=%p\n", (void*)out, shared, (void*)t);
+    if (out) *out = t;
+}
+int gldDeleteTexture(void *ctx, void *t)
+{ (void)ctx; gld_log("gldDeleteTexture(%p)\n", t); if (t) free(t); return 0; }
+int gldCreateTextureLevel(void *ctx, void *t, uint32_t a3, uint32_t lvl, uint32_t a5, uint32_t a6, uint32_t a7)
+{ (void)ctx; gld_log("gldCreateTextureLevel(t=%p a3=0x%x lvl=%u a5=0x%x a6=0x%x a7=0x%x)\n", t,a3,lvl,a5,a6,a7); return 0; }
+int gldDeleteTextureLevel(void *ctx, void *t, uint32_t lvl)
+{ (void)ctx; gld_log("gldDeleteTextureLevel(t=%p lvl=%u)\n", t, lvl); return 0; }
+int gldModifyTexture(void *ctx, void *t, uint32_t a3)
+{ (void)ctx; gld_log("gldModifyTexture(t=%p a3=0x%x)\n", t, a3); return 0; }
+int gldModifyTextureLevel(void *ctx, void *t, uint32_t a3, uint32_t lvl, uint32_t a5, uint32_t a6, uint32_t a7)
+{ (void)ctx; gld_log("gldModifyTextureLevel(t=%p a3=0x%x lvl=%u a5=0x%x a6=0x%x a7=0x%x)\n", t,a3,lvl,a5,a6,a7); return 0; }
+int gldGetTextureLevel(void *ctx, void *t, uint32_t a3, uint32_t a4, uint32_t a5, uint32_t a6, uint32_t a7)
+{ (void)ctx; gld_log("gldGetTextureLevel(t=%p a3=0x%x a4=0x%x a5=0x%x a6=0x%x a7=0x%x)\n", t,a3,a4,a5,a6,a7); return 0; }
+int gldGetTextureLevelInfo(void *ctx, void *t, uint32_t a3, uint32_t a4, uint32_t a5, uint32_t a6, uint32_t a7)
+{ (void)ctx; gld_log("gldGetTextureLevelInfo(t=%p a3=0x%x a4=0x%x a5=0x%x a6=0x%x a7=0x%x)\n", t,a3,a4,a5,a6,a7); return 0; }
+int gldIsTextureResident(void *ctx, void *t)
+{ (void)ctx; gld_log("gldIsTextureResident(%p)\n", t); return 1; }
 GLD_STUB(gldCreateVertexArray)     GLD_STUB(gldModifyVertexArray)
 GLD_STUB(gldFlushVertexArray)      GLD_STUB(gldDestroyVertexArray)
 GLD_STUB(gldDestroyMemoryPluginData) GLD_STUB(gldGetMemoryPluginData)
