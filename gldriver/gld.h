@@ -101,6 +101,7 @@ typedef struct {
     uint32_t   target_pitch;       /* current render target pitch (pixels) */
     uint32_t   z_off;              /* depth buffer byte offset (0 = none)  */
     uint32_t   z_pitch;            /* depth buffer pitch (16-bit Z pixels)  */
+    uint32_t   frame_new;          /* 1 => clear Z before next frame's geom */
     uint32_t   scratch[1024];      /* host-order command-buffer staging    */
 } mach64_priv;
 

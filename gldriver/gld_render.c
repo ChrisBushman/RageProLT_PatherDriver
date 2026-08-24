@@ -109,6 +109,15 @@ int mach64_draw_triangle(gld_context *ctx, const m64_vertex *v0,
     mach64_priv *p = MACH64_PRIV(ctx);
     m64_cmdbuf cb;
 
+    /* Per-frame Z clear: on the first triangle of a new frame, clear the depth
+     * buffer to far.  frame_new is armed at drawable attach and at each buffer
+     * swap (gldFlushBuffer).  GLEngine clears colour itself but never touches
+     * our Z buffer, so the driver owns the depth clear. */
+    if (p->z_off && p->frame_new) {
+        mach64_clear_zbuffer(ctx);   /* separate submit; also marks state dirty */
+        p->frame_new = 0;
+    }
+
     m64_cb_init(&cb, p->scratch, sizeof(p->scratch) / sizeof(p->scratch[0]));
 
     if (p->dirty & MACH64_DIRTY_STATE) {

@@ -100,7 +100,7 @@ int gldAttachDrawable(gld_context *ctx, int type, void *drawable, uint32_t flags
          * correctly (Z_CNTL/vertex-Z/Z_OFF_PITCH all verified vs the RRG spec). */
         mach64_set_zbuffer(ctx, 0x400000u, fb_pitch_px);
         mach64_set_depth_test(ctx, 1, 0x0201 /* GL_LESS */);
-        mach64_clear_zbuffer(ctx);
+        MACH64_PRIV(ctx)->frame_new = 1;   /* clear Z before the first frame */
 
         /* EXPERIMENT (root-cause validation): GLEngine leaves its drawable
          * descriptor gli[0x789c] ALL-ZEROS for our HW surface (surface-binding
@@ -226,7 +226,8 @@ void gldInitDispatch(gld_context *ctx, void *table, void *outinfo)
 /* gldFlushBuffer: swap/present the drawable.  Submits are synchronous today, so
  * fence.  TODO: real front/back flip once double-buffered surfaces are bound. */
 int gldFlushBuffer(gld_context *ctx, void *drawable)
-{ (void)drawable; return gldFinish(ctx); }
+{ (void)drawable; MACH64_PRIV(ctx)->frame_new = 1; /* next frame: clear Z */
+  return gldFinish(ctx); }
 
 /* ---- feature stubs: present so GLEngine's lookups are non-NULL; only called
  * if the app uses the feature.  Return 0 (NULL/success). --------------- */
