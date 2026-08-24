@@ -14,16 +14,20 @@
 #include <AGL/agl.h>
 #include <OpenGL/gl.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <unistd.h>
 
+#define OW 1024
+#define OH 768
 int main(void)
 {
-    GDHandle dev = GetMainDevice();
-    /* NO AGL_ACCELERATED -> software renderer (with our bundle uninstalled). */
-    GLint attribs[] = { AGL_RGBA, AGL_FULLSCREEN,
+    /* AGL_OFFSCREEN -> Apple software renderer into a malloc'd buffer; no
+     * display capture, no window server, reliable.  Same viewport/geometry as
+     * fstest so the T&L batch at sub_4530 is comparable. */
+    GLint attribs[] = { AGL_RGBA, AGL_OFFSCREEN,
                         AGL_DEPTH_SIZE, 16, AGL_NONE };
-    AGLPixelFormat pf = aglChoosePixelFormat(&dev, 1, attribs);
-    printf("aglChoosePixelFormat(software) -> %p (err %d)\n",
+    AGLPixelFormat pf = aglChoosePixelFormat(NULL, 0, attribs);
+    printf("aglChoosePixelFormat(offscreen) -> %p (err %d)\n",
            (void*)pf, (int)aglGetError());
     if (!pf) return 1;
 
@@ -31,8 +35,9 @@ int main(void)
     printf("aglCreateContext -> %p (err %d)\n", (void*)ctx, (int)aglGetError());
     if (!ctx) { aglDestroyPixelFormat(pf); return 1; }
 
-    GLboolean ok = aglSetFullScreen(ctx, 0, 0, 0, 0);
-    printf("aglSetFullScreen -> %d (err %d)\n", (int)ok, (int)aglGetError());
+    void *buf = malloc(OW * OH * 4);
+    GLboolean ok = aglSetOffScreen(ctx, OW, OH, OW * 4, buf);
+    printf("aglSetOffScreen -> %d (err %d)\n", (int)ok, (int)aglGetError());
 
     aglSetCurrentContext(ctx);
     printf("GL_RENDERER = %s\n", (const char *)glGetString(GL_RENDERER));
