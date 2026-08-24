@@ -61,30 +61,40 @@ int main(void)
     ctx->backend=calloc(1,sizeof(mach64_priv));
     mach64_init_state((mach64_priv*)ctx->backend);
     mach64_set_render_target(ctx, TARGET_OFF, PITCH_PIX);
+    printf("surface map size = 0x%lx  (Z buffer at 0x%x, %s)\n",
+           (unsigned long)ss, ZBUF_OFF,
+           (ZBUF_OFF+0x8000<=ss) ? "IN map" : "OUT of map!");
+
+    /* ---- CONTROL: depth OFF -> last-drawn (blue) should win ---- */
+    for(y=0;y<128;y++) for(x=0;x<128;x++) OSWriteLittleInt32((void*)SURF, TARGET_OFF + y*ROW_BYTES + x*4, 0);
+    big_tri(ctx, 0.75f, 0x00ff0000u);
+    big_tri(ctx, 0.25f, 0x0000ff00u);
+    big_tri(ctx, 0.90f, 0x000000ffu);
+    gldFinish(ctx);
+    cen = pix(64,50) & 0xffffff;
+    printf("[depth OFF] center = 0x%06x  (expect BLUE 0000ff = pipeline ok)\n", cen);
+
+    /* ---- DEPTH ON ---- */
     mach64_set_zbuffer(ctx, ZBUF_OFF, PITCH_PIX);
     mach64_set_depth_test(ctx, 1, GLD_LESS_F);
-
-    /* clear colour to black and the Z buffer to far (0xffff) */
-    for(y=0;y<128;y++) for(x=0;x<128;x++) OSWriteLittleInt32((void*)SURF, TARGET_OFF + y*ROW_BYTES + x*4, 0);
-    for(x=0;x<128*128/2;x++) OSWriteLittleInt32((void*)SURF, ZBUF_OFF + x*4, 0xffffffff);
-
     printf("z_off_pitch=0x%08x z_cntl=0x%08x\n",
            ((mach64_priv*)ctx->backend)->hw.z_off_pitch,
            ((mach64_priv*)ctx->backend)->hw.z_cntl);
-
+    for(y=0;y<128;y++) for(x=0;x<128;x++) OSWriteLittleInt32((void*)SURF, TARGET_OFF + y*ROW_BYTES + x*4, 0);
+    for(x=0;x<128*128/2;x++) OSWriteLittleInt32((void*)SURF, ZBUF_OFF + x*4, 0xffffffff);
+    printf("  Z[after clear] 0x%04x 0x%04x (expect ffff)\n",
+           OSReadLittleInt16((void*)SURF, ZBUF_OFF), OSReadLittleInt16((void*)SURF, ZBUF_OFF+2));
     big_tri(ctx, 0.75f, 0x00ff0000u);   /* red   far    (1st) */
     big_tri(ctx, 0.25f, 0x0000ff00u);   /* green nearest(2nd) */
     big_tri(ctx, 0.90f, 0x000000ffu);   /* blue  farther(3rd, should be occluded) */
     gldFinish(ctx);
 
     cen = pix(64,50) & 0x00ffffff;
-    printf("center(64,50) = 0x%06x  -> %s\n", cen,
+    printf("[depth ON ] center = 0x%06x  -> %s\n", cen,
            cen==0x00ff00 ? "GREEN (nearest) -- DEPTH WORKS" :
            cen==0x0000ff ? "BLUE (last-drawn) -- depth NOT applied" :
-           cen==0xff0000 ? "RED (first) -- unexpected" : "other");
-    /* sample a few points across the triangle */
-    for(y=20;y<=110;y+=30){ printf("  row %3d:",y);
-        for(x=20;x<=110;x+=15) printf(" %06x", pix(x,y)&0xffffff);
-        printf("\n"); }
+           cen==0xff0000 ? "RED (first) -- unexpected" : "black/other");
+    printf("  Z[after draw] @center = 0x%04x (expect ~green z 0.25*ffff=0x3fff)\n",
+           OSReadLittleInt16((void*)SURF, ZBUF_OFF + 50*PITCH_PIX*2 + 64*2));
     return 0;
 }
