@@ -17,7 +17,7 @@ commands
   set $n = 0
   set $lastlr = $lr
   set $calls = 0
-  while $n < 120000 && $calls < 700
+  while $n < 12000 && $calls < 120
     stepi
     if $lr != $lastlr
       set $dp = $pc - $lr
@@ -30,6 +30,7 @@ commands
     set $n = $n + 1
   end
   printf "=== DONE steps=%d calls=%d ===\n", $n, $calls
+  kill
   quit
 end
 continue
