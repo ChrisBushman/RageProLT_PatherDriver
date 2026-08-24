@@ -65,14 +65,21 @@ int main(void)
            (unsigned long)ss, ZBUF_OFF,
            (ZBUF_OFF+0x8000<=ss) ? "IN map" : "OUT of map!");
 
-    /* ---- CONTROL: depth OFF -> last-drawn (blue) should win ---- */
+    /* ---- CONTROL: depth OFF, z=0 (proven-safe) -> last-drawn (blue) wins ---- */
     for(y=0;y<128;y++) for(x=0;x<128;x++) OSWriteLittleInt32((void*)SURF, TARGET_OFF + y*ROW_BYTES + x*4, 0);
-    big_tri(ctx, 0.75f, 0x00ff0000u);
-    big_tri(ctx, 0.25f, 0x0000ff00u);
-    big_tri(ctx, 0.90f, 0x000000ffu);
+    big_tri(ctx, 0.f, 0x00ff0000u);
+    big_tri(ctx, 0.f, 0x0000ff00u);
+    big_tri(ctx, 0.f, 0x000000ffu);
     gldFinish(ctx);
     cen = pix(64,50) & 0xffffff;
-    printf("[depth OFF] center = 0x%06x  (expect BLUE 0000ff = pipeline ok)\n", cen);
+    printf("[depth OFF z=0] center = 0x%06x  (expect BLUE 0000ff = pipeline ok)\n", cen);
+
+    /* ---- CONTROL2: depth OFF, z=0.75 -> does a large packed Z break rendering? ---- */
+    for(y=0;y<128;y++) for(x=0;x<128;x++) OSWriteLittleInt32((void*)SURF, TARGET_OFF + y*ROW_BYTES + x*4, 0);
+    big_tri(ctx, 0.75f, 0x000000ffu);
+    gldFinish(ctx);
+    cen = pix(64,50) & 0xffffff;
+    printf("[depth OFF z=0.75] center = 0x%06x  (BLUE=z-value ok, black=z-format breaks setup)\n", cen);
 
     /* ---- DEPTH ON ---- */
     mach64_set_zbuffer(ctx, ZBUF_OFF, PITCH_PIX);
