@@ -96,22 +96,40 @@ int gldCreateContext(gld_context **outp, void *pixfmt, void *shared,
     mach64_init_state((mach64_priv *)ctx->backend);
 
     /* Consume the chosen pixel format (from gldChoosePixelFormat): record the
-     * colour/buffer caps and turn on the depth-test path if a depth buffer was
-     * requested.  The render TARGET (surface offset/pitch) is bound later, when
-     * the drawable is attached (mach64_set_render_target from get_surface_info);
-     * the framework calls gldUpdateDispatch separately to install our render
-     * slots. */
-    {
-        const gld_pixel_format *pf = (const gld_pixel_format *)pixfmt;
-        if (pf) {
-            ctx->fmt_caps  = pf->color_size;
-            ctx->mode_word = pf->flags;
-            /* NOTE: do NOT enable the depth test yet even when depth was
-             * requested -- we have no depth buffer (Z_OFF_PITCH / depth surface
-             * unallocated), so Z_EN would fail every fragment and draw nothing.
-             * Keep depth off until the depth surface lands (see gld_state.c). */
-            /* if (pf->depth_size > 0) mach64_set_depth_test(ctx, 1, 0x0201); */
+     * colour/buffer caps.  GLEngine reads ctx+0x2c to decide it can hardware-
+     * rasterize this format -- WITHOUT it, it never dispatches geometry to our
+     * render slots (confirmed: render slot never called).  Decode ported from
+     * the reference gldCreateContext (ati128gld 0x48fc-0x4ab8).  Written at the
+     * RAW 0x2c offset because our gld_context field layout is off and the map
+     * calls above stored surface_size there, so this must come AFTER them.
+     * (pixfmt is the raw 0x34-byte node, NOT our gld_pixel_format struct.) */
+    if (pixfmt) {
+        const uint32_t *n = (const uint32_t *)pixfmt;
+        uint32_t f08 = n[2], f0c = n[3], f10 = n[4];
+        uint32_t caps = 0;
+        if (!(f08 & 2))        caps = 0x20;
+        else if (f0c & 0xa)    caps = 0x8000;
+        if (f08 & 0x800)       caps |= 0x2000;
+        if (f0c & 8)           caps |= 0x400;
+        else if (f08 & 2)      caps |= 0x800;
+        if (f0c & 2)           caps |= 0x10;
+        if (f10 & 0x03ffff00u) {
+            if      (f10 & 0x00003fc0u) caps |= 3;
+            else if (f10 & 0x0003f000u) caps |= 4;
+            else if (f10 & 0x03f00000u) caps |= 0xb;
+        } else if (f10 & 0x3f000000u) {
+            if      (f10 & 0x03f00000u) caps |= 0xc;
+            else if (f10 & 0x0c000000u) caps |= 0xd;
         }
+        if (n[6] != 1) caps |= 0x40;                       /* node[0x18]      */
+        if (n[7] != 1) caps |= 0x80;                       /* node[0x1c]      */
+        { short d = (short)(n[8] & 0xffff);                /* halfword @0x22  */
+          if (d == 1) caps |= 0x100; else if (d == 2) caps |= 0x200; }
+        { short s = (short)((n[9] >> 16) & 0xffff);        /* halfword @0x24  */
+          if (s > 0) caps |= 0x1000; }
+        *(uint32_t *)((unsigned char *)ctx + 0x2c) = caps;
+        gld_log("  ctx+0x2c fmt_caps = 0x%x (node [08]=0x%x [10]=0x%x)\n",
+                caps, f08, f10);
     }
 
     *outp = ctx;
