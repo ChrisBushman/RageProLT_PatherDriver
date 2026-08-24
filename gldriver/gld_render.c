@@ -165,33 +165,27 @@ int mach64_flush(gld_context *ctx, uint32_t a2, uint32_t a3, uint32_t a4,
     m64_vertex v0, v1, v2;
     int i;
     (void)a6; (void)a7;
-    gld_log("*** mach64_flush  a2=0x%x a3=0x%x  tailcall-caller=%p\n",
-            a2, a3, __builtin_return_address(0));
-    /* Find the vertex batch: dump candidate regions (hex; decode floats offline).
-     * ctx+0x10 = the render sub-object (ref reads it for viewport scale/offset). */
-    if (a3 > 0x10000) { const uint32_t *p = (const uint32_t *)a3;
-        for (i = 0; i < 8; i++) gld_log("   a3[%d]=0x%08x\n", i, p[i]); }
-    if (a2 > 0x2000)  { const uint32_t *p = (const uint32_t *)a2;
-        for (i = 0; i < 8; i++) gld_log("   a2[%d]=0x%08x\n", i, p[i]); }
+    gld_log("*** mach64_flush args: a2=0x%x a3=0x%x a4=0x%x a5=0x%x a6=0x%x a7=0x%x\n",
+            a2, a3, a4, a5, a6, a7);
+    /* Decisive: dump EACH arg (r4..r9) deref'd as hex AND float.  The reference
+     * sub_c3c0 reads its r4 as `lfs 0(r4)` -- a float vertex coord.  Find which
+     * arg holds recognizable geometry: NDC -0.5=0xbf000000 0.5=0x3f000000 0.0=0,
+     * or screen 256=0x43800000 512=0x44000000 768=0x44400000. */
+    {   uint32_t args[6]; int k; args[0]=a2;args[1]=a3;args[2]=a4;
+        args[3]=a5;args[4]=a6;args[5]=a7;
+        for (k = 0; k < 6; k++) { uint32_t val = args[k];
+            if (val > 0x2000 && val < 0x40000000) {
+                const uint32_t *p = (const uint32_t *)val;
+                const float    *f = (const float *)val;
+                gld_log("  arg%d=0x%x deref:\n", k+2, val);
+                for (i = 0; i < 6; i++)
+                    gld_log("      [%d] hex=0x%08x  float=%d.%04d\n", i, p[i],
+                            (int)f[i], (int)((f[i]<0?-f[i]:f[i])*10000)%10000);
+            } else gld_log("  arg%d=0x%x (not a ptr)\n", k+2, val);
+        }
+    }
     { uint32_t o10 = *(const uint32_t *)((const char *)ctx + 0x10);
-      gld_log("   ctx+0x10(gli)=0x%x\n", o10);
-      /* GLEngine transformed to SCREEN space.  Scan gli ctx for our expected
-       * screen-coord floats: 256=0x43800000 512=0x44000000 768=0x44400000
-       * 576=0x44100000 192=0x43400000; and dump around the 0.5 hits (0x4608). */
-      if (o10 > 0x10000) { const uint32_t *p = (const uint32_t *)o10; int nf = 0;
-        for (i = 0; i < 0x3000 && nf < 24; i++) {
-          uint32_t v = p[i];
-          if (v==0x43800000u||v==0x44000000u||v==0x44400000u||
-              v==0x44100000u||v==0x43400000u) {
-            gld_log("     gli+0x%x = 0x%08x (screen float)\n", i*4, v); nf++; } }
-        /* gli+0x45c0 was a function table.  Follow the heap pointers at
-         * gli+0x4628/0x462c (0x181xxxx) -- candidate vertex/command buffers. */
-        { uint32_t hp[2]; int s; hp[0]=((const uint32_t*)(o10+0x4628))[0];
-          hp[1]=((const uint32_t*)(o10+0x4628))[1];
-          for (s=0;s<2;s++) { uint32_t b=hp[s];
-            gld_log("   heapptr[%d]=0x%x:\n", s, b);
-            if (b>0x10000 && b<0x40000000) { const uint32_t *v=(const uint32_t*)b;
-              for (i=0;i<12;i++) gld_log("     +0x%x=0x%08x\n", i*4, v[i]); } } } } }
+      gld_log("   ctx+0x10(gli)=0x%x\n", o10); }
     /* Milestone probe: render a hard-coded gouraud triangle through our PROVEN
      * DMA path when GLEngine flushes.  Proves framework -> flush -> hardware end
      * to end.  Target is still the off-screen placeholder (safe); once this fires
