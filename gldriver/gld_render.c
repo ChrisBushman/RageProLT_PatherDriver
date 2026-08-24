@@ -118,13 +118,28 @@ int gldCompleteVertexBuffer(gld_context *ctx, void *vb)
 void gldFreeVertexBuffer(gld_context *ctx, void *vb) { (void)ctx; (void)vb; }
 
 /* glFlush: ensure submitted work is kicked (already synchronous today). */
-int gldFlush(gld_context *ctx) { (void)ctx; return 0; }
+int gldFlush(gld_context *ctx) { gld_log("gldFlush()\n"); (void)ctx; return 0; }
 
 /* glFinish: block until the newest submission has retired. */
 int gldFinish(gld_context *ctx)
 {
     mach64_priv *p = MACH64_PRIV(ctx);
+    gld_log("gldFinish() last_stamp=%u\n", (unsigned)p->last_stamp);
     IOConnectMethodScalarIStructureI(ctx->connect, kMach64Sel_wait_for_stamp,
                                      1, 0, (int)p->last_stamp, NULL);
     return 0;
+}
+
+/* Dispatch slots 0x4c (buffer-complete) and 0x60 (render-control) -- the
+ * reference installs these; we didn't, and immediate-mode geometry isn't
+ * reaching our primitive slots.  Log them to map what GLEngine calls to flush. */
+void mach64_dispatch_complete(gld_context *ctx, const void *v, uint32_t n)
+{
+    gld_log("mach64_dispatch_complete(0x4c) v=%p n=%u\n", v, n);
+    (void)ctx;
+}
+void mach64_dispatch_render_ctl(gld_context *ctx, const void *v, uint32_t n)
+{
+    gld_log("mach64_dispatch_render_ctl(0x60) v=%p n=%u\n", v, n);
+    (void)ctx;
 }

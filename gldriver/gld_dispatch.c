@@ -57,5 +57,8 @@ void gldUpdateDispatch(gld_context *ctx, void *table, uint32_t flags)
     /* control slots (0x58/0x5c symbol-confirmed == gldFinish/gldFlush) */
     SET(SLOT_FINISH,     gldFinish);
     SET(SLOT_FLUSH,      gldFlush);
-    /* SLOT_COMPLETE (0x4c) / 0x60: buffer-complete + render-control -- TODO */
+    /* 0x4c (buffer-complete) / 0x60 (render-control): the reference installs
+     * these; install logging bodies to see if GLEngine calls them to flush. */
+    SET(SLOT_COMPLETE,   mach64_dispatch_complete);
+    SET(0x60,            mach64_dispatch_render_ctl);
 }

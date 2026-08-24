@@ -127,6 +127,8 @@ void mach64_render_tri_fan    (gld_context *, const void *, uint32_t);
 void mach64_render_polygon    (gld_context *, const void *, uint32_t);
 void mach64_render_quads      (gld_context *, const void *, uint32_t);
 void mach64_render_quad_strip (gld_context *, const void *, uint32_t);
+void mach64_dispatch_complete (gld_context *, const void *, uint32_t);
+void mach64_dispatch_render_ctl(gld_context *, const void *, uint32_t);
 
 void gldUpdateDispatch(gld_context *ctx, void *table, uint32_t flags);
 
