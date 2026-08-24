@@ -72,6 +72,7 @@ public:
     // ---- selector-3 (get_config) data ----
     UInt32 chipConfig0(void) { return fConfig0; }
     UInt32 chipConfig1(void) { return fConfig1; }
+    UInt32 crtcOffPitch(void);   // live display scanout base+pitch register
     UInt32 allocContextBuffer(Mach64GLUserClient *c);
 
     // ---- submission / fences ----

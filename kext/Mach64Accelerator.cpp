@@ -132,6 +132,9 @@ void Mach64Accelerator::free(void)
 UInt32 Mach64Accelerator::regRead(UInt32 off) const
 { return OSReadLittleInt32((void *)fRegBase, off); }
 
+UInt32 Mach64Accelerator::crtcOffPitch(void)
+{ return regRead(MACH64_CRTC_OFF_PITCH); }   // live display scanout base+pitch
+
 void Mach64Accelerator::regWrite(UInt32 off, UInt32 v) const
 { OSWriteLittleInt32((void *)fRegBase, off, v); }
 

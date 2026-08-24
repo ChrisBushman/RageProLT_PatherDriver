@@ -25,6 +25,7 @@
 #define MACH64_Z_CNTL           0x054c  /* depth test func/enable         */
 #define MACH64_ALPHA_TST_CNTL   0x0550  /* alpha test + dst blend         */
 #define MACH64_DST_OFF_PITCH    0x0500  /* render target base+pitch       */
+#define MACH64_CRTC_OFF_PITCH   0x0014  /* live scanout base+pitch (display)*/
 #define MACH64_SCALE_3D_CNTL    0x05fc  /* blend/fog/tex-func/dither      */
 #define MACH64_TEX_0_OFF        0x05c0  /* primary texture base           */
 #define MACH64_SECONDARY_TEX_OFF 0x0778

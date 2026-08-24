@@ -29,7 +29,7 @@ bool Mach64GLUserClient::start(IOService *provider)
         /* set_swap_interval*/M(set_surface,       kIOUCScalarIStructI, 2, 0), // 2
         M(get_config,         kIOUCScalarIScalarO, 0, 3),               // 3
         M(get_status,         kIOUCScalarIScalarO, 0, 1),               // 4
-        /* get_surface_size */M(get_status,        kIOUCScalarIScalarO, 0, 4), // 5
+        M(get_surface_size,   kIOUCScalarIScalarO, 0, 4),               // 5
         /* get_surface_info */M(get_status,        kIOUCScalarIScalarO, 1, 3), // 6
         /* read_buffer */     M(finish,            kIOUCStructIStructO, 0xffffffff, 0), // 7
         M(finish,             kIOUCScalarIStructI, 0, 0),               // 8
@@ -97,6 +97,21 @@ IOReturn Mach64GLUserClient::get_config(UInt32 *c0, UInt32 *ctxTok, UInt32 *c1)
     *c0     = fProvider->cmdBufBus();
     *ctxTok = fProvider->ringBus();
     *c1     = fProvider->chipConfig1();
+    return kIOReturnSuccess;
+}
+
+/* selector 5: return the LIVE display framebuffer for full-screen render target.
+ * CRTC_OFF_PITCH encodes it exactly like DST_OFF_PITCH: bits[31:22]=pitch/8 (px),
+ * bits[21:0]=offset in 8-byte units.  We return the raw reg (crtc) plus the
+ * decoded byte offset + pixel pitch so the plugin can bind the framebuffer. */
+IOReturn Mach64GLUserClient::get_surface_size(UInt32 *crtc, UInt32 *base,
+                                              UInt32 *pitch, UInt32 *hi)
+{
+    UInt32 v = fProvider->crtcOffPitch();
+    *crtc  = v;
+    *base  = (v & 0x3fffff) << 3;          // display start, byte offset
+    *pitch = ((v >> 22) & 0x3ff) * 8;      // pitch in pixels
+    *hi    = 0;
     return kIOReturnSuccess;
 }
 

@@ -36,6 +36,7 @@ public:
     // ---- selector handlers (see mach64_abi.h) ----
     IOReturn get_config(UInt32 *c0, UInt32 *ctxTok, UInt32 *c1);        // sel 3
     IOReturn get_status(UInt32 *status);                               // sel 4
+    IOReturn get_surface_size(UInt32 *crtc, UInt32 *base, UInt32 *pitch, UInt32 *hi); // sel 5
     IOReturn set_surface(UInt32 surfaceID, UInt32 modeBits,
                          UInt32 a, UInt32 b);                          // sel 0
     IOReturn new_vertex_buffer(UInt32 size, UInt32 *bufferID);         // sel 15

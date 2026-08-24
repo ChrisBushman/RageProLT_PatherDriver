@@ -13,6 +13,7 @@
  * placeholder target for now, to be refined once we see real drawables.
  */
 #include "gld.h"
+#include "../common/mach64_abi.h"   /* kMach64Sel_* selector indices */
 #include <stdio.h>
 #include <stdarg.h>
 
@@ -48,14 +49,24 @@ int gldAttachDrawable(gld_context *ctx, int type, void *drawable, uint32_t flags
         uint8_t *c = (uint8_t *)ctx;
         uint32_t width  = d[1];        /* full-screen descriptor: [1]=1024   */
         uint32_t height = d[2];        /*                         [2]=768    */
-        /* DISPATCH TEST: keep the render target OFF-SCREEN (scratch VRAM) so we
-         * can confirm GLEngine now flushes geometry to our slot without touching
-         * the visible framebuffer.  base/pitch below are the scratch values. */
-        uint32_t base_bytes  = 0x600000u;
+        uint32_t base_bytes  = 0x600000u;   /* fallback: off-screen scratch  */
         uint32_t pitch_bytes = width * 4;
+        uint32_t fb_pitch_px = width;
 
-        gld_log("  drawable[0..2] = 0x%x 0x%x 0x%x  -> surface %ux%u\n",
-                d[0], d[1], d[2], width, height);
+        /* Bind the LIVE display framebuffer as the render target (full-screen):
+         * read the mach64 CRTC_OFF_PITCH via the kext -> DMA lands on screen. */
+        if ((type == 0x36 || type == 0x5a) && ctx->connect) {
+            uint32_t crtc = 0, base = 0, pitch = 0, hi = 0;
+            IOConnectMethodScalarIScalarO(ctx->connect, kMach64Sel_get_surface_size,
+                                          0, 4, &crtc, &base, &pitch, &hi);
+            gld_log("  framebuffer CRTC_OFF_PITCH=0x%x -> base=0x%x pitch=%upx\n",
+                    crtc, base, pitch);
+            if (pitch) { base_bytes = base; fb_pitch_px = pitch;
+                         pitch_bytes = pitch * 4; }
+        }
+
+        gld_log("  drawable[0..2] = 0x%x 0x%x 0x%x  -> surface %ux%u target base=0x%x\n",
+                d[0], d[1], d[2], width, height, base_bytes);
 
         /* Populate the ctx surface fields GLEngine reads to consider the drawable
          * renderable -- WITHOUT these it culls all geometry (no dispatch).
@@ -73,7 +84,7 @@ int gldAttachDrawable(gld_context *ctx, int type, void *drawable, uint32_t flags
         *(uint32_t *)(c + 0x1f0) = width;
         *(uint32_t *)(c + 0x1f4) = height;
 
-        mach64_set_render_target(ctx, base_bytes, width);
+        mach64_set_render_target(ctx, base_bytes, fb_pitch_px);
     }
     return 0;
 }
