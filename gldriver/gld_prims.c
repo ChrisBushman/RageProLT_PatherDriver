@@ -56,6 +56,57 @@ void mach64_read_vertex(const void *vp, m64_vertex *o, float fb_h)
 
 #define VTX(base, i)  ((const void *)((const unsigned char *)(base) + (i) * MACH64_GLIVERTEX_STRIDE))
 
+/* Pack an m64_vertex at gli-screen (gx,gy), taking colour/depth/w from vp.
+ * Used to expand points/lines into quads (the mach64 setup engine only does
+ * triangles), same y-flip + colour fold as mach64_read_vertex. */
+static void pack_at(const void *vp, float gx, float gy, float fb_h, m64_vertex *o)
+{
+    const unsigned char *v = (const unsigned char *)vp;
+    float depth = *(const float *)(v + 0x18) * 0.5f + 0.5f;   /* NDC z -> [0,1] */
+    float w     = *(const float *)(v + GVOFF_W);
+    uint32_t argb = (chan(*(const float *)(v + GVOFF_R)) << 16)
+                  | (chan(*(const float *)(v + GVOFF_G)) <<  8)
+                  |  chan(*(const float *)(v + GVOFF_B));
+    mach64_pack_vertex(o, gx, fb_h - gy, depth, w, argb);
+}
+
+/* One point -> a 2s x 2s quad (two same-winding triangles) centred on it. */
+static void draw_point(gld_context *ctx, const void *vp, float fb_h)
+{
+    const unsigned char *v = (const unsigned char *)vp;
+    float x = *(const float *)(v + GVOFF_X), y = *(const float *)(v + GVOFF_Y);
+    const float s = 1.0f;                        /* half extent (~2px point) */
+    m64_vertex a, b, c, d;
+    pack_at(vp, x - s, y - s, fb_h, &a);
+    pack_at(vp, x + s, y - s, fb_h, &b);
+    pack_at(vp, x - s, y + s, fb_h, &c);
+    pack_at(vp, x + s, y + s, fb_h, &d);
+    mach64_draw_triangle(ctx, &a, &b, &c);
+    mach64_draw_triangle(ctx, &d, &c, &b);
+}
+
+/* One line v0->v1 -> a width-2 quad, offset perpendicular to the major axis
+ * (offset in Y for x-major lines, in X for y-major), per Mesa mach64_draw_line. */
+static void draw_line(gld_context *ctx, const void *v0, const void *v1, float fb_h)
+{
+    float x0 = *(const float *)((const unsigned char *)v0 + GVOFF_X);
+    float y0 = *(const float *)((const unsigned char *)v0 + GVOFF_Y);
+    float x1 = *(const float *)((const unsigned char *)v1 + GVOFF_X);
+    float y1 = *(const float *)((const unsigned char *)v1 + GVOFF_Y);
+    float adx = x1 - x0, ady = y1 - y0, ix, iy;
+    const float wdt = 1.0f;                      /* half width (~2px line) */
+    m64_vertex A, B, C, D;
+    if (adx < 0) adx = -adx;
+    if (ady < 0) ady = -ady;
+    if (adx > ady) { ix = 0.f; iy = wdt; } else { ix = wdt; iy = 0.f; }
+    pack_at(v0, x0 - ix, y0 - iy, fb_h, &A);
+    pack_at(v1, x1 - ix, y1 - iy, fb_h, &B);
+    pack_at(v0, x0 + ix, y0 + iy, fb_h, &C);
+    pack_at(v1, x1 + ix, y1 + iy, fb_h, &D);
+    mach64_draw_triangle(ctx, &A, &B, &C);
+    mach64_draw_triangle(ctx, &D, &C, &B);
+}
+
 static void emit_tri(gld_context *ctx, const void *base,
                      uint32_t a, uint32_t b, uint32_t c)
 {
@@ -123,7 +174,30 @@ void mach64_render_quad_strip(gld_context *ctx, const void *v, uint32_t n)
 /* ---- point/line family: setup engine is triangle-only; TODO expand to
  * point-sprite / line quads.  No-op for now so a stream of them can't corrupt
  * the ring; the validated triangle family above is complete. ------------ */
-void mach64_render_points     (gld_context *c, const void *v, uint32_t n){ (void)c;(void)v;(void)n; }
-void mach64_render_lines      (gld_context *c, const void *v, uint32_t n){ (void)c;(void)v;(void)n; }
-void mach64_render_line_strip (gld_context *c, const void *v, uint32_t n){ (void)c;(void)v;(void)n; }
-void mach64_render_line_loop  (gld_context *c, const void *v, uint32_t n){ (void)c;(void)v;(void)n; }
+#define FB_H(ctx) ((float)*(const uint32_t *)((const unsigned char *)(ctx) + 0x1f4))
+
+void mach64_render_points(gld_context *ctx, const void *v, uint32_t n)
+{
+    float fb_h = FB_H(ctx); uint32_t i;
+    mach64_sync_depth_from_gli(ctx);
+    for (i = 0; i < n; i++) draw_point(ctx, VTX(v, i), fb_h);
+}
+void mach64_render_lines(gld_context *ctx, const void *v, uint32_t n)
+{
+    float fb_h = FB_H(ctx); uint32_t i;
+    mach64_sync_depth_from_gli(ctx);
+    for (i = 0; i + 2 <= n; i += 2) draw_line(ctx, VTX(v, i), VTX(v, i+1), fb_h);
+}
+void mach64_render_line_strip(gld_context *ctx, const void *v, uint32_t n)
+{
+    float fb_h = FB_H(ctx); uint32_t i;
+    mach64_sync_depth_from_gli(ctx);
+    for (i = 1; i < n; i++) draw_line(ctx, VTX(v, i-1), VTX(v, i), fb_h);
+}
+void mach64_render_line_loop(gld_context *ctx, const void *v, uint32_t n)
+{
+    float fb_h = FB_H(ctx); uint32_t i;
+    mach64_sync_depth_from_gli(ctx);
+    for (i = 1; i < n; i++) draw_line(ctx, VTX(v, i-1), VTX(v, i), fb_h);
+    if (n > 2) draw_line(ctx, VTX(v, n-1), VTX(v, 0), fb_h);   /* close the loop */
+}
