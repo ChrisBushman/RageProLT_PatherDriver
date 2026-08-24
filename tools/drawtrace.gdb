@@ -8,6 +8,9 @@ set width 0
 set height 0
 # glDrawArrays lives in a shared lib not mapped until runtime; run to main first
 # so the framework symbols are loaded, THEN set the breakpoint.
+# DYLD_BIND_AT_LAUNCH: bind ALL symbols at launch so glDrawArrays' first call
+# doesn't drag the single-stepper through dyld lazy-binding spinlocks.
+set env DYLD_BIND_AT_LAUNCH 1
 break main
 run
 break glDrawArrays
