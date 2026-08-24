@@ -11,10 +11,7 @@ break *0x509530
 commands
   silent
   set $n=$n+1
-  set $gli=$r30
-  if $r30==0
-   set $gli=$r3
-  end
+  set $gli=$r3
   printf "\n>>> [%d] sub_4530 gli=0x%x flags=0x%x\n", $n, $gli, $r4
   printf "    gli[0x78a1](gate1 byte) = 0x%x\n", *(unsigned char*)($gli+0x78a1)
   printf "    gli+0x300 state: %08x %08x %08x %08x %08x\n", *(unsigned int*)($gli+0x300), *(unsigned int*)($gli+0x304), *(unsigned int*)($gli+0x308), *(unsigned int*)($gli+0x30c), *(unsigned int*)($gli+0x310)
