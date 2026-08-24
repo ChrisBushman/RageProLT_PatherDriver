@@ -35,6 +35,7 @@ void m64_emit_state(m64_cmdbuf *cb, const m64_state *st)
     /* Single-register writes are fine for state (proven in mach64_ringtest). */
     m64_reg(cb, MACH64_SCALE_3D_CNTL,  st->scale_3d_cntl);
     m64_reg(cb, MACH64_SETUP_CNTL,     st->setup_cntl);
+    m64_reg(cb, MACH64_Z_OFF_PITCH,    st->z_off_pitch);
     m64_reg(cb, MACH64_Z_CNTL,         st->z_cntl);
     m64_reg(cb, MACH64_DP_PIX_WIDTH,   st->dp_pix_width);
     m64_reg(cb, MACH64_DST_OFF_PITCH,  st->dst_off_pitch);

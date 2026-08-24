@@ -17,6 +17,9 @@ mach64_gldtest: mach64_gldtest.c $(GLD_SRC) $(GLD_HDRS)
 mach64_primtest: mach64_primtest.c $(GLD_SRC) $(PRIM_SRC) $(GLD_HDRS)
 	$(CC) $(CFLAGS) -I.. -o $@ mach64_primtest.c $(GLD_SRC) $(PRIM_SRC) -framework IOKit
 
+mach64_depthtest: mach64_depthtest.c $(GLD_SRC) $(GLD_HDRS)
+	$(CC) $(CFLAGS) -I.. -o $@ mach64_depthtest.c $(GLD_SRC) -framework IOKit
+
 mach64_pftest: mach64_pftest.c ../gldriver/gld_pixelformat.c $(GLD_HDRS)
 	$(CC) $(CFLAGS) -I.. -o $@ mach64_pftest.c ../gldriver/gld_pixelformat.c -framework IOKit
 

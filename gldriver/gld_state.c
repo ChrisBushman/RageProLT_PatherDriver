@@ -63,9 +63,20 @@ void mach64_set_shade_model(gld_context *ctx, int smooth)
     p->dirty |= MACH64_DIRTY_STATE;
 }
 
+/* Bind the depth buffer.  off = byte offset in VRAM, pitch_px = width in
+ * 16-bit Z pixels.  Z_OFF_PITCH uses the same encoding as DST_OFF_PITCH. */
+void mach64_set_zbuffer(gld_context *ctx, uint32_t off, uint32_t pitch_px)
+{
+    mach64_priv *p = MACH64_PRIV(ctx);
+    p->z_off   = off;
+    p->z_pitch = pitch_px;
+    p->hw.z_off_pitch = ((pitch_px / 8) << 22) | (off >> 3);
+    p->dirty |= MACH64_DIRTY_STATE;
+}
+
 /* glEnable/glDisable(GL_DEPTH_TEST) + glDepthFunc.  Z_EN is bit 0; the test
- * function is bits 1-3 (Z_TEST_*).  Requires a depth buffer (Z_OFF_PITCH) and
- * a depth-carrying vertex (z != 0) once we enable it -- TODO both. */
+ * function is bits 1-3 (Z_TEST_*).  Needs a bound depth buffer
+ * (mach64_set_zbuffer) and depth-carrying vertices (pack_vertex now packs z). */
 void mach64_set_depth_test(gld_context *ctx, int enable, uint32_t gl_func)
 {
     mach64_priv *p = MACH64_PRIV(ctx);
@@ -82,8 +93,6 @@ void mach64_set_depth_test(gld_context *ctx, int enable, uint32_t gl_func)
     }
     p->hw.z_cntl = z;
     p->dirty |= MACH64_DIRTY_STATE;
-    /* TODO: also program Z_OFF_PITCH + allocate a depth surface, and stop
-     * forcing vertex z=0 in mach64_pack_vertex, before this does anything. */
 }
 
 /* glScissor: SC_LEFT_RIGHT = (right<<16)|left, SC_TOP_BOTTOM = (bottom<<16)|top.

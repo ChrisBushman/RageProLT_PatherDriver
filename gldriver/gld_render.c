@@ -29,10 +29,11 @@ void mach64_pack_vertex(m64_vertex *out, float x, float y, float z,
 {
     int xi = (int)(x * 4.0f);
     int yi = (int)(y * 4.0f);
+    int zi = (int)(z * 65535.0f + 0.5f);        /* depth [0,1] -> 16-bit Z */
     float wf = (w != 0.0f) ? w : 1.0f;
-    (void)z;                       /* depth off for now (see gld_state.c) */
+    if (zi < 0) zi = 0; else if (zi > 0xffff) zi = 0xffff;
     out->x_y = (int32_t)(((xi & 0xffff) << 16) | (yi & 0xffff));
-    out->z   = 0;                  /* TODO: ((int)(z*ZSCALE))<<15 with depth */
+    out->z   = (int32_t)((uint32_t)zi << 15);   /* 17.15: 16-bit depth in [30:15] */
     __builtin_memcpy(&out->w, &wf, 4);
     out->s = out->t = 0;
     out->spec_argb = 0;

@@ -49,6 +49,7 @@ typedef struct {
     uint32_t scale_3d_cntl;   /* 0x100c1: shade pipe, opaque, no tex/fog   */
     uint32_t setup_cntl;      /* 0: smooth setup (0x40 breaks gouraud!)    */
     uint32_t z_cntl;          /* depth test/enable (0 = off)               */
+    uint32_t z_off_pitch;     /* depth buffer ((pitch/8)<<22)|(off>>3), 0=none */
     uint32_t dp_pix_width;    /* 0x60060666 = ARGB8888 everywhere          */
     uint32_t dst_off_pitch;   /* render target ((pitch/8)<<22)|(off>>3)    */
     uint32_t sc_left_right;   /* scissor                                    */

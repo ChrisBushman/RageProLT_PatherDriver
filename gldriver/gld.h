@@ -99,6 +99,8 @@ typedef struct {
     uint32_t   last_stamp;         /* newest new_vertex_buffer stamp       */
     uint32_t   target_off;         /* current render target byte offset    */
     uint32_t   target_pitch;       /* current render target pitch (pixels) */
+    uint32_t   z_off;              /* depth buffer byte offset (0 = none)  */
+    uint32_t   z_pitch;            /* depth buffer pitch (16-bit Z pixels)  */
     uint32_t   scratch[1024];      /* host-order command-buffer staging    */
 } mach64_priv;
 
@@ -110,6 +112,7 @@ void mach64_init_state(mach64_priv *p);
 void mach64_set_render_target(gld_context *ctx, uint32_t off, uint32_t pitch_px);
 void mach64_set_shade_model(gld_context *ctx, int smooth);  /* GL_SMOOTH? */
 void mach64_set_depth_test(gld_context *ctx, int enable, uint32_t gl_func);
+void mach64_set_zbuffer(gld_context *ctx, uint32_t off, uint32_t pitch_px);
 void mach64_set_scissor(gld_context *ctx, int x, int y, int w, int h);
 
 /* ---- geometry translation + submission (gld_render.c) --------------- */
