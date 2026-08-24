@@ -92,6 +92,39 @@ int gldAttachDrawable(gld_context *ctx, int type, void *drawable, uint32_t flags
         *(uint32_t *)(c + 0x1f4) = height;
 
         mach64_set_render_target(ctx, base_bytes, fb_pitch_px);
+
+        /* EXPERIMENT (root-cause validation): GLEngine leaves its drawable
+         * descriptor gli[0x789c] ALL-ZEROS for our HW surface (surface-binding
+         * contract incomplete), so glViewport clamps the viewport to
+         * desc[0xc]/desc[0x10] = 0 -> 0x0 viewport -> ALL geometry culled before
+         * any primitive dispatch.  The software renderer's descriptor is fully
+         * populated (desc = {4, 4e7fffff, 3, 0x800, 0x800, ...}).  Populate it
+         * ourselves to test whether that is the ONLY gate.  ctx+0x10 = the gli
+         * context (a8 from gldCreateContext); desc = gli[0x789c]. */
+        {   uint32_t gli = *(uint32_t *)(c + 0x10);
+            gld_log("  [desc-exp] gli(ctx+0x10)=0x%x\n", gli);
+            if (gli > 0x10000 && gli < 0x40000000) {
+                uint32_t descp = *(uint32_t *)(uintptr_t)(gli + 0x789c);
+                gld_log("  [desc-exp] gli[0x789c]=desc=0x%x  desc[0xc]=0x%x desc[0x10]=0x%x\n",
+                        descp,
+                        descp>0x10000?*(uint32_t*)(uintptr_t)(descp+0xc):0,
+                        descp>0x10000?*(uint32_t*)(uintptr_t)(descp+0x10):0);
+                if (descp > 0x10000 && descp < 0x40000000) {
+                    uint32_t *dd = (uint32_t *)(uintptr_t)descp;
+                    dd[0x00/4] = 0x00000004;
+                    dd[0x04/4] = 0x4e7fffff;
+                    dd[0x08/4] = 0x00000003;
+                    dd[0x0c/4] = 0x00000800;   /* width  (viewport clamp max) */
+                    dd[0x10/4] = 0x00000800;   /* height (viewport clamp max) */
+                    dd[0x1c/4] = 0x01000000;
+                    dd[0x24/4] = 0x00000008;
+                    dd[0x28/4] = 0x00000008;
+                    dd[0x2c/4] = 0x00000008;
+                    dd[0x34/4] = 0x00000020;
+                    gld_log("  [desc-exp] populated descriptor (dims 0x800x0x800)\n");
+                }
+            }
+        }
     }
     return 0;
 }
