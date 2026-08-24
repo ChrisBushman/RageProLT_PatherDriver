@@ -126,7 +126,7 @@ uint32_t mach64_submit(gld_context *ctx, m64_cmdbuf *cb);
 #define MACH64_GLIVERTEX_STRIDE  0x100   /* incoming vertex stride (recovered) */
 typedef void (*gld_render_fn)(gld_context *ctx, const void *verts, uint32_t count);
 
-void mach64_read_vertex(const void *v, m64_vertex *out);   /* gli vtx -> hw vtx */
+void mach64_read_vertex(const void *v, m64_vertex *out, float fb_h); /* gli->hw vtx */
 void mach64_render_points     (gld_context *, const void *, uint32_t);
 void mach64_render_lines      (gld_context *, const void *, uint32_t);
 void mach64_render_line_strip (gld_context *, const void *, uint32_t);

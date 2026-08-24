@@ -22,18 +22,33 @@
 #define VOFF_ARGB  0x34
 #define VOFF_Z     0x38
 
-/* read one incoming gli vertex into our hardware m64_vertex.  X_Y/ARGB/Z arrive
- * already packed, so they copy straight across; S/T/W are floats for texturing. */
-void mach64_read_vertex(const void *vp, m64_vertex *o)
+/* Recovered gli-vertex layout (dumped live from GLEngine, 0x100 stride):
+ *   +0x00 float screen X   +0x04 float screen Y (window coords, y-up)
+ *   +0x08 float screen Z   +0x0c float W
+ *   +0x10..0x1c clip/NDC coords   +0x30/34/38 float R/G/B   +0x3c float A
+ * Convert to our hardware vertex: pack screen X/Y (flip Y to top-down FB) and
+ * fold the float color to 0x00RRGGBB. */
+#define GVOFF_X    0x00
+#define GVOFF_Y    0x04
+#define GVOFF_Z    0x08
+#define GVOFF_W    0x0c
+#define GVOFF_R    0x30
+#define GVOFF_G    0x34
+#define GVOFF_B    0x38
+
+static uint32_t chan(float f){ int c = (int)(f*255.0f + 0.5f); return c<0?0:(c>255?255:(uint32_t)c); }
+
+void mach64_read_vertex(const void *vp, m64_vertex *o, float fb_h)
 {
     const unsigned char *v = (const unsigned char *)vp;
-    o->x_y       = *(const int32_t  *)(v + VOFF_XY);
-    o->argb      = *(const uint32_t *)(v + VOFF_ARGB);
-    o->z         = *(const int32_t  *)(v + VOFF_Z);
-    o->w         = *(const int32_t  *)(v + VOFF_W);
-    o->s         = *(const int32_t  *)(v + VOFF_S);
-    o->t         = *(const int32_t  *)(v + VOFF_T);
-    o->spec_argb = *(const uint32_t *)(v + VOFF_SPEC);
+    float x = *(const float *)(v + GVOFF_X);
+    float y = *(const float *)(v + GVOFF_Y);
+    float z = *(const float *)(v + GVOFF_Z);
+    float w = *(const float *)(v + GVOFF_W);
+    uint32_t argb = (chan(*(const float *)(v + GVOFF_R)) << 16)
+                  | (chan(*(const float *)(v + GVOFF_G)) <<  8)
+                  |  chan(*(const float *)(v + GVOFF_B));
+    mach64_pack_vertex(o, x, fb_h - y, z, w, argb);   /* GL y-up -> FB y-down */
 }
 
 #define VTX(base, i)  ((const void *)((const unsigned char *)(base) + (i) * MACH64_GLIVERTEX_STRIDE))
@@ -42,9 +57,10 @@ static void emit_tri(gld_context *ctx, const void *base,
                      uint32_t a, uint32_t b, uint32_t c)
 {
     m64_vertex v0, v1, v2;
-    mach64_read_vertex(VTX(base, a), &v0);
-    mach64_read_vertex(VTX(base, b), &v1);
-    mach64_read_vertex(VTX(base, c), &v2);
+    float fb_h = (float)*(const uint32_t *)((const unsigned char *)ctx + 0x1f4);
+    mach64_read_vertex(VTX(base, a), &v0, fb_h);
+    mach64_read_vertex(VTX(base, b), &v1, fb_h);
+    mach64_read_vertex(VTX(base, c), &v2, fb_h);
     mach64_draw_triangle(ctx, &v0, &v1, &v2);
 }
 

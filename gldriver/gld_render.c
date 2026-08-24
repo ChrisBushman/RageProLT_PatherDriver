@@ -186,16 +186,10 @@ int mach64_flush(gld_context *ctx, uint32_t a2, uint32_t a3, uint32_t a4,
     }
     { uint32_t o10 = *(const uint32_t *)((const char *)ctx + 0x10);
       gld_log("   ctx+0x10(gli)=0x%x\n", o10); }
-    /* Milestone probe: render a hard-coded gouraud triangle through our PROVEN
-     * DMA path when GLEngine flushes.  Proves framework -> flush -> hardware end
-     * to end.  Target is still the off-screen placeholder (safe); once this fires
-     * we (a) point the target at the framebuffer for visible pixels and (b) read
-     * the real vertices from GLEngine's batch (a3). */
-    mach64_pack_vertex(&v0, 200.f, 150.f, 0.f, 1.f, 0x00ff0000u);  /* red   */
-    mach64_pack_vertex(&v1, 600.f, 150.f, 0.f, 1.f, 0x0000ff00u);  /* green */
-    mach64_pack_vertex(&v2, 400.f, 500.f, 0.f, 1.f, 0x000000ffu);  /* blue  */
-    mach64_draw_triangle(ctx, &v0, &v1, &v2);
-    gld_log("    submitted; stamp now %u\n", (unsigned)MACH64_PRIV(ctx)->last_stamp);
+    /* table[0x04] is the STATE flush.  Real geometry now flows through the
+     * primitive slots (render_tri_strip -> emit_tri -> mach64_read_vertex ->
+     * mach64_draw_triangle), so the hard-coded milestone triangle is retired. */
+    (void)v0; (void)v1; (void)v2;
     return 0;
 }
 
