@@ -54,7 +54,7 @@ int gldGetRendererInfo(gld_renderer_info *out, uint32_t renderer_mask)
 int gldCreateContext(gld_context **outp, void *pixfmt, void *shared,
                      void *share_io, void *a7, void *a8, void *a9)
 {
-    (void)shared; (void)a7; (void)a8; (void)a9;
+    (void)shared; (void)a7; (void)a9;
     if (!outp) return 0x271e;
 
     gld_context *ctx = calloc(1, 0x200);     /* 512-byte struct (verified)  */
@@ -131,6 +131,12 @@ int gldCreateContext(gld_context **outp, void *pixfmt, void *shared,
         gld_log("  ctx+0x2c fmt_caps = 0x%x (node [08]=0x%x [10]=0x%x)\n",
                 caps, f08, f10);
     }
+
+    /* Store GLEngine's gli context (6th arg, r8) at ctx+0x10 -- the render flush
+     * reads the viewport/matrices from [ctx+0x10]+0x2db0.. (ref gldCreateContext
+     * stw r22=r8, 0x10(ctx)).  Ours was NULL -> flush had no viewport. */
+    *(void **)((unsigned char *)ctx + 0x10) = a8;
+    gld_log("  ctx+0x10 <- a8=%p (a7=%p a9=%p)\n", a8, a7, a9);
 
     *outp = ctx;
     return 0;

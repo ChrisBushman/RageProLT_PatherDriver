@@ -150,10 +150,10 @@ int mach64_flush(gld_context *ctx, uint32_t a2, uint32_t a3, uint32_t a4,
     if (a2 > 0x2000)  { const uint32_t *p = (const uint32_t *)a2;
         for (i = 0; i < 8; i++) gld_log("   a2[%d]=0x%08x\n", i, p[i]); }
     { uint32_t o10 = *(const uint32_t *)((const char *)ctx + 0x10);
-      gld_log("   ctx+0x10=0x%x  ctx+0x1c(table)=0x%x\n",
-              o10, *(const uint32_t *)((const char *)ctx + 0x1c));
-      if (o10 > 0x10000) { const uint32_t *q = (const uint32_t *)o10;
-        for (i = 0; i < 6; i++) gld_log("     [+0x%x]=0x%08x\n", i*4, q[i]); } }
+      gld_log("   ctx+0x10(gli)=0x%x\n", o10);
+      if (o10 > 0x10000) {   /* viewport scale/offset at +0x2dac/0x2db0 (ref) */
+        const uint32_t *vp = (const uint32_t *)(o10 + 0x2da8);
+        for (i = 0; i < 8; i++) gld_log("     [gli+0x%x]=0x%08x\n", 0x2da8+i*4, vp[i]); } }
     /* Milestone probe: render a hard-coded gouraud triangle through our PROVEN
      * DMA path when GLEngine flushes.  Proves framework -> flush -> hardware end
      * to end.  Target is still the off-screen placeholder (safe); once this fires
