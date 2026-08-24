@@ -165,7 +165,8 @@ int mach64_flush(gld_context *ctx, uint32_t a2, uint32_t a3, uint32_t a4,
     m64_vertex v0, v1, v2;
     int i;
     (void)a6; (void)a7;
-    gld_log("*** mach64_flush  a2=0x%x a3=0x%x a4=0x%x a5=0x%x\n", a2, a3, a4, a5);
+    gld_log("*** mach64_flush  a2=0x%x a3=0x%x  tailcall-caller=%p\n",
+            a2, a3, __builtin_return_address(0));
     /* Find the vertex batch: dump candidate regions (hex; decode floats offline).
      * ctx+0x10 = the render sub-object (ref reads it for viewport scale/offset). */
     if (a3 > 0x10000) { const uint32_t *p = (const uint32_t *)a3;
