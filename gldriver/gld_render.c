@@ -98,7 +98,7 @@ int mach64_draw_triangle(gld_context *ctx, const m64_vertex *v0,
 
 void *gldAllocVertexBuffer(gld_context *ctx, uint32_t size)
 {
-    (void)size;
+    gld_log("gldAllocVertexBuffer(size=%u)\n", size);
     /* The type-4 command buffer IS our vertex/command staging.  A real impl
      * returns a sub-allocation to fill; single-buffer synchronous today, so we
      * just hand back the base and rely on mach64_submit to serialize. */
@@ -107,6 +107,7 @@ void *gldAllocVertexBuffer(gld_context *ctx, uint32_t size)
 
 int gldCompleteVertexBuffer(gld_context *ctx, void *vb)
 {
+    gld_log("gldCompleteVertexBuffer(vb=%p)\n", vb);
     (void)vb;
     /* GLEngine has finished filling the primitive; flush whatever the dispatch
      * callbacks assembled.  With per-triangle submit this is already kicked, so

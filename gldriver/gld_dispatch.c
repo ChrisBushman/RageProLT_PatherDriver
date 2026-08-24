@@ -61,4 +61,7 @@ void gldUpdateDispatch(gld_context *ctx, void *table, uint32_t flags)
      * these; install logging bodies to see if GLEngine calls them to flush. */
     SET(SLOT_COMPLETE,   mach64_dispatch_complete);
     SET(0x60,            mach64_dispatch_render_ctl);
+
+    gld_log("  slot[0x28]=%p slot[0x48]=%p installed at table+off\n",
+            (void *)mach64_render_triangles, (void *)mach64_render_triangles);
 }
