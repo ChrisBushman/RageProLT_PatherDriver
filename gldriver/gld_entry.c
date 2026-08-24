@@ -81,6 +81,13 @@ int gldAttachDrawable(gld_context *ctx, int type, void *drawable, uint32_t flags
         *(uint32_t *)(c + 0x68)  = pitch_bytes * height;   /* surface size     */
         *(uint32_t *)(c + 0x94)  = base_bytes;             /* target base      */
         *(uint32_t *)(c + 0x98)  = pitch_bytes;            /* target pitch     */
+        /* 0x9c..0xa8: ref context-init defaults (ati128gld 0x4b30) that
+         * gldInitDispatch reports to GLEngine's out-struct.  Without these they
+         * are malloc garbage. */
+        *(uint32_t *)(c + 0x9c)  = 0;
+        *(uint32_t *)(c + 0xa0)  = 0;
+        *(uint32_t *)(c + 0xa4)  = 0x32;
+        *(uint32_t *)(c + 0xa8)  = 0;
         *(uint32_t *)(c + 0x1f0) = width;
         *(uint32_t *)(c + 0x1f4) = height;
 
@@ -132,14 +139,29 @@ int gldSetInteger(gld_context *ctx, uint32_t pname, int value)
 
 /* gldInitDispatch: initial dispatch-table setup (pairs with gldUpdateDispatch).
  * Install our render slots so the table is usable from the start. */
-void gldInitDispatch(gld_context *ctx, void *table, uint32_t flags)
+void gldInitDispatch(gld_context *ctx, void *table, void *outinfo)
 {
-    gld_log("gldInitDispatch(table=%p flags=0x%x)\n", table, flags);
+    gld_log("gldInitDispatch(table=%p outinfo=%p)\n", table, outinfo);
+    /* CONTRACT (ref gldInitDispatch 0x60a60): arg3(r5) is an OUTPUT struct that
+     * GLEngine reads back for the drawable geometry.  The reference copies
+     * ctx[0x94..0xa8] into outinfo[0..0x14]; we ignored it, leaving GLEngine a
+     * garbage drawable -> geometry culled before any primitive dispatch.  Port
+     * it verbatim. */
+    if (outinfo) {
+        const uint32_t *c = (const uint32_t *)((const unsigned char *)ctx);
+        uint32_t *o = (uint32_t *)outinfo;
+        o[0] = c[0x94/4];   /* target base   */
+        o[1] = c[0x98/4];   /* target pitch  */
+        o[2] = c[0x9c/4];
+        o[3] = c[0xa0/4];
+        o[4] = c[0xa4/4];
+        o[5] = c[0xa8/4];
+        gld_log("  outinfo <= ctx[0x94..0xa8]: %08x %08x %08x %08x %08x %08x\n",
+                o[0],o[1],o[2],o[3],o[4],o[5]);
+    }
     /* Reference gldInitDispatch installs the driver's control/flush slots that
-     * GLEngine calls to render.  table[0x04] is THE flush entry -- GLEngine calls
-     * it to dispatch accumulated geometry; a no-op there (our old stub) meant
-     * nothing rendered.  Store the table ptr in ctx+0x1c (reference: stw r4,
-     * 0x1c(ctx)) and install our flush; then the primitive slots. */
+     * GLEngine calls to render.  table[0x04] is THE flush entry.  Store the table
+     * ptr in ctx+0x1c (reference: stw r4, 0x1c(ctx)) and install our flush. */
     *(void **)((unsigned char *)ctx + 0x1c)  = table;
     *(void **)((unsigned char *)table + 0x00) = (void *)mach64_ctl00;
     *(void **)((unsigned char *)table + 0x04) = (void *)mach64_flush;
@@ -147,7 +169,7 @@ void gldInitDispatch(gld_context *ctx, void *table, uint32_t flags)
     *(void **)((unsigned char *)table + 0x0c) = (void *)mach64_ctl0c;
     *(void **)((unsigned char *)table + 0x10) = (void *)mach64_ctl10;
     *(void **)((unsigned char *)table + 0x14) = (void *)mach64_ctl14;
-    gldUpdateDispatch(ctx, table, flags);
+    gldUpdateDispatch(ctx, table, (uint32_t)(uintptr_t)outinfo);
 }
 
 /* gldFlushBuffer: swap/present the drawable.  Submits are synchronous today, so

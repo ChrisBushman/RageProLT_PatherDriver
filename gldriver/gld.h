@@ -156,7 +156,7 @@ int  gldGetError(gld_context *ctx);
 int  gldGetVersion(int *v0, int *v1, int *v2, int *v3);  /* the discovery gate */
 int  gldGetInteger(gld_context *ctx, uint32_t pname, int *params);
 int  gldSetInteger(gld_context *ctx, uint32_t pname, int value);
-void gldInitDispatch(gld_context *ctx, void *table, uint32_t flags);
+void gldInitDispatch(gld_context *ctx, void *table, void *outinfo);
 int  gldFlushBuffer(gld_context *ctx, void *drawable);
 
 /* diagnostic log -> /tmp/mach64gld.log, so we can watch how OpenGL.framework
