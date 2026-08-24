@@ -101,9 +101,18 @@ int gldAttachDrawable(gld_context *ctx, int type, void *drawable, uint32_t flags
          * populated (desc = {4, 4e7fffff, 3, 0x800, 0x800, ...}).  Populate it
          * ourselves to test whether that is the ONLY gate.  ctx+0x10 = the gli
          * context (a8 from gldCreateContext); desc = gli[0x789c]. */
-        {   uint32_t gli = *(uint32_t *)(c + 0x10);
-            gld_log("  [desc-exp] gli(ctx+0x10)=0x%x\n", gli);
-            if (gli > 0x10000 && gli < 0x40000000) {
+        {   uint32_t p10 = *(uint32_t *)(c + 0x10);   /* points into gli (+0x3610) */
+            uint32_t gli = 0, off;
+            /* Find the gli base: the object whose [+0x7898] back-points to ctx. */
+            for (off = 0; off <= 0x8000; off += 4) {
+                uint32_t g = p10 - off;
+                if (g < 0x10000 || g >= 0x40000000) break;
+                if (*(uint32_t *)(uintptr_t)(g + 0x7898) == (uint32_t)(uintptr_t)ctx) {
+                    gli = g; break;
+                }
+            }
+            gld_log("  [desc-exp] ctx+0x10=0x%x -> gli base=0x%x (off 0x%x)\n", p10, gli, off);
+            if (gli) {
                 uint32_t descp = *(uint32_t *)(uintptr_t)(gli + 0x789c);
                 gld_log("  [desc-exp] gli[0x789c]=desc=0x%x  desc[0xc]=0x%x desc[0x10]=0x%x\n",
                         descp,
