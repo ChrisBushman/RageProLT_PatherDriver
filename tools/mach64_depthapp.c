@@ -15,10 +15,12 @@
 #include <AGL/agl.h>
 #include <OpenGL/gl.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <unistd.h>
 
-int main(void)
+int main(int argc, char **argv)
 {
+    int cfg = (argc > 1) ? atoi(argv[1]) : 0;  /* 0=LESS(on) 1=disabled 2=GREATER */
     GDHandle dev = GetMainDevice();
     GLint attribs[] = { AGL_RGBA, AGL_ACCELERATED, AGL_FULLSCREEN,
                         AGL_DEPTH_SIZE, 16, AGL_NONE };
@@ -34,8 +36,12 @@ int main(void)
     glViewport(0, 0, 1024, 768);
     glClearColor(0.08f, 0.08f, 0.12f, 1.f);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-    glEnable(GL_DEPTH_TEST);
-    glDepthFunc(GL_LESS);
+    if (cfg == 1) { glDisable(GL_DEPTH_TEST); }             /* -> overlap RED  */
+    else { glEnable(GL_DEPTH_TEST);
+           glDepthFunc(cfg == 2 ? GL_GREATER : GL_LESS); }  /* LESS -> overlap GREEN */
+    printf("cfg=%d (%s)\n", cfg,
+           cfg==1?"depth DISABLED -> expect RED overlap":
+           cfg==2?"GL_GREATER":"GL_LESS -> expect GREEN overlap");
 
     glEnableClientState(GL_VERTEX_ARRAY);
 
