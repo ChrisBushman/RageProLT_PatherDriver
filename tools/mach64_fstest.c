@@ -37,7 +37,19 @@ int main(void)
     aglSetCurrentContext(ctx);
     printf("GL_RENDERER = %s\n", (const char *)glGetString(GL_RENDERER));
 
-    /* NO rendering this build.  Release the display capture immediately. */
+    /* Draw one gouraud triangle.  The render target is still the driver's
+     * off-screen placeholder (not the visible framebuffer), so this validates
+     * the framework -> render-slot -> DMA path WITHOUT writing to the screen.
+     * The log (mach64_render_triangles + vtx0) shows if the dispatch fired. */
+    glViewport(0, 0, 1024, 768);
+    glBegin(GL_TRIANGLES);
+        glColor3f(1.f, 0.f, 0.f); glVertex2f(-0.5f, -0.5f);
+        glColor3f(0.f, 1.f, 0.f); glVertex2f( 0.5f, -0.5f);
+        glColor3f(0.f, 0.f, 1.f); glVertex2f( 0.0f,  0.5f);
+    glEnd();
+    glFinish();
+    printf("drew triangle\n");
+
     aglSetCurrentContext(NULL);
     aglSetDrawable(ctx, NULL);            /* exits full-screen / releases capture */
     aglDestroyContext(ctx);

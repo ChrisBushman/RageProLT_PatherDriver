@@ -52,6 +52,14 @@ static void emit_tri(gld_context *ctx, const void *base,
 void mach64_render_triangles(gld_context *ctx, const void *v, uint32_t n)
 {
     uint32_t i;
+    gld_log("mach64_render_triangles(n=%u v=%p)\n", n, v);
+    if (v && n > 0) {
+        const unsigned char *p = (const unsigned char *)v;
+        gld_log("  vtx0: XY=0x%08x ARGB=0x%08x Z=0x%08x\n",
+                *(const uint32_t *)(p + VOFF_XY),
+                *(const uint32_t *)(p + VOFF_ARGB),
+                *(const uint32_t *)(p + VOFF_Z));
+    }
     for (i = 0; i + 3 <= n; i += 3) emit_tri(ctx, v, i, i+1, i+2);
 }
 
