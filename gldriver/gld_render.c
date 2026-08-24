@@ -113,7 +113,7 @@ int mach64_draw_triangle(gld_context *ctx, const m64_vertex *v0,
      * buffer to far.  frame_new is armed at drawable attach and at each buffer
      * swap (gldFlushBuffer).  GLEngine clears colour itself but never touches
      * our Z buffer, so the driver owns the depth clear. */
-    if (p->z_off && p->frame_new) {
+    if (p->z_off && p->frame_new && (p->hw.z_cntl & MACH64_Z_EN)) {
         mach64_clear_zbuffer(ctx);   /* separate submit; also marks state dirty */
         p->frame_new = 0;
     }
@@ -205,37 +205,60 @@ int mach64_ctl14(gld_context *c,uint32_t a,uint32_t b,uint32_t d,uint32_t e,uint
  * the driver's flush engine).  Our gldInitDispatch stubbed it, so GLEngine hit a
  * no-op and nothing rendered.  First: log that it's called + its args, to find
  * the vertex batch GLEngine passes; then wire it to our DMA path. */
+/* Find the gli context base from the driver ctx: ctx+0x10 points into the gli
+ * (~+0x3610); scan back for the object whose [+0x7898] back-points to ctx. */
+static uint32_t mach64_gli(gld_context *ctx)
+{
+    uint32_t p10 = *(const uint32_t *)((const char *)ctx + 0x10), off;
+    for (off = 0; off <= 0x8000; off += 4) {
+        uint32_t g = p10 - off;
+        if (g < 0x10000 || g >= 0x40000000) break;
+        if (*(const uint32_t *)(uintptr_t)(g + 0x7898) == (uint32_t)(uintptr_t)ctx)
+            return g;
+    }
+    return 0;
+}
+
+/* Follow the app's GL depth state.  GLEngine stores it in the gli (recovered by
+ * diffing depth configs, tools/mach64_depthstate):
+ *   gli+0x6340 bit24 = GL_DEPTH_TEST enable
+ *   gli+0x633c >>16  = glDepthFunc GL enum (0x0200..0x0207)
+ *   gli+0x63b8 bit24 = glDepthMask
+ * Translate to Z_CNTL (mach64 test func at [6:4], Z_MASK_EN bit8). */
+void mach64_sync_depth_from_gli(gld_context *ctx)
+{
+    mach64_priv *p = MACH64_PRIV(ctx);
+    uint32_t gli = mach64_gli(ctx);
+    uint32_t z = 0;
+    if (!gli) return;
+    if ((*(const uint32_t *)(uintptr_t)(gli + 0x6340)) & 0x01000000u) {   /* enabled */
+        uint32_t func = (*(const uint32_t *)(uintptr_t)(gli + 0x633c)) >> 16;
+        uint32_t mask = (*(const uint32_t *)(uintptr_t)(gli + 0x63b8)) & 0x01000000u;
+        z = MACH64_Z_EN;
+        switch (func) {
+        case 0x0200: z |= MACH64_Z_TEST_NEVER;    break;
+        case 0x0201: z |= MACH64_Z_TEST_LESS;     break;
+        case 0x0202: z |= MACH64_Z_TEST_EQUAL;    break;
+        case 0x0203: z |= MACH64_Z_TEST_LEQUAL;   break;
+        case 0x0204: z |= MACH64_Z_TEST_GREATER;  break;
+        case 0x0205: z |= MACH64_Z_TEST_NOTEQUAL; break;
+        case 0x0206: z |= MACH64_Z_TEST_GEQUAL;   break;
+        case 0x0207: z |= MACH64_Z_TEST_ALWAYS;   break;
+        default:     z |= MACH64_Z_TEST_LESS;     break;
+        }
+        if (mask) z |= MACH64_Z_MASK_EN;
+    }
+    if (p->hw.z_cntl != z) { p->hw.z_cntl = z; p->dirty |= MACH64_DIRTY_STATE; }
+}
+
+/* table[0x04] = the STATE flush.  Geometry flows through the primitive slots;
+ * here we sync the app's depth state (glEnable/glDepthFunc/glDepthMask) into
+ * Z_CNTL before the batch renders. */
 int mach64_flush(gld_context *ctx, uint32_t a2, uint32_t a3, uint32_t a4,
                  uint32_t a5, uint32_t a6, uint32_t a7)
 {
-    m64_vertex v0, v1, v2;
-    int i;
-    (void)a6; (void)a7;
-    gld_log("*** mach64_flush args: a2=0x%x a3=0x%x a4=0x%x a5=0x%x a6=0x%x a7=0x%x\n",
-            a2, a3, a4, a5, a6, a7);
-    /* Decisive: dump EACH arg (r4..r9) deref'd as hex AND float.  The reference
-     * sub_c3c0 reads its r4 as `lfs 0(r4)` -- a float vertex coord.  Find which
-     * arg holds recognizable geometry: NDC -0.5=0xbf000000 0.5=0x3f000000 0.0=0,
-     * or screen 256=0x43800000 512=0x44000000 768=0x44400000. */
-    {   uint32_t args[6]; int k; args[0]=a2;args[1]=a3;args[2]=a4;
-        args[3]=a5;args[4]=a6;args[5]=a7;
-        for (k = 0; k < 6; k++) { uint32_t val = args[k];
-            if (val > 0x2000 && val < 0x40000000) {
-                const uint32_t *p = (const uint32_t *)val;
-                const float    *f = (const float *)val;
-                gld_log("  arg%d=0x%x deref:\n", k+2, val);
-                for (i = 0; i < 6; i++)
-                    gld_log("      [%d] hex=0x%08x  float=%d.%04d\n", i, p[i],
-                            (int)f[i], (int)((f[i]<0?-f[i]:f[i])*10000)%10000);
-            } else gld_log("  arg%d=0x%x (not a ptr)\n", k+2, val);
-        }
-    }
-    { uint32_t o10 = *(const uint32_t *)((const char *)ctx + 0x10);
-      gld_log("   ctx+0x10(gli)=0x%x\n", o10); }
-    /* table[0x04] is the STATE flush.  Real geometry now flows through the
-     * primitive slots (render_tri_strip -> emit_tri -> mach64_read_vertex ->
-     * mach64_draw_triangle), so the hard-coded milestone triangle is retired. */
-    (void)v0; (void)v1; (void)v2;
+    (void)a2; (void)a3; (void)a4; (void)a5; (void)a6; (void)a7;
+    mach64_sync_depth_from_gli(ctx);
     return 0;
 }
 

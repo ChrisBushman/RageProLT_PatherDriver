@@ -98,8 +98,10 @@ int gldAttachDrawable(gld_context *ctx, int type, void *drawable, uint32_t flags
          * GL_LESS + Z write, and clear it to far.  Real per-vertex Z now comes
          * from the NDC z in mach64_read_vertex, so overlapping geometry occludes
          * correctly (Z_CNTL/vertex-Z/Z_OFF_PITCH all verified vs the RRG spec). */
-        mach64_set_zbuffer(ctx, 0x400000u, fb_pitch_px);
-        mach64_set_depth_test(ctx, 1, 0x0201 /* GL_LESS */);
+        mach64_set_zbuffer(ctx, 0x400000u, fb_pitch_px);   /* bind the Z buffer */
+        /* Z_CNTL now follows the app's GL depth state (glEnable(GL_DEPTH_TEST)/
+         * glDepthFunc/glDepthMask), synced from the gli in mach64_flush /
+         * render_tri_strip -- not forced on here. */
         MACH64_PRIV(ctx)->frame_new = 1;   /* clear Z before the first frame */
 
         /* EXPERIMENT (root-cause validation): GLEngine leaves its drawable

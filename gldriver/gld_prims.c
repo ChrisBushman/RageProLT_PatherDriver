@@ -85,20 +85,7 @@ void mach64_render_triangles(gld_context *ctx, const void *v, uint32_t n)
 void mach64_render_tri_strip(gld_context *ctx, const void *v, uint32_t n)
 {
     uint32_t i;
-    /* GEOMETRY IS FLOWING: GLEngine calls this (tbl+0x2c) with post-T&L vertices.
-     * Dump vertex[0..2] at candidate offsets to pin the real screen-coord/color
-     * layout (0x30/0x34/0x38 packed vs 0xf0/0xf4/0xf8 float from the T&L xform). */
-    gld_log("mach64_render_tri_strip(n=%u v=%p)\n", n, v);
-    if (v && n >= 2) { const unsigned char *p = (const unsigned char *)v; uint32_t k, j;
-        /* Full 0x100-byte dump of v[0] and v[1] -- find the offset whose values
-         * differ per-vertex as NDC (bf000000/3f000000) or screen (256/512/768). */
-        for (k = 0; k < 2; k++) { const unsigned char *q = p + k*0x100;
-            for (j = 0; j < 0x100; j += 0x20)
-                gld_log("  v[%u]+0x%02x: %08x %08x %08x %08x %08x %08x %08x %08x\n", k, j,
-                    *(const uint32_t*)(q+j+0x00),*(const uint32_t*)(q+j+0x04),
-                    *(const uint32_t*)(q+j+0x08),*(const uint32_t*)(q+j+0x0c),
-                    *(const uint32_t*)(q+j+0x10),*(const uint32_t*)(q+j+0x14),
-                    *(const uint32_t*)(q+j+0x18),*(const uint32_t*)(q+j+0x1c)); } }
+    mach64_sync_depth_from_gli(ctx);   /* Z_CNTL follows the app's GL depth state */
     for (i = 2; i < n; i++)                      /* flip winding on odd tris */
         if (i & 1) emit_tri(ctx, v, i-1, i-2, i);
         else       emit_tri(ctx, v, i-2, i-1, i);
