@@ -140,9 +140,20 @@ int mach64_flush(gld_context *ctx, uint32_t a2, uint32_t a3, uint32_t a4,
                  uint32_t a5, uint32_t a6, uint32_t a7)
 {
     m64_vertex v0, v1, v2;
-    (void)a4; (void)a5; (void)a6; (void)a7;
-    gld_log("*** mach64_flush (table[0x04])  a2=0x%x a3=0x%x -> DMA test triangle\n",
-            a2, a3);
+    int i;
+    (void)a6; (void)a7;
+    gld_log("*** mach64_flush  a2=0x%x a3=0x%x a4=0x%x a5=0x%x\n", a2, a3, a4, a5);
+    /* Find the vertex batch: dump candidate regions (hex; decode floats offline).
+     * ctx+0x10 = the render sub-object (ref reads it for viewport scale/offset). */
+    if (a3 > 0x10000) { const uint32_t *p = (const uint32_t *)a3;
+        for (i = 0; i < 8; i++) gld_log("   a3[%d]=0x%08x\n", i, p[i]); }
+    if (a2 > 0x2000)  { const uint32_t *p = (const uint32_t *)a2;
+        for (i = 0; i < 8; i++) gld_log("   a2[%d]=0x%08x\n", i, p[i]); }
+    { uint32_t o10 = *(const uint32_t *)((const char *)ctx + 0x10);
+      gld_log("   ctx+0x10=0x%x  ctx+0x1c(table)=0x%x\n",
+              o10, *(const uint32_t *)((const char *)ctx + 0x1c));
+      if (o10 > 0x10000) { const uint32_t *q = (const uint32_t *)o10;
+        for (i = 0; i < 6; i++) gld_log("     [+0x%x]=0x%08x\n", i*4, q[i]); } }
     /* Milestone probe: render a hard-coded gouraud triangle through our PROVEN
      * DMA path when GLEngine flushes.  Proves framework -> flush -> hardware end
      * to end.  Target is still the off-screen placeholder (safe); once this fires
