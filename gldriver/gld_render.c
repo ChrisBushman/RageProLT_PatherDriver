@@ -170,6 +170,10 @@ int gldFinish(gld_context *ctx)
     gld_log("gldFinish() last_stamp=%u\n", (unsigned)p->last_stamp);
     IOConnectMethodScalarIStructureI(ctx->connect, kMach64Sel_wait_for_stamp,
                                      1, 0, (int)p->last_stamp, NULL);
+    /* End-of-frame for single-buffered apps: arm the per-frame Z clear so the
+     * next frame's first triangle resets the depth buffer.  (Double-buffered
+     * apps also arm it at the swap in gldFlushBuffer.) */
+    p->frame_new = 1;
     return 0;
 }
 

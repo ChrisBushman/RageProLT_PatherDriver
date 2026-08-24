@@ -21,11 +21,13 @@
 int main(void)
 {
     GDHandle dev = GetMainDevice();
+    /* single-buffered (our driver has no double-buffer format); frame boundary
+     * is glFinish, which arms the per-frame Z clear. */
     GLint attribs[] = { AGL_RGBA, AGL_ACCELERATED, AGL_FULLSCREEN,
-                        AGL_DOUBLEBUFFER, AGL_DEPTH_SIZE, 16, AGL_NONE };
+                        AGL_DEPTH_SIZE, 16, AGL_NONE };
     AGLPixelFormat pf = aglChoosePixelFormat(&dev, 1, attribs);
-    printf("double-buffered pf = %p (err %d)\n", (void*)pf, (int)aglGetError());
-    if (!pf) { printf("no double-buffered accelerated format available\n"); return 1; }
+    printf("pf = %p (err %d)\n", (void*)pf, (int)aglGetError());
+    if (!pf) return 1;
     AGLContext ctx = aglCreateContext(pf, NULL);
     if (!ctx) { aglDestroyPixelFormat(pf); return 1; }
     aglSetFullScreen(ctx, 0, 0, 0, 0);
@@ -46,7 +48,8 @@ int main(void)
             glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
             glColor3f(0.5f+0.5f*sinf(t), 0.5f+0.5f*sinf(t+2.1f), 0.5f+0.5f*sinf(t+4.2f));
             glDrawArrays(GL_TRIANGLES, 0, 3);
-            aglSwapBuffers(ctx);      /* -> gldFlushBuffer -> arms per-frame Z clear */
+            glFlush();
+            glFinish();               /* frame boundary -> arms per-frame Z clear */
             usleep(30000);
         }
     }
