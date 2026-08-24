@@ -56,7 +56,9 @@ int main(void)
     }
     glFlush();
     glFinish();
-    printf("drew triangle (glDrawArrays)\n");
+    printf("drew triangle (glDrawArrays) -- holding full-screen 4s so it's visible\n");
+    fflush(stdout);
+    sleep(4);   /* hold the captured display so the rendered triangle is visible */
 
     aglSetCurrentContext(NULL);
     aglSetDrawable(ctx, NULL);            /* exits full-screen / releases capture */
