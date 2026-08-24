@@ -40,17 +40,41 @@ int gldAttachDrawable(gld_context *ctx, int type, void *drawable, uint32_t flags
     if (!ctx) return 0x271e;
     if ((type == 0x50 || type == 0x5a || type == 0x36) && !drawable)
         return 0x2715;
-    if (drawable) {
+    /* detach */
+    if (type == 0 || !drawable) return 0;
+
+    {
         const uint32_t *d = (const uint32_t *)drawable;
-        int i;
-        for (i = 0; i < 16; i += 4)
-            gld_log("  drawable[%2d..%2d] = 0x%08x 0x%08x 0x%08x 0x%08x\n",
-                    i, i+3, d[i], d[i+1], d[i+2], d[i+3]);
+        uint8_t *c = (uint8_t *)ctx;
+        uint32_t width  = d[1];        /* full-screen descriptor: [1]=1024   */
+        uint32_t height = d[2];        /*                         [2]=768    */
+        /* DISPATCH TEST: keep the render target OFF-SCREEN (scratch VRAM) so we
+         * can confirm GLEngine now flushes geometry to our slot without touching
+         * the visible framebuffer.  base/pitch below are the scratch values. */
+        uint32_t base_bytes  = 0x600000u;
+        uint32_t pitch_bytes = width * 4;
+
+        gld_log("  drawable[0..2] = 0x%x 0x%x 0x%x  -> surface %ux%u\n",
+                d[0], d[1], d[2], width, height);
+
+        /* Populate the ctx surface fields GLEngine reads to consider the drawable
+         * renderable -- WITHOUT these it culls all geometry (no dispatch).
+         * Offsets from the reference gldAttachDrawable (ati128gld 0x4f38):
+         * 0x20=drawable, 0x24/0x28=flags, 0x94=target base, 0x98=pitch,
+         * 0x1f0/0x1f4=width/height, 0x64=surface handle, 0x68=byte size.
+         * These land in unused/_tail/extra ctx space (we don't map registers). */
+        *(uint32_t *)(c + 0x20)  = (uint32_t)drawable;
+        *(uint32_t *)(c + 0x24)  = (flags >> 8) & 0xff;
+        *(uint32_t *)(c + 0x28)  = flags & 0xff;
+        *(uint32_t *)(c + 0x64)  = 1;                      /* non-null handle  */
+        *(uint32_t *)(c + 0x68)  = pitch_bytes * height;   /* surface size     */
+        *(uint32_t *)(c + 0x94)  = base_bytes;             /* target base      */
+        *(uint32_t *)(c + 0x98)  = pitch_bytes;            /* target pitch     */
+        *(uint32_t *)(c + 0x1f0) = width;
+        *(uint32_t *)(c + 0x1f4) = height;
+
+        mach64_set_render_target(ctx, base_bytes, width);
     }
-    /* Placeholder: bind our proven off-screen target so the render pipeline runs
-     * end-to-end under the framework.  Real windowed binding comes once the CGS
-     * descriptor -> VRAM offset/pitch mapping is recovered from live drawables. */
-    mach64_set_render_target(ctx, 0x600000u, 128);
     return 0;
 }
 
