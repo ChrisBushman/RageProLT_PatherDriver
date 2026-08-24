@@ -139,8 +139,20 @@ int gldFinish(gld_context *ctx)
 int mach64_flush(gld_context *ctx, uint32_t a2, uint32_t a3, uint32_t a4,
                  uint32_t a5, uint32_t a6, uint32_t a7)
 {
-    gld_log("*** mach64_flush (table[0x04]) CALLED  ctx=%p args=0x%x 0x%x 0x%x 0x%x 0x%x 0x%x\n",
-            (void *)ctx, a2, a3, a4, a5, a6, a7);
+    m64_vertex v0, v1, v2;
+    (void)a4; (void)a5; (void)a6; (void)a7;
+    gld_log("*** mach64_flush (table[0x04])  a2=0x%x a3=0x%x -> DMA test triangle\n",
+            a2, a3);
+    /* Milestone probe: render a hard-coded gouraud triangle through our PROVEN
+     * DMA path when GLEngine flushes.  Proves framework -> flush -> hardware end
+     * to end.  Target is still the off-screen placeholder (safe); once this fires
+     * we (a) point the target at the framebuffer for visible pixels and (b) read
+     * the real vertices from GLEngine's batch (a3). */
+    mach64_pack_vertex(&v0, 200.f, 150.f, 0.f, 1.f, 0x00ff0000u);  /* red   */
+    mach64_pack_vertex(&v1, 600.f, 150.f, 0.f, 1.f, 0x0000ff00u);  /* green */
+    mach64_pack_vertex(&v2, 400.f, 500.f, 0.f, 1.f, 0x000000ffu);  /* blue  */
+    mach64_draw_triangle(ctx, &v0, &v1, &v2);
+    gld_log("    submitted; stamp now %u\n", (unsigned)MACH64_PRIV(ctx)->last_stamp);
     return 0;
 }
 
