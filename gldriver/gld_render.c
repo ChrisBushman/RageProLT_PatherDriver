@@ -183,17 +183,14 @@ int mach64_flush(gld_context *ctx, uint32_t a2, uint32_t a3, uint32_t a4,
           if (v==0x43800000u||v==0x44000000u||v==0x44400000u||
               v==0x44100000u||v==0x43400000u) {
             gld_log("     gli+0x%x = 0x%08x (screen float)\n", i*4, v); nf++; } }
-        /* gli+0x45c0 = array of vertex pointers (stride 0x100).  Follow the
-         * first two and dump each vertex to confirm our X_Y@0x30/ARGB@0x34 format. */
-        { const uint32_t *arr = (const uint32_t *)(o10 + 0x45c0);
-          int vtx;
-          for (vtx = 0; vtx < 3; vtx++) {
-            uint32_t vp = arr[vtx];
-            gld_log("   vtxptr[%d]=0x%x:\n", vtx, vp);
-            if (vp > 0x10000) { const uint32_t *v = (const uint32_t *)vp;
-              gld_log("     +0x00:%08x %08x %08x %08x\n", v[0],v[1],v[2],v[3]);
-              gld_log("     +0x30(X_Y):%08x +0x34(ARGB):%08x +0x38(Z):%08x\n",
-                      v[0x30/4], v[0x34/4], v[0x38/4]); } } } } }
+        /* gli+0x45c0 was a function table.  Follow the heap pointers at
+         * gli+0x4628/0x462c (0x181xxxx) -- candidate vertex/command buffers. */
+        { uint32_t hp[2]; int s; hp[0]=((const uint32_t*)(o10+0x4628))[0];
+          hp[1]=((const uint32_t*)(o10+0x4628))[1];
+          for (s=0;s<2;s++) { uint32_t b=hp[s];
+            gld_log("   heapptr[%d]=0x%x:\n", s, b);
+            if (b>0x10000 && b<0x40000000) { const uint32_t *v=(const uint32_t*)b;
+              for (i=0;i<12;i++) gld_log("     +0x%x=0x%08x\n", i*4, v[i]); } } } } }
     /* Milestone probe: render a hard-coded gouraud triangle through our PROVEN
      * DMA path when GLEngine flushes.  Proves framework -> flush -> hardware end
      * to end.  Target is still the off-screen placeholder (safe); once this fires
