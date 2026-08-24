@@ -26,6 +26,9 @@
 #define ZBUF_OFF    0x620000u          /* 128x128x2 = 0x8000 bytes           */
 #define GLD_LESS_F  0x0201             /* GL_LESS                            */
 
+/* the gld sources log via gld_log(); stub it out for this standalone test */
+void gld_log(const char *fmt, ...) { (void)fmt; }
+
 static unsigned SURF;
 static unsigned pix(int x,int y){ return OSReadLittleInt32((void*)SURF, TARGET_OFF + y*ROW_BYTES + x*4); }
 
