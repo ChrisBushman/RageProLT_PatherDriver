@@ -42,13 +42,16 @@ int main(void)
      * the framework -> render-slot -> DMA path WITHOUT writing to the screen.
      * The log (mach64_render_triangles + vtx0) shows if the dispatch fired. */
     glViewport(0, 0, 1024, 768);
+    glClearColor(0.1f, 0.2f, 0.4f, 1.f);
+    glClear(GL_COLOR_BUFFER_BIT);          /* apps clear first; sets up render state */
     glBegin(GL_TRIANGLES);
         glColor3f(1.f, 0.f, 0.f); glVertex2f(-0.5f, -0.5f);
         glColor3f(0.f, 1.f, 0.f); glVertex2f( 0.5f, -0.5f);
         glColor3f(0.f, 0.f, 1.f); glVertex2f( 0.0f,  0.5f);
     glEnd();
+    glFlush();
     glFinish();
-    printf("drew triangle\n");
+    printf("drew triangle (with clear)\n");
 
     aglSetCurrentContext(NULL);
     aglSetDrawable(ctx, NULL);            /* exits full-screen / releases capture */
