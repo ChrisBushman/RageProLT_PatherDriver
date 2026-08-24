@@ -72,7 +72,11 @@ int main(void)
     big_tri(ctx, 0.f, 0x000000ffu);
     gldFinish(ctx);
     cen = pix(64,50) & 0xffffff;
-    printf("[depth OFF z=0] center = 0x%06x  (expect BLUE 0000ff = pipeline ok)\n", cen);
+    printf("[depth OFF z=0] center = 0x%06x  stamp=%u  (blue=ok; stamp==0 => DMA never ran)\n",
+           cen, (unsigned)((mach64_priv*)ctx->backend)->last_stamp);
+    /* dump a wider area in case rendering landed elsewhere */
+    { int yy; printf("  scan corners: (10,10)=%06x (64,64)=%06x (120,120)=%06x\n",
+        pix(10,10)&0xffffff, pix(64,64)&0xffffff, pix(120,120)&0xffffff); (void)yy; }
 
     /* ---- CONTROL2: depth OFF, z=0.75 -> does a large packed Z break rendering? ---- */
     for(y=0;y<128;y++) for(x=0;x<128;x++) OSWriteLittleInt32((void*)SURF, TARGET_OFF + y*ROW_BYTES + x*4, 0);
