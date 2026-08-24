@@ -174,9 +174,19 @@ int mach64_flush(gld_context *ctx, uint32_t a2, uint32_t a3, uint32_t a4,
         for (i = 0; i < 8; i++) gld_log("   a2[%d]=0x%08x\n", i, p[i]); }
     { uint32_t o10 = *(const uint32_t *)((const char *)ctx + 0x10);
       gld_log("   ctx+0x10(gli)=0x%x\n", o10);
-      if (o10 > 0x10000) {   /* viewport scale/offset at +0x2dac/0x2db0 (ref) */
-        const uint32_t *vp = (const uint32_t *)(o10 + 0x2da8);
-        for (i = 0; i < 8; i++) gld_log("     [gli+0x%x]=0x%08x\n", 0x2da8+i*4, vp[i]); } }
+      /* Locate the transformed vertex batch: our triangle uses -0.5/0.5 =
+       * 0xbf000000/0x3f000000.  Scan gli ctx, a2, a3 for that signature. */
+      if (o10 > 0x10000) { const uint32_t *p = (const uint32_t *)o10; int nf = 0;
+        for (i = 0; i < 0x2000 && nf < 16; i++)
+          if (p[i]==0xbf000000u || p[i]==0x3f000000u || p[i]==0x3f000000u) {
+            gld_log("     gli+0x%x = 0x%08x\n", i*4, p[i]); nf++; } }
+      { const uint32_t *r[3]; int s; r[0]=(const uint32_t*)a2; r[1]=(const uint32_t*)a3;
+        r[2]=(const uint32_t*)(uintptr_t)a4;
+        for (s=0;s<3;s++) { uint32_t base=(uint32_t)(uintptr_t)r[s]; int nf=0;
+          if (base>0x2000 && base<0x40000000) {
+            for (i=0;i<0x200 && nf<8;i++)
+              if (r[s][i]==0xbf000000u || r[s][i]==0x3f000000u) {
+                gld_log("     arg(0x%x)+0x%x = 0x%08x\n", base, i*4, r[s][i]); nf++; } } } } }
     /* Milestone probe: render a hard-coded gouraud triangle through our PROVEN
      * DMA path when GLEngine flushes.  Proves framework -> flush -> hardware end
      * to end.  Target is still the off-screen placeholder (safe); once this fires
