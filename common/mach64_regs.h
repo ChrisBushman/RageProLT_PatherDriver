@@ -130,12 +130,22 @@
     (MACH64_ISREG0(r) ? (((r) - MACH64_DWMREG0) >> 2) \
                       : (((r) >> 2) | 0x0100))
 
-/* ---- A few SCALE_3D_CNTL / Z_CNTL bits used by the state builder ----- */
-#define MACH64_Z_TEST_MASK      (7u << 1)
-#define MACH64_Z_TEST_LESS      (1u << 1)
-#define MACH64_Z_TEST_LEQUAL    (2u << 1)
-#define MACH64_Z_TEST_ALWAYS    (7u << 1)
-#define MACH64_Z_EN             (1u << 0)
+/* ---- Z_CNTL bits (0x54c) -- EXACT layout from the RageLTPro Register
+ * Reference (page 5-17) + Mesa mach64_reg.h.  CRITICAL: bit 1 is Z_SRC_2D
+ * (new-Z from 2D source), NOT the test field.  Our old (n<<1) encoding set
+ * Z_SRC_2D and wedged the bus master.  The test is a 3-bit field at [6:4]. */
+#define MACH64_Z_EN             (1u << 0)   /* enable Z testing              */
+#define MACH64_Z_SRC_2D         (1u << 1)   /* new-Z from 2D src (leave 0!)  */
+#define MACH64_Z_TEST_MASK      (7u << 4)
+#define MACH64_Z_TEST_NEVER     (0u << 4)
+#define MACH64_Z_TEST_LESS      (1u << 4)
+#define MACH64_Z_TEST_LEQUAL    (2u << 4)
+#define MACH64_Z_TEST_EQUAL     (3u << 4)
+#define MACH64_Z_TEST_GEQUAL    (4u << 4)
+#define MACH64_Z_TEST_GREATER   (5u << 4)
+#define MACH64_Z_TEST_NOTEQUAL  (6u << 4)
+#define MACH64_Z_TEST_ALWAYS    (7u << 4)
+#define MACH64_Z_MASK_EN        (1u << 8)   /* enable writing the Z planes   */
 
 #define MACH64_SCALE_PIX_EXPAND_DYNAMIC_RANGE (1u << 0)
 #define MACH64_DITHER_EN        (1u << 8)

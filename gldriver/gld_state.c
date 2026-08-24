@@ -22,6 +22,8 @@
 #define GLD_EQUAL    0x0202
 #define GLD_LEQUAL   0x0203
 #define GLD_GREATER  0x0204
+#define GLD_NOTEQUAL 0x0205
+#define GLD_GEQUAL   0x0206
 #define GLD_ALWAYS   0x0207
 
 /* Initialize the shadow to the proven opaque untextured gouraud state. */
@@ -82,13 +84,17 @@ void mach64_set_depth_test(gld_context *ctx, int enable, uint32_t gl_func)
     mach64_priv *p = MACH64_PRIV(ctx);
     uint32_t z = 0;
     if (enable) {
-        z = MACH64_Z_EN;
+        z = MACH64_Z_EN | MACH64_Z_MASK_EN;   /* test + write the Z buffer */
         switch (gl_func) {
-        case GLD_LESS:    z |= MACH64_Z_TEST_LESS;   break;
-        case GLD_LEQUAL:  z |= MACH64_Z_TEST_LEQUAL; break;
-        case GLD_ALWAYS:  z |= MACH64_Z_TEST_ALWAYS; break;
-        /* TODO: NEVER/EQUAL/GREATER/NOTEQUAL/GEQUAL from the RRG Z_TEST field */
-        default:          z |= MACH64_Z_TEST_LESS;   break;
+        case GLD_LESS:    z |= MACH64_Z_TEST_LESS;     break;
+        case GLD_LEQUAL:  z |= MACH64_Z_TEST_LEQUAL;   break;
+        case GLD_ALWAYS:  z |= MACH64_Z_TEST_ALWAYS;   break;
+        case GLD_EQUAL:   z |= MACH64_Z_TEST_EQUAL;    break;
+        case GLD_GEQUAL:  z |= MACH64_Z_TEST_GEQUAL;   break;
+        case GLD_GREATER: z |= MACH64_Z_TEST_GREATER;  break;
+        case GLD_NOTEQUAL:z |= MACH64_Z_TEST_NOTEQUAL; break;
+        case GLD_NEVER:   z |= MACH64_Z_TEST_NEVER;    break;
+        default:          z |= MACH64_Z_TEST_LESS;     break;
         }
     }
     p->hw.z_cntl = z;
