@@ -24,7 +24,10 @@ int main(void)
     if (err || !win) { printf("CreateNewWindow err=%d\n", (int)err); return 1; }
     ShowWindow(win);
 
-    GLint attribs[] = { AGL_RGBA, AGL_ACCELERATED, AGL_DOUBLEBUFFER,
+    /* single-buffer for now: our config nodes don't yet advertise the double-
+     * buffer capability, so AGL_DOUBLEBUFFER makes aglChoosePixelFormat fail.
+     * Single-buffer still triggers gldAttachDrawable (our actual goal here). */
+    GLint attribs[] = { AGL_RGBA, AGL_ACCELERATED,
                         AGL_DEPTH_SIZE, 16, AGL_NONE };
     AGLPixelFormat pf = aglChoosePixelFormat(NULL, 0, attribs);
     printf("aglChoosePixelFormat -> %p (err %d)\n", (void*)pf, (int)aglGetError());
