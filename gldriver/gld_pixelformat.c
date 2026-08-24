@@ -44,11 +44,17 @@
  * (byte 0x10 at bits 8-15) makes gliCreateContext instantiate OUR renderer, so
  * gldCreateContext finally gets called.  (The CGL scorer skips the node[0x04]
  * match when the request doesn't set it, so the winning score is unaffected.) */
+/* node[0x14] = the finalized COLOR-BUFFER depth code (ref sub_de00: 0x800000 for
+ * 32bpp, 0x8000 for 16bpp).  gldCreateContext's caps decode reads it to set
+ * ctx+0x5f (1=16bpp, 2=32bpp); a 0 there is INVALID and GLEngine won't hardware-
+ * render.  Our configs are 32-bit color -> 0x800000.  (The CGL scorer does not
+ * read node[0x14], so this doesn't affect the winning score.) */
+#define GLD_NODE_CBPP32 0x00800000
 static const uint32_t gld_node_templates[GLD_NNODES][GLD_NODE_WORDS] = {
-  /* next   [1]  0x04   [2]  0x08         [3] [4] 0x10    [5]0x14     [6] 0x18  [7]0x1c [8]0x20 [9][10][11] [12]0x30 */
-  { 0, 0x00021041, GLD_NODE_ACCEL, 0, 0x00000200, 0x00000000, 0x00000400, 0x00000001, 4, 0,0,0, 7 },
-  { 0, 0x00021042, GLD_NODE_ACCEL, 0, 0x00000200, 0x00000000, 0x00001000, 0x00000001, 4, 0,0,0, 7 },
-  { 0, 0x00021048, GLD_NODE_ACCEL, 0, 0x00004000, 0x00000000, 0x00001000, 0x00000001, 4, 0,0,0, 7 },
+  /* next   [1]  0x04   [2]  0x08         [3] [4] 0x10    [5]0x14          [6] 0x18  [7]0x1c [8]0x20 [9][10][11] [12]0x30 */
+  { 0, 0x00021041, GLD_NODE_ACCEL, 0, 0x00000200, GLD_NODE_CBPP32, 0x00000400, 0x00000001, 4, 0,0,0, 7 },
+  { 0, 0x00021042, GLD_NODE_ACCEL, 0, 0x00000200, GLD_NODE_CBPP32, 0x00001000, 0x00000001, 4, 0,0,0, 7 },
+  { 0, 0x00021048, GLD_NODE_ACCEL, 0, 0x00004000, GLD_NODE_CBPP32, 0x00001000, 0x00000001, 4, 0,0,0, 7 },
   { 0, 0x00021000, GLD_NODE_ACCEL, 0, 0x00008000, 0x20000000, 0x00001000, 0x00000080, 4, 0,0,0, 7 },
 };
 
