@@ -131,6 +131,29 @@ int gldFinish(gld_context *ctx)
     return 0;
 }
 
+/* Control-slot probes: the reference installs table[0x00,0x08,0x0c,0x10,0x14] as
+ * its vertex/render engine (0x10=primitive-mode dispatcher, 0x08=vertex process).
+ * We install none, so GLEngine's render calls no-op.  Log which one carries the
+ * vertex batch (dump ptr-looking args' memory). */
+static void ctl_dump(const char *w, gld_context *ctx, uint32_t a2, uint32_t a3,
+                     uint32_t a4, uint32_t a5, uint32_t a6, uint32_t a7)
+{
+    int i;
+    gld_log(">>> %s(ctx=%p a2=0x%x a3=0x%x a4=0x%x a5=0x%x a6=0x%x a7=0x%x)\n",
+            w, (void *)ctx, a2, a3, a4, a5, a6, a7);
+    { uint32_t v[6]; int k=0; v[k++]=a2; v[k++]=a3; v[k++]=a4; v[k++]=a5; v[k++]=a6; v[k++]=a7;
+      for (k=0;k<6;k++) if (v[k]>0x10000 && v[k]<0x40000000) {
+        const uint32_t *p=(const uint32_t *)v[k];
+        gld_log("     arg%d=0x%x -> %08x %08x %08x %08x\n", k+2, v[k], p[0],p[1],p[2],p[3]);
+      } }
+    (void)i;
+}
+int mach64_ctl00(gld_context *c,uint32_t a,uint32_t b,uint32_t d,uint32_t e,uint32_t f,uint32_t g){ctl_dump("table[0x00]",c,a,b,d,e,f,g);return 0;}
+int mach64_ctl08(gld_context *c,uint32_t a,uint32_t b,uint32_t d,uint32_t e,uint32_t f,uint32_t g){ctl_dump("table[0x08]",c,a,b,d,e,f,g);return 0;}
+int mach64_ctl0c(gld_context *c,uint32_t a,uint32_t b,uint32_t d,uint32_t e,uint32_t f,uint32_t g){ctl_dump("table[0x0c]",c,a,b,d,e,f,g);return 0;}
+int mach64_ctl10(gld_context *c,uint32_t a,uint32_t b,uint32_t d,uint32_t e,uint32_t f,uint32_t g){ctl_dump("table[0x10]",c,a,b,d,e,f,g);return 0;}
+int mach64_ctl14(gld_context *c,uint32_t a,uint32_t b,uint32_t d,uint32_t e,uint32_t f,uint32_t g){ctl_dump("table[0x14]",c,a,b,d,e,f,g);return 0;}
+
 /* table[0x04] = THE flush entry.  GLEngine's render flow calls this to dispatch
  * accumulated geometry (ref gldInitDispatch installs it -> sub_cf68 -> sub_c3c0,
  * the driver's flush engine).  Our gldInitDispatch stubbed it, so GLEngine hit a

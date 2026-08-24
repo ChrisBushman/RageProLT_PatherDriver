@@ -141,7 +141,12 @@ void gldInitDispatch(gld_context *ctx, void *table, uint32_t flags)
      * nothing rendered.  Store the table ptr in ctx+0x1c (reference: stw r4,
      * 0x1c(ctx)) and install our flush; then the primitive slots. */
     *(void **)((unsigned char *)ctx + 0x1c)  = table;
+    *(void **)((unsigned char *)table + 0x00) = (void *)mach64_ctl00;
     *(void **)((unsigned char *)table + 0x04) = (void *)mach64_flush;
+    *(void **)((unsigned char *)table + 0x08) = (void *)mach64_ctl08;
+    *(void **)((unsigned char *)table + 0x0c) = (void *)mach64_ctl0c;
+    *(void **)((unsigned char *)table + 0x10) = (void *)mach64_ctl10;
+    *(void **)((unsigned char *)table + 0x14) = (void *)mach64_ctl14;
     gldUpdateDispatch(ctx, table, flags);
 }
 

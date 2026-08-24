@@ -140,6 +140,11 @@ void mach64_render_quad_strip (gld_context *, const void *, uint32_t);
 void mach64_dispatch_complete (gld_context *, const void *, uint32_t);
 void mach64_dispatch_render_ctl(gld_context *, const void *, uint32_t);
 int  mach64_flush(gld_context *, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t);
+int  mach64_ctl00(gld_context *, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t);
+int  mach64_ctl08(gld_context *, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t);
+int  mach64_ctl0c(gld_context *, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t);
+int  mach64_ctl10(gld_context *, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t);
+int  mach64_ctl14(gld_context *, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t);
 
 int gldUpdateDispatch(gld_context *ctx, void *table, uint32_t flags);
 
