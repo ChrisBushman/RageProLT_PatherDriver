@@ -131,6 +131,19 @@ int gldFinish(gld_context *ctx)
     return 0;
 }
 
+/* table[0x04] = THE flush entry.  GLEngine's render flow calls this to dispatch
+ * accumulated geometry (ref gldInitDispatch installs it -> sub_cf68 -> sub_c3c0,
+ * the driver's flush engine).  Our gldInitDispatch stubbed it, so GLEngine hit a
+ * no-op and nothing rendered.  First: log that it's called + its args, to find
+ * the vertex batch GLEngine passes; then wire it to our DMA path. */
+int mach64_flush(gld_context *ctx, uint32_t a2, uint32_t a3, uint32_t a4,
+                 uint32_t a5, uint32_t a6, uint32_t a7)
+{
+    gld_log("*** mach64_flush (table[0x04]) CALLED  ctx=%p args=0x%x 0x%x 0x%x 0x%x 0x%x 0x%x\n",
+            (void *)ctx, a2, a3, a4, a5, a6, a7);
+    return 0;
+}
+
 /* Dispatch slots 0x4c (buffer-complete) and 0x60 (render-control) -- the
  * reference installs these; we didn't, and immediate-mode geometry isn't
  * reaching our primitive slots.  Log them to map what GLEngine calls to flush. */

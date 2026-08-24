@@ -124,6 +124,13 @@ int gldSetInteger(gld_context *ctx, uint32_t pname, int value)
 void gldInitDispatch(gld_context *ctx, void *table, uint32_t flags)
 {
     gld_log("gldInitDispatch(table=%p flags=0x%x)\n", table, flags);
+    /* Reference gldInitDispatch installs the driver's control/flush slots that
+     * GLEngine calls to render.  table[0x04] is THE flush entry -- GLEngine calls
+     * it to dispatch accumulated geometry; a no-op there (our old stub) meant
+     * nothing rendered.  Store the table ptr in ctx+0x1c (reference: stw r4,
+     * 0x1c(ctx)) and install our flush; then the primitive slots. */
+    *(void **)((unsigned char *)ctx + 0x1c)  = table;
+    *(void **)((unsigned char *)table + 0x04) = (void *)mach64_flush;
     gldUpdateDispatch(ctx, table, flags);
 }
 
