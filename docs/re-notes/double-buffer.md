@@ -74,20 +74,31 @@ and our DB context attaches as **type 0x36**, which we wrongly handle like 0x5a
   derives a surface-type code from drawable[0xc] (0x84f5/0x8513/-0xde0 range ->
   0x1000/0x2000/0x3000 in a surface word) and clears ctx+0x1e4.
 - Increments a per-context BUFFER COUNTER at ctx+0x98 (byte).
-- Calls a GLEngine registry function: r9 = *(PIC+0x6418c) (a renderer-registry
-  object GLEngine populates); r12 = registry[5]; `bctrl` with r3/r4/r5 =
-  drawable[0/1/2].  Plus imported-stub calls (sub_686fc/6871c = lazy-bound IOKit/libc).
-So the DB "surface contract" = call GLEngine's renderer-registry surface function to
-register the back buffer as a proper surface (type 0x36), gated on caps 0x20 clear,
-tracking a buffer count at ctx+0x98.  The registry (PIC+0x6418c) is a GLEngine object
-the driver must have captured at init (find where the reference STORES to PIC+0x6418c;
-GLEngine passes it -- likely gldCreateContext/gldInitDispatch).
-NOT imported symbols (nm -u ref128 = only IOKit/libc/pthread + glgConvertType/
-glgProcessPixels), so the surface funcs come through that runtime registry, not the
-link table.  TO IMPLEMENT: (1) capture GLEngine's renderer registry at init; (2) in
-gldAttachDrawable type 0x36, call registry[5](drawable...) to register the back
-surface + bump ctx+0x98, instead of binding the front FB; (3) sort the caps 0x20
-gate.  Substantial multi-step RE (registry global + layout + fn signatures).
+- Calls a per-renderer surface function from a REGISTRY struct: r9 = *(PIC+0x6418c);
+  r11 = registry[2] (a table indexed by ctx[0]=renderer_index); r12 = registry[5];
+  `bctrl r12` with r3/r4/r5 = drawable[0/1/2].
+
+### Registry: driver-local struct populated GLEngine-side (verified)
+PIC+0x6418c resolves to absolute **0x690d8**, an `__nl_symbol_ptr` slot that is
+INDIRECT_SYMBOL_LOCAL (not an import -- an earlier note misread it as
+io_connect_method due to reading the section reserved1 from the wrong offset; the
+correct reserved1=50).  It holds **0x69510**, the address of a `__common` (zero-fill)
+struct of 0xb8 bytes.  So the "registry" is a DRIVER-LOCAL struct; registry[5]
+(0x69524) is the surface-register function pointer, registry[2] (0x69518) a
+per-renderer table.  CRUCIAL: the reference NEVER writes to 0x69510 (scanned all of
+__text for both indirect and direct PIC stores into [0x69510,0x695c8) -- none).  So
+**GLEngine populates the struct at a runtime handshake** (fills the driver's __common
+registry with surface function pointers) -- this is the framework-side contract.
+
+### Best next approach: RUNTIME tracing, not more static disasm
+Static reference disasm has taken this as far as is reliable (the reserved1 bug shows
+how error-prone it is).  To finish, instrument OUR driver's init entry points
+(gldGetRendererInfo / gldCreateContext / gldInitDispatch and the *feature stubs*) to
+DUMP their argument pointers, hunting for a GLEngine registry/vtable of function
+pointers (a struct whose [5] is a code pointer in the 0x9xxxxxxx framework range).
+Once found, capture it and, in gldAttachDrawable type 0x36, call registry[5](drawable)
+to register the back buffer + bump ctx+0x98 + caps-0x20 gate, instead of binding the
+front FB.  Then GLEngine should render the DB context via the primitive slots.
 
 ## Fallback that works today
 Force dbuf for ALL (single-buffer) contexts — no DB pixel format, no 0x60: the
