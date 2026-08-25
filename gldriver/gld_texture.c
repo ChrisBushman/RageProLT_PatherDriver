@@ -441,6 +441,50 @@ static uint32_t mach64_apply_fog(gld_context *ctx, m64_state *st, uint32_t sc)
          | (1u << 12);                         /* ALPHA_FOG_EN = FOG (bit12 only)  */
 }
 
+/* GL_COLOR_LOGIC_OP (glLogicOp).  gli+0x63a4 packs [31:16] = glLogicOp GL enum
+ * (0x1500..0x150f) and bit0 = GL_COLOR_LOGIC_OP enable (recovered via GLD_FOGSCAN
+ * state-delta: 0x15030000 -> 0x15060001 on enable+XOR, -> 0x15070001 on GL_OR).
+ * The op is a datapath ROP applied via DP_MIX (0x6d4): FRGD_MIX [20:16] + BKGD_MIX
+ * [4:0], each a 5-bit code, set to the SAME value = the ROP of source (fragment)
+ * vs dest (framebuffer).  The 16 GL ops map onto the 16 basic MIX codes exactly.
+ * NOTE the reference DRI driver FALLS BACK TO SOFTWARE for all ops != GL_COPY; we
+ * attempt it in hardware (verified below). */
+#define GLI_LOGICOP  0x63a4u
+
+/* GL logic op (enum low nibble) -> mach64 MIX code, S=source frag, D=dest fb. */
+static const unsigned char mach64_logicop_mix[16] = {
+    1,  /* 0x0 CLEAR         -> ZERO             (0)      */
+    12, /* 0x1 AND           -> D_AND_S          (s & d)  */
+    13, /* 0x2 AND_REVERSE   -> NOT_D_AND_S      (s & ~d) */
+    7,  /* 0x3 COPY          -> S                (s)      */
+    14, /* 0x4 AND_INVERTED  -> D_AND_NOT_S      (~s & d) */
+    3,  /* 0x5 NOOP          -> D                (d)      */
+    5,  /* 0x6 XOR           -> D_XOR_S          (s ^ d)  */
+    11, /* 0x7 OR            -> D_OR_S           (s | d)  */
+    15, /* 0x8 NOR           -> NOT_D_AND_NOT_S  (~(s|d)) */
+    6,  /* 0x9 EQUIV         -> NOT_D_XOR_S      (~(s^d)) */
+    0,  /* 0xa INVERT        -> NOT_D            (~d)     */
+    10, /* 0xb OR_REVERSE    -> NOT_D_OR_S       (s | ~d) */
+    4,  /* 0xc COPY_INVERTED -> NOT_S            (~s)     */
+    9,  /* 0xd OR_INVERTED   -> D_OR_NOT_S       (~s | d) */
+    8,  /* 0xe NAND          -> NOT_D_OR_NOT_S   (~(s&d)) */
+    2,  /* 0xf SET           -> ONE              (1)      */
+};
+
+/* If a non-trivial colour logic op is active (GL_COLOR_LOGIC_OP on AND op != COPY),
+ * write its DP_MIX value and return 1; else return 0 (caller uses the source mix). */
+static int mach64_logicop(gld_context *ctx, uint32_t *dp_mix_out)
+{
+    uint32_t w = mach64_gli_u32(ctx, GLI_LOGICOP);
+    uint32_t op, code;
+    if (!(w & 1u)) return 0;                 /* GL_COLOR_LOGIC_OP disabled          */
+    op = (w >> 16) & 0xfu;                    /* glLogicOp enum low nibble           */
+    if (op == 3u) return 0;                   /* GL_COPY (0x1503) = the pass-through  */
+    code = mach64_logicop_mix[op];
+    *dp_mix_out = (code << 16) | code;        /* FRGD_MIX | BKGD_MIX = the ROP        */
+    return 1;
+}
+
 /* GL_ALPHA_TEST state (recovered via tools/mach64_alphatest -DGLD_ATSCAN):
  *   gli+0x62e0 = glAlphaFunc REF (float 0..1)
  *   gli+0x62e4 = (GL compare enum << 16) | (bit8 = GL_ALPHA_TEST enabled) */
@@ -480,8 +524,8 @@ int mach64_bind_texture(gld_context *ctx)
     mach64_priv *p = MACH64_PRIV(ctx);
     m64_state *st = &p->hw;
     mach64_tex_slot *bound;
-    uint32_t wl, hl, tex_on, env, light_fcn, new_scale_3d, blend;
-    int changed;
+    uint32_t wl, hl, tex_on, env, light_fcn, new_scale_3d, blend, lop_mix = 0;
+    int changed, lop_on;
 
     /* Upload any image-dirtied textures (their state objects are populated by
      * draw time); each lands in its own VRAM slot. */
@@ -520,11 +564,19 @@ int mach64_bind_texture(gld_context *ctx)
         if (st->dp_write_mask != wm) { st->dp_write_mask = wm; p->dirty |= MACH64_DIRTY_STATE; }
     }
 
+    /* GL_COLOR_LOGIC_OP (glLogicOp): a datapath ROP via DP_MIX.  Takes precedence
+     * over blending AND fog (GL spec: logic op disables blending), so when active we
+     * force the opaque SOLID pipe in the branches below and skip fog. */
+    lop_on = mach64_logicop(ctx, &lop_mix);
+    {   uint32_t dm = lop_on ? lop_mix : MACH64_DP_MIX_SS;
+        if (st->dp_mix != dm) { st->dp_mix = dm; p->dirty |= MACH64_DIRTY_STATE; }
+    }
+
     /* GL_FOG: decide once per draw.  Sets mach64_fog_on so mach64_read_vertex packs
      * the fog factor into the vertex alpha, and forces a state re-emit while fogging
      * so DP_FOG_CLR (which aliases the 2D DP_FRGD_CLR a clear/fill may have trampled)
-     * is re-latched every fog draw. */
-    mach64_fog_on = mach64_fog_active(ctx);
+     * is re-latched every fog draw.  A logic op owns the pipe -> no fog. */
+    mach64_fog_on = lop_on ? 0 : mach64_fog_active(ctx);
     if (mach64_fog_on) p->dirty |= MACH64_DIRTY_STATE;
     else               st->dp_fog_clr = 0;   /* leave DP_FRGD_CLR to the 2D engine */
 
@@ -547,7 +599,9 @@ int mach64_bind_texture(gld_context *ctx)
          * + DST field ([21:19]) with the app's glBlendFunc factors.  Blend off ->
          * the proven opaque SOLID pipe (SRC_ONE/DST_ZERO). */
         uint32_t sc = MACH64_SCALE_3D_CNTL_SOLID;
-        if (mach64_gli_u32(ctx, GLI_BLEND_ENABLE) & GLI_BLEND_EN_BIT) {
+        /* A logic op owns the datapath (DP_MIX) and forces the opaque SOLID pipe;
+         * blend/fog are skipped (GL: logic op disables blending). */
+        if (!lop_on && (mach64_gli_u32(ctx, GLI_BLEND_ENABLE) & GLI_BLEND_EN_BIT)) {
             uint32_t bf = mach64_gli_u32(ctx, GLI_BLEND_FUNC);
             sc = (sc & ~0x003f0800u)
                | mach64_blend_src(bf >> 16) | mach64_blend_dst(bf & 0xffffu)
@@ -585,11 +639,12 @@ int mach64_bind_texture(gld_context *ctx)
      * app's glEnable(GL_BLEND) + glBlendFunc from the gli.  Off -> SRC_ONE/DST_ZERO
      * (opaque).  With TEX_MAP_AEN set for RGBA, the "source alpha" the SRC/DST
      * factors reference IS the texel alpha. */
-    if (mach64_gli_u32(ctx, GLI_BLEND_ENABLE) & GLI_BLEND_EN_BIT) {
+    if (!lop_on && (mach64_gli_u32(ctx, GLI_BLEND_ENABLE) & GLI_BLEND_EN_BIT)) {
         uint32_t bf = mach64_gli_u32(ctx, GLI_BLEND_FUNC);
         /* ALPHA_FOG_EN_ALPHA (1<<11) turns ON the alpha channel in the 3D pipe --
          * without it the alpha isn't computed and the blend sees opaque As, so a
-         * translucent texture never blends (ref sets it whenever BlendEnabled). */
+         * translucent texture never blends (ref sets it whenever BlendEnabled).  A
+         * logic op forces the opaque pipe (blend disabled). */
         blend = mach64_blend_src(bf >> 16) | mach64_blend_dst(bf & 0xffffu)
               | (1u << 11);
     } else {
