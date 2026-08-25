@@ -435,6 +435,18 @@ int mach64_bind_texture(gld_context *ctx)
      * draw time); each lands in its own VRAM slot. */
     while (g_npending) mach64_upload(ctx, g_pending[--g_npending]);
 
+    /* GL_COLOR_MASK (glColorMask): gli+0x63b4 holds 4 bytes R,G,B,A (each 0/1,
+     * recovered via GLD_CMSCAN).  Map to DP_WRITE_MASK for the 32bpp ARGB8888 target
+     * (A[31:24] R[23:16] G[15:8] B[7:0]) -- a cleared channel drops those bits so the
+     * pipe leaves them untouched in the framebuffer. */
+    {   uint32_t cm = mach64_gli_u32(ctx, 0x63b4);
+        uint32_t wm = ((cm >> 24) & 0xffu ? 0x00ff0000u : 0u)   /* R */
+                    | ((cm >> 16) & 0xffu ? 0x0000ff00u : 0u)   /* G */
+                    | ((cm >>  8) & 0xffu ? 0x000000ffu : 0u)   /* B */
+                    | ((cm        & 0xffu) ? 0xff000000u : 0u);  /* A */
+        if (st->dp_write_mask != wm) { st->dp_write_mask = wm; p->dirty |= MACH64_DIRTY_STATE; }
+    }
+
     /* Follow the app's glEnable/glDisable(GL_TEXTURE_2D). */
     tex_on = (mach64_gli_u32(ctx, GLI_TEX2D_ENABLE) & GLI_TEX2D_BIT) != 0;
 
