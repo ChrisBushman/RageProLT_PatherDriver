@@ -253,9 +253,17 @@ void mach64_render_quad_strip(gld_context *ctx, const void *v, uint32_t n)
     }
 }
 
-/* ---- point/line family: setup engine is triangle-only; TODO expand to
- * point-sprite / line quads.  No-op for now so a stream of them can't corrupt
- * the ring; the validated triangle family above is complete. ------------ */
+/* ---- point/line family: the mach64 setup engine is triangle-only, so each
+ * point expands to a size x size quad and each line to a width-2 quad (draw_point/
+ * draw_line above), both fed through the proven triangle path.  Dispatch slots are
+ * 0x18 (POINTS), 0x1c (LINES), 0x20 (LINE_STRIP + LINE_LOOP) -- recovered by the
+ * GLD_DISPATCH_PROBE run.  Each path calls mach64_bind_texture so it honours the
+ * CURRENT GL texture state instead of inheriting whatever the last triangle draw
+ * programmed (an untextured point stream after a textured quad would otherwise
+ * sample stale texture bits).  Note: draw_point/draw_line carry no per-vertex
+ * texcoords (s/t = 0), so a *textured* point/line samples texel (0,0) uniformly
+ * rather than interpolating -- acceptable for the common untextured/colour case;
+ * per-vertex-texcoord expansion is a TODO if a textured-line app needs it. -- */
 #define FB_H(ctx) ((float)*(const uint32_t *)((const unsigned char *)(ctx) + 0x1f4))
 
 /* gli offsets recovered by diffing point-size/line-width configs (tools/
@@ -268,6 +276,7 @@ void mach64_render_points(gld_context *ctx, const void *v, uint32_t n)
     float fb_h = FB_H(ctx), s = gli_size(ctx, GLI_POINT_SIZE) * 0.5f; uint32_t i;
     PRIM_SANE(n);
     mach64_sync_depth_from_gli(ctx);
+    mach64_bind_texture(ctx);          /* honour current texture state (usu. off) */
     for (i = 0; i < n; i++) draw_point(ctx, VTX(v, i), fb_h, s);
 }
 void mach64_render_lines(gld_context *ctx, const void *v, uint32_t n)
@@ -275,6 +284,7 @@ void mach64_render_lines(gld_context *ctx, const void *v, uint32_t n)
     float fb_h = FB_H(ctx), w = gli_size(ctx, GLI_LINE_WIDTH) * 0.5f; uint32_t i;
     PRIM_SANE(n);
     mach64_sync_depth_from_gli(ctx);
+    mach64_bind_texture(ctx);
     for (i = 0; i + 2 <= n; i += 2) draw_line(ctx, VTX(v, i), VTX(v, i+1), fb_h, w);
 }
 void mach64_render_line_strip(gld_context *ctx, const void *v, uint32_t n)
@@ -282,6 +292,7 @@ void mach64_render_line_strip(gld_context *ctx, const void *v, uint32_t n)
     float fb_h = FB_H(ctx), w = gli_size(ctx, GLI_LINE_WIDTH) * 0.5f; uint32_t i;
     PRIM_SANE(n);
     mach64_sync_depth_from_gli(ctx);
+    mach64_bind_texture(ctx);
     for (i = 1; i < n; i++) draw_line(ctx, VTX(v, i-1), VTX(v, i), fb_h, w);
 }
 void mach64_render_line_loop(gld_context *ctx, const void *v, uint32_t n)
@@ -289,6 +300,7 @@ void mach64_render_line_loop(gld_context *ctx, const void *v, uint32_t n)
     float fb_h = FB_H(ctx), w = gli_size(ctx, GLI_LINE_WIDTH) * 0.5f; uint32_t i;
     PRIM_SANE(n);
     mach64_sync_depth_from_gli(ctx);
+    mach64_bind_texture(ctx);
     for (i = 1; i < n; i++) draw_line(ctx, VTX(v, i-1), VTX(v, i), fb_h, w);
     if (n > 2) draw_line(ctx, VTX(v, n-1), VTX(v, 0), fb_h, w);   /* close the loop */
 }
