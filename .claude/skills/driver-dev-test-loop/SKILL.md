@@ -80,5 +80,16 @@ the real values. Keep an old debugger that speaks the target ABI on the box
 (gdb 5.3 for PPC/Panther) — modern host tools often can't parse the old binaries
 or attach to the old kernel.
 
+**Before blaming your code or the hardware for wrong output, DUMP THE INPUT your
+code actually receives.** A bug that looks like yours may be upstream. Real case
+(cost ~8 hardware round-trips): sub-4-wide textures rendered scrambled; every
+theory (row pitch, VRAM offset, cache, draw order, a HW minimum size) was wrong.
+One `gld_log` of the source bytes the driver was handed showed the data was
+*already* corrupt on arrival — the test app fed GL tightly-packed RGB without
+`glPixelStorei(GL_UNPACK_ALIGNMENT,1)`, so GL mis-strode it before the driver ran.
+The tell was in the data all along (only widths whose byte-rows weren't 4-aligned
+failed). Dumping the received bytes is one cheap log line; it should come *before*
+a chain of hardware experiments, not after.
+
 See also [[osx-gl-framework-integration]], [[panther-kext-build-test]],
 [[osx-ppc-kext-hardware]].
