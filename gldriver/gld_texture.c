@@ -57,6 +57,18 @@ typedef struct {
 } mach64_tex_slot;
 static mach64_tex_slot g_slots[MACH64_TEX_SLOTS];
 static uint32_t        g_heap_next = MACH64_TEX_HEAP_BASE;
+/* Heap window is runtime-relocatable: double-buffered mode needs the VRAM the
+ * texture heap normally occupies for the back buffer, so it moves the heap into
+ * the smaller tail region.  Must be called before any texture is uploaded. */
+static uint32_t        g_heap_base = MACH64_TEX_HEAP_BASE;
+static uint32_t        g_heap_end  = MACH64_TEX_HEAP_END;
+
+void mach64_set_texheap(uint32_t base, uint32_t end)
+{
+    g_heap_base = base; g_heap_end = end; g_heap_next = base;
+    gld_log("mach64_set_texheap: heap = [0x%x, 0x%x) (%u KB)\n",
+            base, end, (end - base) >> 10);
+}
 
 typedef struct { uint32_t off, size; } mach64_free_blk;
 static mach64_free_blk g_free[MACH64_TEX_SLOTS];
@@ -119,7 +131,7 @@ static uint32_t heap_alloc(uint32_t size)
         else { g_free[best].off += size; g_free[best].size -= size; }
         return off;
     }
-    if (g_heap_next + size > MACH64_TEX_HEAP_END) return 0;
+    if (g_heap_next + size > g_heap_end) return 0;
     { uint32_t off = g_heap_next; g_heap_next += size; return off; }
 }
 

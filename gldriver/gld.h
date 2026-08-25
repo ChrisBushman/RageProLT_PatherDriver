@@ -102,6 +102,12 @@ typedef struct {
     uint32_t   z_off;              /* depth buffer byte offset (0 = none)  */
     uint32_t   z_pitch;            /* depth buffer pitch (16-bit Z pixels)  */
     uint32_t   frame_new;          /* 1 => clear Z before next frame's geom */
+    /* ---- double buffering (dbuf=0 => render straight to the front/scanout) - */
+    uint32_t   dbuf;               /* 1 => render to back, blit on present  */
+    uint32_t   front_off;          /* scanout (front) surface byte offset   */
+    uint32_t   back_off;           /* off-screen back surface byte offset   */
+    uint32_t   fb_w, fb_h;         /* surface dimensions (swap blit extent) */
+    uint32_t   fb_pitch;           /* surface pitch in 32-bit pixels        */
     /* ---- texture state (first cut: one bound 2D texture) -------------- */
     void      *tex_obj;            /* bound/uploaded texobj (t[0x30]=state) */
     uint32_t   tex_off;            /* texel VRAM byte offset (0 = none up)  */
@@ -125,6 +131,8 @@ void mach64_fill_rect(gld_context *ctx, uint32_t off, uint32_t x, uint32_t y,
 void mach64_blit_surface(gld_context *ctx, uint32_t src_off, uint32_t dst_off,
                          uint32_t sx, uint32_t sy, uint32_t dx, uint32_t dy,
                          uint32_t w, uint32_t h, uint32_t pitch_px);
+void mach64_set_texheap(uint32_t base, uint32_t end);
+void mach64_present(gld_context *ctx);   /* double-buffer back->front swap */
 void mach64_sync_depth_from_gli(gld_context *ctx);
 uint32_t mach64_gli_u32(gld_context *ctx, uint32_t off);   /* read a gli field */
 void mach64_set_scissor(gld_context *ctx, int x, int y, int w, int h);

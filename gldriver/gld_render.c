@@ -126,6 +126,16 @@ void mach64_fill_rect(gld_context *ctx, uint32_t off, uint32_t x, uint32_t y,
     p->dirty |= MACH64_DIRTY_STATE;
 }
 
+/* Present a double-buffered frame: copy the whole back buffer to the front
+ * (scanout) surface with the GUI-engine blit.  No-op when single-buffered. */
+void mach64_present(gld_context *ctx)
+{
+    mach64_priv *p = MACH64_PRIV(ctx);
+    if (!p->dbuf || !p->back_off || !p->front_off) return;
+    mach64_blit_surface(ctx, p->back_off, p->front_off, 0, 0, 0, 0,
+                        p->fb_w, p->fb_h, p->fb_pitch);
+}
+
 /* ---- screen-to-screen (VRAM->VRAM) blit via the 2D GUI engine --------
  * Copy a w x h pixel box: source box at (sx,sy) in src_off -> dest box at
  * (dx,dy) in dst_off, both byte offsets in VRAM, pitch in 32-bit pixels.  Recipe
@@ -175,12 +185,21 @@ int mach64_draw_triangle(gld_context *ctx, const m64_vertex *v0,
     mach64_priv *p = MACH64_PRIV(ctx);
     m64_cmdbuf cb;
 
-    /* Per-frame Z clear: on the first triangle of a new frame, clear the depth
-     * buffer to far.  frame_new is armed at drawable attach and at each buffer
-     * swap (gldFlushBuffer).  GLEngine clears colour itself but never touches
-     * our Z buffer, so the driver owns the depth clear. */
-    if (p->z_off && p->frame_new && (p->hw.z_cntl & MACH64_Z_EN)) {
-        mach64_clear_zbuffer(ctx);   /* separate submit; also marks state dirty */
+    /* Frame start (first triangle of a new frame; frame_new armed at attach and at
+     * each swap/finish).  The driver owns two clears GLEngine won't do for us:
+     *  - Z buffer: GLEngine never touches our depth buffer.
+     *  - Colour, but ONLY when double-buffered: GLEngine's glClear targets the
+     *    FRONT surface, so our off-screen back buffer would otherwise blit stale
+     *    VRAM as the background (verified: garbage background, Picture 23).  Clear
+     *    it to black.  TODO: read the app's real glClearColor from the gli instead
+     *    of assuming black. */
+    if (p->frame_new &&
+        (p->dbuf || (p->z_off && (p->hw.z_cntl & MACH64_Z_EN)))) {
+        if (p->dbuf)
+            mach64_fill_rect(ctx, p->back_off, 0, 0, p->fb_w, p->fb_h,
+                             p->fb_pitch, 0x00000000u);
+        if (p->z_off && (p->hw.z_cntl & MACH64_Z_EN))
+            mach64_clear_zbuffer(ctx);   /* separate submit; also marks state dirty */
         p->frame_new = 0;
     }
 
@@ -236,23 +255,17 @@ int gldFinish(gld_context *ctx)
     gld_log("gldFinish() last_stamp=%u\n", (unsigned)p->last_stamp);
     IOConnectMethodScalarIStructureI(ctx->connect, kMach64Sel_wait_for_stamp,
                                      1, 0, (int)p->last_stamp, NULL);
-#ifdef GLD_BLIT_TEST
-    /* De-risk the GUI 2D engine (fill + blit) with ZERO 3D dependency: paint a solid
-     * RED box into the front buffer at (0,0) 200x150 with the fill engine, then blit
-     * that box to (600,400).  PASS = two red boxes on screen (original + copy).  If
-     * only the (0,0) box shows, fill works but blit doesn't; if neither, fill is
-     * wrong.  Front base+pitch live at ctx+0x94 / ctx+0x98. */
-    {   uint8_t *c = (uint8_t *)ctx;
-        uint32_t fb   = *(uint32_t *)(c + 0x94);
-        uint32_t pitb = *(uint32_t *)(c + 0x98);          /* pitch in bytes */
-        gld_log("  [blit-test] fill front=0x%x pitch=%uB (0,0)200x150 RED, blit -> (600,400)\n",
-                fb, pitb);
-        mach64_fill_rect(ctx, fb, 0, 0, 200, 150, pitb / 4, 0x00ff0000u);
-        mach64_blit_surface(ctx, fb, fb, 0, 0, 600, 400, 200, 150, pitb / 4);
+    /* Double-buffered: single-buffer apps end a frame with glFinish (which lands
+     * here), so present the back buffer to the front on each finish as well as on
+     * the explicit swap (gldFlushBuffer).  Fence again so the blit completes before
+     * the app draws the next frame over the back buffer. */
+    if (p->dbuf) {
+        gld_log("  [dbuf] present back=0x%x -> front=0x%x on gldFinish\n",
+                p->back_off, p->front_off);
+        mach64_present(ctx);
         IOConnectMethodScalarIStructureI(ctx->connect, kMach64Sel_wait_for_stamp,
                                          1, 0, (int)p->last_stamp, NULL);
     }
-#endif
     /* End-of-frame for single-buffered apps: arm the per-frame Z clear so the
      * next frame's first triangle resets the depth buffer.  (Double-buffered
      * apps also arm it at the swap in gldFlushBuffer.) */

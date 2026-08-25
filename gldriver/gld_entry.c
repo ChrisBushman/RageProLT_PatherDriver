@@ -94,6 +94,26 @@ int gldAttachDrawable(gld_context *ctx, int type, void *drawable, uint32_t flags
 
         mach64_set_render_target(ctx, base_bytes, fb_pitch_px);
 
+#ifdef GLD_DBUF_TEST
+        /* Double-buffer bring-up (forced on; pixel-format gating comes later).
+         * Place the back buffer one full surface above the front/scanout, relocate
+         * the texture heap above the back buffer, and retarget rendering to the
+         * back.  VRAM (8MB): front 0x1000, back +one surface, heap after that.
+         * NOTE: this test map assumes no depth buffer in use (texprim). */
+        {   mach64_priv *pv = MACH64_PRIV(ctx);
+            uint32_t surf = fb_pitch_px * 4u * height;      /* bytes per surface */
+            uint32_t back = base_bytes + surf;
+            pv->dbuf      = 1;
+            pv->front_off = base_bytes;
+            pv->back_off  = back;
+            pv->fb_w = width; pv->fb_h = height; pv->fb_pitch = fb_pitch_px;
+            mach64_set_texheap(back + surf, 0x800000u);     /* heap above back buf */
+            mach64_set_render_target(ctx, back, fb_pitch_px);   /* draw to back */
+            gld_log("  [dbuf] front=0x%x back=0x%x %ux%u pitch=%upx -> render->back\n",
+                    base_bytes, back, width, height, fb_pitch_px);
+        }
+#endif
+
         /* DEPTH: bind a 16-bit Z buffer past the visible framebuffer (fb is base
          * 0x1000 + 1024x768x4 ~ 0x301000, so 0x400000 doesn't overlap), enable
          * GL_LESS + Z write, and clear it to far.  Real per-vertex Z now comes
@@ -246,6 +266,7 @@ int gldFlushBuffer(gld_context *ctx, void *drawable)
     gld_log("gldFlushBuffer(ctx=%p drawable=%p) cbpp(ctx+0x5f)=%u target=0x%x pitch=0x%x\n",
             (void*)ctx, drawable, (unsigned)c[0x5f],
             *(uint32_t *)(c + 0x94), *(uint32_t *)(c + 0x98));
+    if (MACH64_PRIV(ctx)->dbuf) mach64_present(ctx);   /* swap: back -> front */
     MACH64_PRIV(ctx)->frame_new = 1; /* next frame: clear Z */
     return gldFinish(ctx);
 }
