@@ -95,6 +95,72 @@ void mach64_clear_zbuffer(gld_context *ctx)
     p->dirty |= MACH64_DIRTY_STATE;
 }
 
+/* ---- solid-colour rectangle fill via the 2D GUI engine --------------
+ * Fill a w x h pixel box at (x,y) in `off` (byte offset, pitch in 32-bit px) with
+ * `color` (0x00RRGGBB).  Same engine setup as the Z clear but with a caller colour
+ * and an arbitrary dest.  Used to clear a double-buffer back buffer (GLEngine's own
+ * colour clear targets the front) and to paint test rectangles. */
+void mach64_fill_rect(gld_context *ctx, uint32_t off, uint32_t x, uint32_t y,
+                      uint32_t w, uint32_t h, uint32_t pitch_px, uint32_t color)
+{
+    mach64_priv *p = MACH64_PRIV(ctx);
+    m64_cmdbuf cb;
+    uint32_t op = (pitch_px / 8) << 22;
+    if (!off || !w || !h) return;
+    m64_cb_init(&cb, p->scratch, sizeof(p->scratch) / sizeof(p->scratch[0]));
+    m64_reg(&cb, MACH64_Z_CNTL,           0);
+    m64_reg(&cb, MACH64_SCALE_3D_CNTL,    0);
+    m64_reg(&cb, MACH64_GUI_TRAJ_CNTL,    (1u<<0) | (1u<<1));    /* L->R, T->B */
+    m64_reg(&cb, MACH64_DP_PIX_WIDTH,     0x60060666u);          /* 32bpp */
+    m64_reg(&cb, MACH64_DP_FRGD_CLR,      color);
+    m64_reg(&cb, MACH64_DP_WRITE_MASK,    0xffffffffu);
+    m64_reg(&cb, MACH64_DP_MIX,           (3u<<0) | (7u<<16));   /* BKGD_MIX_D|FRGD_MIX_S */
+    m64_reg(&cb, MACH64_DP_SRC,           (1u<<0) | (1u<<8));    /* both srcs = FRGD_CLR */
+    m64_reg(&cb, MACH64_SC_LEFT_RIGHT,    (0x1fffu<<16) | 0);
+    m64_reg(&cb, MACH64_SC_TOP_BOTTOM,    (0x1fffu<<16) | 0);
+    m64_reg(&cb, MACH64_CLR_CMP_CNTL,     0);
+    m64_reg(&cb, MACH64_DST_OFF_PITCH,    op | (off >> 3));
+    m64_reg(&cb, MACH64_DST_X_Y,          (x << 16) | y);
+    m64_reg(&cb, MACH64_DST_WIDTH_HEIGHT, (h << 16) | w);        /* triggers the fill */
+    mach64_submit(ctx, &cb);
+    p->dirty |= MACH64_DIRTY_STATE;
+}
+
+/* ---- screen-to-screen (VRAM->VRAM) blit via the 2D GUI engine --------
+ * Copy a w x h pixel box: source box at (sx,sy) in src_off -> dest box at
+ * (dx,dy) in dst_off, both byte offsets in VRAM, pitch in 32-bit pixels.  Recipe
+ * ported from the DRI reference swap (drm_mach64_state.c "dispatch swap"):
+ * FRGD_SRC_BLIT + FRGD_MIX_S copies the source pixels; DST_WIDTH_HEIGHT triggers.
+ * Used for the double-buffer back->front present. */
+void mach64_blit_surface(gld_context *ctx, uint32_t src_off, uint32_t dst_off,
+                         uint32_t sx, uint32_t sy, uint32_t dx, uint32_t dy,
+                         uint32_t w, uint32_t h, uint32_t pitch_px)
+{
+    mach64_priv *p = MACH64_PRIV(ctx);
+    m64_cmdbuf cb;
+    uint32_t op = (pitch_px / 8) << 22;
+    if (!src_off || !dst_off || !w || !h) return;
+    m64_cb_init(&cb, p->scratch, sizeof(p->scratch) / sizeof(p->scratch[0]));
+    m64_reg(&cb, MACH64_Z_CNTL,           0);               /* Z off for the blit */
+    m64_reg(&cb, MACH64_SCALE_3D_CNTL,    0);
+    m64_reg(&cb, MACH64_GUI_TRAJ_CNTL,    (1u<<0) | (1u<<1));    /* L->R, T->B */
+    m64_reg(&cb, MACH64_DP_PIX_WIDTH,     0x60060666u);          /* 32bpp */
+    m64_reg(&cb, MACH64_DP_WRITE_MASK,    0xffffffffu);
+    m64_reg(&cb, MACH64_DP_MIX,           MACH64_DP_MIX_DS);     /* BKGD_MIX_D|FRGD_MIX_S */
+    m64_reg(&cb, MACH64_DP_SRC,           MACH64_DP_SRC_BLIT);   /* FRGD_SRC_BLIT */
+    m64_reg(&cb, MACH64_SC_LEFT_RIGHT,    (0x1fffu<<16) | 0);
+    m64_reg(&cb, MACH64_SC_TOP_BOTTOM,    (0x1fffu<<16) | 0);
+    m64_reg(&cb, MACH64_CLR_CMP_CNTL,     0);
+    m64_reg(&cb, MACH64_SRC_OFF_PITCH,    op | (src_off >> 3));
+    m64_reg(&cb, MACH64_DST_OFF_PITCH,    op | (dst_off >> 3));
+    m64_reg(&cb, MACH64_SRC_WIDTH1,       w);
+    m64_reg(&cb, MACH64_SRC_Y_X,          (sx << 16) | sy);
+    m64_reg(&cb, MACH64_DST_Y_X,          (dx << 16) | dy);
+    m64_reg(&cb, MACH64_DST_WIDTH_HEIGHT, (h << 16) | w);        /* triggers the blit */
+    mach64_submit(ctx, &cb);
+    p->dirty |= MACH64_DIRTY_STATE;   /* 3D state clobbered -> re-emit next tri */
+}
+
 /* ---- one triangle: the core draw path -------------------------------
  * Re-emit the state block if dirty, emit the 3 vertices + the reciprocal-area
  * trigger, then submit.  Returns 0 on a degenerate triangle (dropped).
@@ -170,6 +236,23 @@ int gldFinish(gld_context *ctx)
     gld_log("gldFinish() last_stamp=%u\n", (unsigned)p->last_stamp);
     IOConnectMethodScalarIStructureI(ctx->connect, kMach64Sel_wait_for_stamp,
                                      1, 0, (int)p->last_stamp, NULL);
+#ifdef GLD_BLIT_TEST
+    /* De-risk the GUI 2D engine (fill + blit) with ZERO 3D dependency: paint a solid
+     * RED box into the front buffer at (0,0) 200x150 with the fill engine, then blit
+     * that box to (600,400).  PASS = two red boxes on screen (original + copy).  If
+     * only the (0,0) box shows, fill works but blit doesn't; if neither, fill is
+     * wrong.  Front base+pitch live at ctx+0x94 / ctx+0x98. */
+    {   uint8_t *c = (uint8_t *)ctx;
+        uint32_t fb   = *(uint32_t *)(c + 0x94);
+        uint32_t pitb = *(uint32_t *)(c + 0x98);          /* pitch in bytes */
+        gld_log("  [blit-test] fill front=0x%x pitch=%uB (0,0)200x150 RED, blit -> (600,400)\n",
+                fb, pitb);
+        mach64_fill_rect(ctx, fb, 0, 0, 200, 150, pitb / 4, 0x00ff0000u);
+        mach64_blit_surface(ctx, fb, fb, 0, 0, 600, 400, 200, 150, pitb / 4);
+        IOConnectMethodScalarIStructureI(ctx->connect, kMach64Sel_wait_for_stamp,
+                                         1, 0, (int)p->last_stamp, NULL);
+    }
+#endif
     /* End-of-frame for single-buffered apps: arm the per-frame Z clear so the
      * next frame's first triangle resets the depth buffer.  (Double-buffered
      * apps also arm it at the swap in gldFlushBuffer.) */

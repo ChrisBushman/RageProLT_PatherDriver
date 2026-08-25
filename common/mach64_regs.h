@@ -85,6 +85,14 @@
 #define MACH64_HOST_DATA0           0x0600   /* host-data FIFO 0..15 (0x600-0x63c) */
 #define MACH64_DP_SRC_HOST          0x00000200u  /* FRGD_SRC_HOST | MONO_SRC_ONE   */
 #define MACH64_DP_MIX_DS            0x00070003u  /* BKGD_MIX_D | FRGD_MIX_S (blit) */
+#define MACH64_DP_SRC_BLIT          0x00000300u  /* BKGD_SRC_BKGD_CLR|FRGD_SRC_BLIT|MONO_SRC_ONE */
+
+/* ---- GUI-engine blit SOURCE regs (screen-to-screen copy; offsets + recipe from
+ * the DRI reference drm_mach64_{drv.h,state.c} -- same 0x05xx scheme as DST). --- */
+#define MACH64_SRC_OFF_PITCH        0x0580  /* blit source base+pitch          */
+#define MACH64_SRC_Y_X              0x058c  /* (x<<16)|y source start          */
+#define MACH64_SRC_WIDTH1           0x0590  /* source width (blit wrap)        */
+#define MACH64_DST_Y_X              0x050c  /* (x<<16)|y dest start            */
 
 /* ---- Bus-master DMA control (VERIFIED ring, bus-master-ring.md) -------
  * The engine bus-master-reads a descriptor ring (BM_GUI_TABLE) and, per

@@ -241,8 +241,14 @@ void gldInitDispatch(gld_context *ctx, void *table, void *outinfo)
 /* gldFlushBuffer: swap/present the drawable.  Submits are synchronous today, so
  * fence.  TODO: real front/back flip once double-buffered surfaces are bound. */
 int gldFlushBuffer(gld_context *ctx, void *drawable)
-{ (void)drawable; MACH64_PRIV(ctx)->frame_new = 1; /* next frame: clear Z */
-  return gldFinish(ctx); }
+{
+    uint8_t *c = (uint8_t *)ctx;
+    gld_log("gldFlushBuffer(ctx=%p drawable=%p) cbpp(ctx+0x5f)=%u target=0x%x pitch=0x%x\n",
+            (void*)ctx, drawable, (unsigned)c[0x5f],
+            *(uint32_t *)(c + 0x94), *(uint32_t *)(c + 0x98));
+    MACH64_PRIV(ctx)->frame_new = 1; /* next frame: clear Z */
+    return gldFinish(ctx);
+}
 
 /* ---- feature stubs: present so GLEngine's lookups are non-NULL; only called
  * if the app uses the feature.  Return 0 (NULL/success). --------------- */

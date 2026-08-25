@@ -120,6 +120,11 @@ void mach64_set_shade_model(gld_context *ctx, int smooth);  /* GL_SMOOTH? */
 void mach64_set_depth_test(gld_context *ctx, int enable, uint32_t gl_func);
 void mach64_set_zbuffer(gld_context *ctx, uint32_t off, uint32_t pitch_px);
 void mach64_clear_zbuffer(gld_context *ctx);
+void mach64_fill_rect(gld_context *ctx, uint32_t off, uint32_t x, uint32_t y,
+                      uint32_t w, uint32_t h, uint32_t pitch_px, uint32_t color);
+void mach64_blit_surface(gld_context *ctx, uint32_t src_off, uint32_t dst_off,
+                         uint32_t sx, uint32_t sy, uint32_t dx, uint32_t dy,
+                         uint32_t w, uint32_t h, uint32_t pitch_px);
 void mach64_sync_depth_from_gli(gld_context *ctx);
 uint32_t mach64_gli_u32(gld_context *ctx, uint32_t off);   /* read a gli field */
 void mach64_set_scissor(gld_context *ctx, int x, int y, int w, int h);
