@@ -159,6 +159,7 @@ void mach64_render_line_loop  (gld_context *, const void *, uint32_t);
 void mach64_render_triangles  (gld_context *, const void *, uint32_t);
 void mach64_render_tri_strip  (gld_context *, const void *, uint32_t);
 void mach64_render_tri_fan    (gld_context *, const void *, uint32_t);
+void mach64_render_tri_fan_slot(gld_context *, const void *, const void *, uint32_t);
 void mach64_render_polygon    (gld_context *, const void *, uint32_t);
 void mach64_render_quads      (gld_context *, const void *, uint32_t);
 void mach64_render_quad_strip (gld_context *, const void *, uint32_t);

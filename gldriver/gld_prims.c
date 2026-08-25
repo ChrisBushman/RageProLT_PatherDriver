@@ -200,7 +200,27 @@ void mach64_render_tri_fan(gld_context *ctx, const void *v, uint32_t n)
 {
     uint32_t i;
     PRIM_SANE(n);
+    mach64_sync_depth_from_gli(ctx);
+    mach64_bind_texture(ctx);          /* upload+program texture if bound */
     for (i = 2; i < n; i++) emit_tri(ctx, v, 0, i-1, i);
+}
+
+/* GL_TRIANGLE_FAN dispatch slot (table+0x30) uses a DIFFERENT calling convention
+ * than every other primitive slot: GLEngine calls it as
+ *   f(ctx, apex_vertex, perimeter_verts, perimeter_count)
+ * with the fan apex in r4, the perimeter array (contiguous immediately after the
+ * apex) in r5, and the perimeter vertex count in r6 -- NOT f(ctx, verts, count).
+ * The generic render_tri_fan reads the count from r5, which here is the perimeter
+ * POINTER -> a garbage count -> a runaway loop over unmapped memory and a crash
+ * (recovered via the GLD_DISPATCH_PROBE run, tools/mach64_dispatchprobe).  The
+ * apex is verts[0] and the perimeter is verts[1..], so the full contiguous array
+ * is (perimeter_count + 1) vertices and the generic fan body over `apex` with that
+ * total is correct. */
+void mach64_render_tri_fan_slot(gld_context *ctx, const void *apex,
+                                const void *perim, uint32_t m)
+{
+    (void)perim;   /* == apex + one vertex stride; array is contiguous from apex */
+    mach64_render_tri_fan(ctx, apex, m + 1);
 }
 
 void mach64_render_polygon(gld_context *ctx, const void *v, uint32_t n)
@@ -213,6 +233,8 @@ void mach64_render_quads(gld_context *ctx, const void *v, uint32_t n)
 {
     uint32_t i;
     PRIM_SANE(n);
+    mach64_sync_depth_from_gli(ctx);
+    mach64_bind_texture(ctx);          /* upload+program texture if bound */
     for (i = 0; i + 4 <= n; i += 4) {            /* quad -> 2 tris */
         emit_tri(ctx, v, i,   i+1, i+2);
         emit_tri(ctx, v, i,   i+2, i+3);
@@ -223,6 +245,8 @@ void mach64_render_quad_strip(gld_context *ctx, const void *v, uint32_t n)
 {
     uint32_t i;
     PRIM_SANE(n);
+    mach64_sync_depth_from_gli(ctx);
+    mach64_bind_texture(ctx);          /* upload+program texture if bound */
     for (i = 0; i + 4 <= n; i += 2) {            /* strip quad -> 2 tris */
         emit_tri(ctx, v, i,   i+1, i+2);
         emit_tri(ctx, v, i+2, i+1, i+3);

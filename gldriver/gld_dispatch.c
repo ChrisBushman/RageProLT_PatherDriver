@@ -30,6 +30,18 @@
 
 #define SET(off, fn)  (*(void **)((unsigned char *)table + (off)) = (void *)(fn))
 
+/* DISPATCH PROBE: log every primitive-slot call with its slot offset + the raw
+ * PPC argument registers r4..r8, to recover the true slot->GL-primitive mapping
+ * AND each slot's calling convention (the garbage `n` for fans implies the arg
+ * positions differ per slot).  Draws nothing -- pure RE.  Toggle with the build
+ * flag -DGLD_DISPATCH_PROBE. */
+#ifdef GLD_DISPATCH_PROBE
+#define MKPROBE(hx) static void dprobe_##hx(void *a,void *b,void *c,void *d,void *e,void *f) \
+    { (void)a; gld_log("DISP 0x" #hx ": r4=%p r5=%p r6=%p r7=%p r8=%p\n", b,c,d,e,f); }
+MKPROBE(18) MKPROBE(1c) MKPROBE(20) MKPROBE(24) MKPROBE(28) MKPROBE(2c)
+MKPROBE(30) MKPROBE(34) MKPROBE(38) MKPROBE(3c) MKPROBE(40) MKPROBE(44) MKPROBE(48)
+#endif
+
 int gldUpdateDispatch(gld_context *ctx, void *table, uint32_t flags)
 {
     (void)ctx; (void)flags;   /* single untextured variant for now */
@@ -38,33 +50,44 @@ int gldUpdateDispatch(gld_context *ctx, void *table, uint32_t flags)
             ((uint32_t *)(uintptr_t)flags)[0], ((uint32_t *)(uintptr_t)flags)[1],
             ((uint32_t *)(uintptr_t)flags)[2]);
 
-    SET(SLOT_POINTS,     mach64_render_points);
-    SET(SLOT_LINES,      mach64_render_lines);
-    SET(SLOT_LINE_LOOP,  mach64_render_line_loop);
-    SET(SLOT_LINE_STRIP, mach64_render_line_strip);
-    /* EMPIRICAL: GLEngine dispatches glDrawArrays(GL_TRIANGLES) to slot 0x2c (what
-     * we labeled TRI_STRIP), delivering INDEPENDENT triangles (6 verts = 2 tris);
-     * slot 0x28 is never called for array triangles.  Installing the STRIP
-     * decomposer at 0x2c mis-built every quad -- it treated the 2 independent
-     * triangles as a strip, producing a redundant overlapping triangle whose
-     * differing interpolation showed as a diagonal seam.  Install the correct
-     * independent-triangle body at 0x2c.  (0x2c is really GL_TRIANGLES; the
-     * remaining triangle-region labels are likely off by one, but only the
-     * triangles path is exercised/confirmed -- leave the rest until tested.) */
-    SET(SLOT_TRIANGLES,  mach64_render_triangles);
-    SET(SLOT_TRI_STRIP,  mach64_render_triangles);
-    SET(SLOT_TRI_FAN,    mach64_render_tri_fan);
-    SET(SLOT_POLYGON,    mach64_render_polygon);
-    SET(SLOT_QUADS,      mach64_render_quads);
-    SET(SLOT_QUAD_STRIP, mach64_render_quad_strip);
+#ifdef GLD_DISPATCH_PROBE
+    SET(0x18, dprobe_18); SET(0x1c, dprobe_1c); SET(0x20, dprobe_20);
+    SET(0x24, dprobe_24); SET(0x28, dprobe_28); SET(0x2c, dprobe_2c);
+    SET(0x30, dprobe_30); SET(0x34, dprobe_34); SET(0x38, dprobe_38);
+    SET(0x3c, dprobe_3c); SET(0x40, dprobe_40); SET(0x44, dprobe_44);
+    SET(0x48, dprobe_48);
+#else
+    /* Slot->GL-primitive mapping recovered empirically by the GLD_DISPATCH_PROBE
+     * run (tools/mach64_dispatchprobe drives each GL primitive with a UNIQUE vertex
+     * count; the probe logs each slot's offset + raw arg registers).  The table is
+     * NOT laid out in GL-mode order, and the earlier labels were wrong:
+     *   0x18 POINTS  0x1c LINES  0x20 LINE_STRIP(+LINE_LOOP)  0x28 POLYGON
+     *   0x2c TRIANGLES  0x30 TRIANGLE_FAN  0x34 TRIANGLE_STRIP
+     *   0x38 QUADS  0x3c QUAD_STRIP        (0x24 never fired for DrawArrays)
+     * All slots pass f(ctx, verts, count) EXCEPT the fan (0x30), which passes
+     * f(ctx, apex, perimeter, count) -- see mach64_render_tri_fan_slot. */
+    SET(0x18, mach64_render_points);
+    SET(0x1c, mach64_render_lines);
+    SET(0x20, mach64_render_line_strip);   /* LINE_STRIP and LINE_LOOP both land here;
+                                            * loop arrives with its closing vertex
+                                            * appended (count = n+1), so the plain
+                                            * strip body draws the closing segment. */
+    SET(0x24, mach64_render_line_strip);   /* not observed for DrawArrays; safe body */
+    SET(0x28, mach64_render_polygon);      /* GL_POLYGON (convex -> fan) */
+    SET(0x2c, mach64_render_triangles);    /* GL_TRIANGLES (independent) */
+    SET(0x30, mach64_render_tri_fan_slot); /* GL_TRIANGLE_FAN (apex/perimeter/count) */
+    SET(0x34, mach64_render_tri_strip);    /* GL_TRIANGLE_STRIP */
+    SET(0x38, mach64_render_quads);        /* GL_QUADS */
+    SET(0x3c, mach64_render_quad_strip);   /* GL_QUAD_STRIP */
 
-    /* DrawElements vector: reuse the array bodies for now.  GLEngine passes an
-     * extra index-buffer arg in r6 which our 3-arg funcs safely ignore (PPC
-     * calling convention) -> renders sequentially.  TODO: real indexed path
-     * once the element width/format is recovered. */
+    /* DrawElements vector (0x40/0x44/0x48): never fired for DrawArrays.  Reuse the
+     * array bodies for now; GLEngine passes an extra index-buffer arg our 3-arg
+     * funcs ignore (PPC calling convention) -> renders sequentially.  TODO: real
+     * indexed path once the element width/format is recovered. */
     SET(SLOT_ELT_POINTS, mach64_render_points);
     SET(SLOT_ELT_LINES,  mach64_render_lines);
     SET(SLOT_ELT_TRIS,   mach64_render_triangles);
+#endif  /* GLD_DISPATCH_PROBE */
 
     /* control slots (0x58/0x5c symbol-confirmed == gldFinish/gldFlush) */
     SET(SLOT_FINISH,     gldFinish);
