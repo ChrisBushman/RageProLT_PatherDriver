@@ -64,11 +64,12 @@ int main(void)
     glClearColor(0.f, 0.f, 0.f, 1.f);
     glClear(GL_COLOR_BUFFER_BIT);
 
-    /* glFinish BETWEEN the draws: if GLEngine batches/defers, this forces draw A
-     * to dispatch with texA bound before texB is bound -- so the two draws really
-     * have different bindings at draw time. */
-    glBindTexture(GL_TEXTURE_2D, texA);  quad(-0.9f, -0.1f);  glFlush(); glFinish();
-    glBindTexture(GL_TEXTURE_2D, texB);  quad( 0.1f,  0.9f);  glFlush(); glFinish();
+    /* NO flush between the draws -- the natural bind/draw/bind/draw pattern.
+     * Tests whether GLEngine batches (both draws collapse to the last binding)
+     * or dispatches per-draw so gli+0x15748 differs at each draw. */
+    glBindTexture(GL_TEXTURE_2D, texA);  quad(-0.9f, -0.1f);
+    glBindTexture(GL_TEXTURE_2D, texB);  quad( 0.1f,  0.9f);
+    glFlush(); glFinish();
 
     glFlush(); glFinish();
     printf("drew texA(left) + texB(right)\n"); fflush(stdout);
