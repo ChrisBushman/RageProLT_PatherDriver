@@ -416,7 +416,24 @@ int mach64_bind_texture(gld_context *ctx)
     }
 
     if (!bound || !tex_on) {               /* no bound texture, or texturing off */
-        if (st->textured) { st->textured = 0; p->dirty |= MACH64_DIRTY_STATE; }
+        /* Untextured gouraud: honour glEnable(GL_BLEND) on the shade pipe.  The
+         * source alpha As is the interpolated VERTEX alpha (now carried in the
+         * packed argb, bit 24-31); ALPHA_FOG_EN_ALPHA (bit 11) turns on the alpha
+         * channel so As is actually computed.  Replace SOLID's SRC field ([18:16])
+         * + DST field ([21:19]) with the app's glBlendFunc factors.  Blend off ->
+         * the proven opaque SOLID pipe (SRC_ONE/DST_ZERO). */
+        uint32_t sc = MACH64_SCALE_3D_CNTL_SOLID;
+        if (mach64_gli_u32(ctx, GLI_BLEND_ENABLE) & GLI_BLEND_EN_BIT) {
+            uint32_t bf = mach64_gli_u32(ctx, GLI_BLEND_FUNC);
+            sc = (sc & ~0x003f0800u)
+               | mach64_blend_src(bf >> 16) | mach64_blend_dst(bf & 0xffffu)
+               | (1u << 11);
+        }
+        if (st->textured || st->scale_3d_cntl != sc) {
+            st->textured      = 0;
+            st->scale_3d_cntl = sc;
+            p->dirty |= MACH64_DIRTY_STATE;
+        }
         return 0;
     }
     /* Map the app's GL_TEXTURE_ENV_MODE -> mach64 TEX_LIGHT_FCN (SCALE_3D_CNTL

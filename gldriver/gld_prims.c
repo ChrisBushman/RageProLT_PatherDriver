@@ -48,7 +48,8 @@ void mach64_read_vertex(const void *vp, m64_vertex *o, float fb_h)
      * for our surface), so derive it from the NDC z at +0x18: [-1,1] -> [0,1]. */
     float ndcz  = *(const float *)(v + 0x18);
     float depth = ndcz * 0.5f + 0.5f;
-    uint32_t argb = (chan(*(const float *)(v + GVOFF_R)) << 16)
+    uint32_t argb = (chan(*(const float *)(v + 0x3c)) << 24)   /* vertex alpha  */
+                  | (chan(*(const float *)(v + GVOFF_R)) << 16)
                   | (chan(*(const float *)(v + GVOFF_G)) <<  8)
                   |  chan(*(const float *)(v + GVOFF_B));
     mach64_pack_vertex(o, x, fb_h - y, depth, w, argb);  /* GL y-up -> FB y-down */
