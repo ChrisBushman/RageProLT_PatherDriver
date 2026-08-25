@@ -212,7 +212,12 @@ static int mach64_upload(gld_context *ctx, void *texobj)
      * whole image as a SINGLE linear row of w*h texels -- height 1 makes the
      * pitch irrelevant and packs the texels contiguously at stride w, exactly the
      * layout the texture unit samples.  (Both forms write the identical bytes for
-     * w >= 8, so this only changes the narrow case.) */
+     * w >= 8, so this only changes the narrow case.)
+     *
+     * GLEngine's texel copy is TIGHTLY PACKED (pitch = w*bpp; confirmed by a
+     * source-byte dump), so we read it contiguously.  Note: an app that hands GL
+     * a sub-4-wide RGB image MUST glPixelStorei(GL_UNPACK_ALIGNMENT,1) or GL's own
+     * unpack (default alignment 4) mis-strides it before we ever see it. */
     if (w >= 8) { pitch_units = w / 8; dst_w = w;     dst_h = h; }
     else        { pitch_units = 1;     dst_w = w * h; dst_h = 1; }
 
@@ -279,6 +284,7 @@ int mach64_bind_texture(gld_context *ctx)
     m64_state *st = &p->hw;
     mach64_tex_slot *bound;
     uint32_t wl, hl, tex_on, env, light_fcn, new_scale_3d;
+    int changed;
 
     /* Upload any image-dirtied textures (their state objects are populated by
      * draw time); each lands in its own VRAM slot. */
@@ -316,12 +322,9 @@ int mach64_bind_texture(gld_context *ctx)
     /* Re-emit the texture state when the bound texture OR the env mode changes
      * (not just on the untextured->textured transition) -- otherwise switching
      * texA->texB, or MODULATE->REPLACE, leaves the hardware in the old state. */
-    if (!st->textured || st->tex_0_off != bound->off
-                      || st->tex_scale_3d != new_scale_3d) {
-        p->dirty |= MACH64_DIRTY_STATE;
-        gld_log("mach64 tex: env=0x%x light_fcn=%u off=0x%x\n",
-                env, light_fcn >> 22, bound->off);
-    }
+    changed = (!st->textured || st->tex_0_off != bound->off
+                              || st->tex_scale_3d != new_scale_3d);
+    if (changed) p->dirty |= MACH64_DIRTY_STATE;
 
     p->tex_off = bound->off;
     p->tex_w   = bound->w;
@@ -357,5 +360,9 @@ int mach64_bind_texture(gld_context *ctx)
     st->tex_scale_3d   = new_scale_3d;
 
     st->textured = 1;
+    if (changed)
+        gld_log("mach64 tex: env=0x%x light_fcn=%u off=0x%x %ux%u size_pitch=0x%x\n",
+                env, light_fcn >> 22, p->tex_off, p->tex_w, p->tex_h,
+                st->tex_size_pitch);
     return 1;
 }

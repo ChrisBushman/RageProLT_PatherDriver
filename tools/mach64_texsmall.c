@@ -62,6 +62,9 @@ int main(void)
     aglSetCurrentContext(ctx);
     printf("GL_RENDERER=%s\n", (const char *)glGetString(GL_RENDERER));
     glViewport(0, 0, 1024, 768);
+    /* Tightly-packed source rows: without this, GL's default 4-byte unpack
+     * alignment mis-strides sub-4-wide RGB images before the driver sees them. */
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
 
     /* 1x1 magenta */
     p1[0]=255; p1[1]=0; p1[2]=255;
