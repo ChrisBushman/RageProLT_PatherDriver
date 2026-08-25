@@ -44,8 +44,9 @@
 
 /* rsize = bytes actually reserved for this region (>= w*h*4, 32B-aligned).
  * Tracked separately from w/h so a texture re-uploaded SMALLER still frees its
- * full original region instead of leaking the tail. */
-typedef struct { uint32_t key, off, w, h, rsize; } mach64_tex_slot;
+ * full original region instead of leaking the tail.  has_alpha = the texture has
+ * a real (GL_RGBA) alpha channel, so TEX_MAP_AEN should be set when it's bound. */
+typedef struct { uint32_t key, off, w, h, rsize, has_alpha; } mach64_tex_slot;
 static mach64_tex_slot g_slots[MACH64_TEX_SLOTS];
 static uint32_t        g_heap_next = MACH64_TEX_HEAP_BASE;
 
@@ -201,6 +202,7 @@ static int mach64_upload(gld_context *ctx, void *texobj)
     /* Allocate this texture's own VRAM region (keyed by its state-obj pointer). */
     slot = slot_alloc(tex_key(texobj), w, h);
     if (!slot) return 0;
+    slot->has_alpha = (fmt == 0x1908);      /* GL_RGBA -> real alpha channel */
 
     /* mach64 textures are stored LINEARLY at their natural width (2^widthLog2);
      * TEX_SIZE_PITCH carries no separate pitch, so the texture unit reads texel
@@ -307,9 +309,11 @@ int mach64_bind_texture(gld_context *ctx)
     }
     /* Map the app's GL_TEXTURE_ENV_MODE -> mach64 TEX_LIGHT_FCN (SCALE_3D_CNTL
      * [23:22]; mesa_mach64_reg.h): REPLACE=0<<22, MODULATE=1<<22, DECAL->
-     * ALPHA_DECAL=2<<22.  For our RGB textures the texel alpha is assumed 0xff
+     * ALPHA_DECAL=2<<22.  For an RGB texture the texel alpha is assumed 0xff
      * (TEX_MAP_AEN off), so ALPHA_DECAL evaluates to Ctex -- identical to REPLACE,
-     * which is exactly GL_DECAL's defined result for an RGB internal format. */
+     * exactly GL_DECAL's result for an RGB internal format.  For an RGBA texture
+     * TEX_MAP_AEN (bit 30) is set so the real texel alpha feeds the pipeline, and
+     * ALPHA_DECAL then blends Ctex over the fragment colour by At. */
     env = mach64_gli_u32(ctx, GLI_TEX_ENV_MODE) >> 16;
     switch (env) {
         case GL_ENV_REPLACE: light_fcn = 0u << 22; break;
@@ -317,7 +321,8 @@ int mach64_bind_texture(gld_context *ctx)
         default:             light_fcn = 1u << 22; break;   /* MODULATE + fallback */
     }
     new_scale_3d = 0x1u | (1u << 1) | (1u << 3) | (1u << 4)
-                 | (2u << 6) | (1u << 16) | light_fcn | (1u << 24);
+                 | (2u << 6) | (1u << 16) | light_fcn | (1u << 24)
+                 | (bound->has_alpha ? (1u << 30) : 0u);   /* TEX_MAP_AEN */
 
     /* Re-emit the texture state when the bound texture OR the env mode changes
      * (not just on the untextured->textured transition) -- otherwise switching
@@ -361,8 +366,8 @@ int mach64_bind_texture(gld_context *ctx)
 
     st->textured = 1;
     if (changed)
-        gld_log("mach64 tex: env=0x%x light_fcn=%u off=0x%x %ux%u size_pitch=0x%x\n",
-                env, light_fcn >> 22, p->tex_off, p->tex_w, p->tex_h,
+        gld_log("mach64 tex: env=0x%x light_fcn=%u alpha=%u off=0x%x %ux%u size_pitch=0x%x\n",
+                env, light_fcn >> 22, bound->has_alpha, p->tex_off, p->tex_w, p->tex_h,
                 st->tex_size_pitch);
     return 1;
 }
