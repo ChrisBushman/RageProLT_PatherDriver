@@ -458,10 +458,16 @@ int mach64_bind_texture(gld_context *ctx)
                        | ((wl > hl ? wl : hl) << 4)
                        |  (hl << 8));
 
-    /* TEX_CNTL (ref init): COMP_COMBINE_MODULATE | TEX_CACHE_FLUSH |
-     * CACHE_SIZE_4K.  GL_REPEAT sets NO clamp/wrap bits (mach64 default is
-     * repeat); nearest filter -> COMP_BLEND/FILTER bits clear. */
-    st->tex_cntl       = (1u << 9) | (1u << 23) | (1u << 30);   /* 0x40800200 */
+    /* TEX_CNTL: COMP_COMBINE_MODULATE | TEX_CACHE_FLUSH | CACHE_SIZE_4K, plus
+     * TEXTURE_CLAMP_S (1<<17) | TEXTURE_CLAMP_T (1<<18).  Without clamp, the S
+     * interpolation underflows slightly below 0 at the left/top edge and the unit
+     * floor-addresses it to the LAST texel column -- a 1px wrong-colour line down
+     * the edge.  Clamping pins the edge sample to texel 0, which is exactly right
+     * for a texture drawn once with S,T in [0,1] (the common case).  (Following the
+     * app's actual GL_TEXTURE_WRAP_S/T so a genuinely TILING texture can REPEAT is
+     * future work; the reference sets these same bits for GL_CLAMP.) */
+    st->tex_cntl       = (1u << 9) | (1u << 23) | (1u << 30)
+                       | (1u << 17) | (1u << 18);           /* TEXTURE_CLAMP_S | _T */
 
     /* SCALE_3D_CNTL textured: the shade default with TEXTURE_DISABLE(bit6)
      * cleared turns FCN_SHADE(3<<6) into FCN_TEXTURE(2<<6).  Fixed set (ref,
