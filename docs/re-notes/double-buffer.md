@@ -62,6 +62,33 @@ needs a proper back-buffer surface (likely a second kext surface handle + the DB
 attach protocol), which lives INSIDE GLEngine.  Cracking it needs disassembling the
 **GLEngine framework** (0x9xxxxxxx, stripped) — beyond the reference-driver RE.
 
+## Surface contract RE (2026-08-25, ref gldAttachDrawable @0x4f38)
+Disassembled the reference's gldAttachDrawable.  It handles THREE drawable types,
+branching on r4: 0x50 (window), 0x5a (fullscreen), **0x36 (back-buffer attach)** --
+and our DB context attaches as **type 0x36**, which we wrongly handle like 0x5a
+(bind the front framebuffer).  Differences of the 0x36 path:
+- Caps gate: 0x5a requires `fmt_caps & 0x20` SET; 0x36 requires it CLEAR
+  (`andi. r,0x2c(ctx),0x20; bne fail`).  (caps 0x20 = set when node f08 bit1 clear.)
+- Calls the surface-setup sub_a524(ctx, &ctx+0x2c, r5) with r5=0 (vs r5=drawable for
+  0x5a).  sub_a524 with r5=0 sets bit1 in the object at *ctx+0x14; with a drawable it
+  derives a surface-type code from drawable[0xc] (0x84f5/0x8513/-0xde0 range ->
+  0x1000/0x2000/0x3000 in a surface word) and clears ctx+0x1e4.
+- Increments a per-context BUFFER COUNTER at ctx+0x98 (byte).
+- Calls a GLEngine registry function: r9 = *(PIC+0x6418c) (a renderer-registry
+  object GLEngine populates); r12 = registry[5]; `bctrl` with r3/r4/r5 =
+  drawable[0/1/2].  Plus imported-stub calls (sub_686fc/6871c = lazy-bound IOKit/libc).
+So the DB "surface contract" = call GLEngine's renderer-registry surface function to
+register the back buffer as a proper surface (type 0x36), gated on caps 0x20 clear,
+tracking a buffer count at ctx+0x98.  The registry (PIC+0x6418c) is a GLEngine object
+the driver must have captured at init (find where the reference STORES to PIC+0x6418c;
+GLEngine passes it -- likely gldCreateContext/gldInitDispatch).
+NOT imported symbols (nm -u ref128 = only IOKit/libc/pthread + glgConvertType/
+glgProcessPixels), so the surface funcs come through that runtime registry, not the
+link table.  TO IMPLEMENT: (1) capture GLEngine's renderer registry at init; (2) in
+gldAttachDrawable type 0x36, call registry[5](drawable...) to register the back
+surface + bump ctx+0x98, instead of binding the front FB; (3) sort the caps 0x20
+gate.  Substantial multi-step RE (registry global + layout + fn signatures).
+
 ## Fallback that works today
 Force dbuf for ALL (single-buffer) contexts — no DB pixel format, no 0x60: the
 render-to-back + present-on-glFinish path is proven (Picture 24).  Delivers the
