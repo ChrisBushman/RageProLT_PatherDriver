@@ -65,21 +65,33 @@ int main(void)
         glEnable(GL_TEXTURE_2D);     printf("enable err=0x%x\n", glGetError());
     }
 
-    /* A centred quad (two triangles) with texcoords spanning the full [0,1]x[0,1]
-     * texture, so all four colour quadrants are visible. */
-    {   static const GLfloat verts[12] = { -0.6f,-0.6f,  0.6f,-0.6f,  0.6f,0.6f,
-                                           -0.6f,-0.6f,  0.6f, 0.6f, -0.6f,0.6f };
+    glColor3f(1.f, 1.f, 1.f);
+    glEnableClientState(GL_VERTEX_ARRAY);
+    glEnableClientState(GL_TEXTURE_COORD_ARRAY);
+
+    /* LEFT quad: GL_TEXTURE_2D enabled -> the four colour quadrants. */
+    {   static const GLfloat verts[12] = { -0.9f,-0.6f, -0.1f,-0.6f, -0.1f,0.6f,
+                                           -0.9f,-0.6f, -0.1f, 0.6f, -0.9f,0.6f };
         static const GLfloat tc[12]    = {  0.f,0.f,  1.f,0.f,  1.f,1.f,
                                             0.f,0.f,  1.f,1.f,  0.f,1.f };
-        glColor3f(1.f, 1.f, 1.f);
-        glEnableClientState(GL_VERTEX_ARRAY);
-        glEnableClientState(GL_TEXTURE_COORD_ARRAY);
+        glEnable(GL_TEXTURE_2D);
+        glVertexPointer(2, GL_FLOAT, 0, verts);
+        glTexCoordPointer(2, GL_FLOAT, 0, tc);
+        glDrawArrays(GL_TRIANGLES, 0, 6);
+    }
+    /* RIGHT quad: GL_TEXTURE_2D DISABLED -> should be solid white (vertex colour)
+     * if glDisable(GL_TEXTURE_2D) is honoured (else it would be textured too). */
+    {   static const GLfloat verts[12] = {  0.1f,-0.6f,  0.9f,-0.6f,  0.9f,0.6f,
+                                            0.1f,-0.6f,  0.9f, 0.6f,  0.1f,0.6f };
+        static const GLfloat tc[12]    = {  0.f,0.f,  1.f,0.f,  1.f,1.f,
+                                            0.f,0.f,  1.f,1.f,  0.f,1.f };
+        glDisable(GL_TEXTURE_2D);
         glVertexPointer(2, GL_FLOAT, 0, verts);
         glTexCoordPointer(2, GL_FLOAT, 0, tc);
         glDrawArrays(GL_TRIANGLES, 0, 6);
     }
     glFlush(); glFinish();
-    printf("drew textured quad (GL err=0x%x)\n", glGetError()); fflush(stdout);
+    printf("drew textured(left)+untextured(right) quads (GL err=0x%x)\n", glGetError()); fflush(stdout);
     sleep(4);
 
     aglSetCurrentContext(NULL); aglSetDrawable(ctx, NULL);

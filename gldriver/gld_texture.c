@@ -121,23 +121,27 @@ static int mach64_upload(gld_context *ctx, void *texobj)
     return 1;
 }
 
-/* Called from the draw path.  Uploads any pending image, then programs the
- * texture registers into p->hw and enables textured state emission.  Returns 1
- * if a texture is bound (the primitive should feed per-vertex S/T).
- *
- * FIRST-CUT enable policy: texturing is considered active whenever a texture has
- * been uploaded for this context.  (Our only texture-creating test enables
- * GL_TEXTURE_2D; honouring glDisable(GL_TEXTURE_2D) needs the gli enable bit --
- * TODO: recover it like the depth-enable bit and gate on it here.) */
+/* GL_TEXTURE_2D enable lives in the gli as bit 3 of the word at +0x6748 (0x08
+ * when enabled, 0 when disabled; recovered via tools/mach64_texstate gli-diff). */
+#define GLI_TEX2D_ENABLE   0x6748
+#define GLI_TEX2D_BIT      0x00000008u
+
+/* Called from the draw path.  Uploads any pending image (so the texture is ready
+ * in VRAM regardless of enable state), then -- only if the app has GL_TEXTURE_2D
+ * enabled -- programs the texture registers into p->hw and enables textured state
+ * emission.  Returns 1 if a texture is bound (the primitive should feed S/T). */
 int mach64_bind_texture(gld_context *ctx)
 {
     mach64_priv *p = MACH64_PRIV(ctx);
     m64_state *st = &p->hw;
-    uint32_t wl, hl;
+    uint32_t wl, hl, tex_on;
 
     if (g_pending_tex) { mach64_upload(ctx, g_pending_tex); g_pending_tex = 0; }
 
-    if (!p->tex_off) {                                   /* nothing uploaded    */
+    /* Follow the app's glEnable/glDisable(GL_TEXTURE_2D). */
+    tex_on = (mach64_gli_u32(ctx, GLI_TEX2D_ENABLE) & GLI_TEX2D_BIT) != 0;
+
+    if (!p->tex_off || !tex_on) {          /* nothing uploaded, or texturing off */
         if (st->textured) { st->textured = 0; p->dirty |= MACH64_DIRTY_STATE; }
         return 0;
     }
