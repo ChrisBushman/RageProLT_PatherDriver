@@ -47,11 +47,13 @@
  * full original region instead of leaking the tail.  has_alpha = the texture has
  * a real (GL_RGBA) alpha channel, so TEX_MAP_AEN should be set when it's bound.
  * mip_off[r] = VRAM offset of the mip level whose maxLog2 == r (the register
- * TEX_r_OFF); nlevels = number of loaded mip levels (1 = base only). */
+ * TEX_r_OFF); nlevels = number of loaded mip levels (1 = base only).  clamp_s/t =
+ * the app's GL_TEXTURE_WRAP_S/T is a clamp mode (not GL_REPEAT). */
 typedef struct {
     uint32_t key, off, w, h, rsize, has_alpha;
     uint32_t mip_off[12];
     int      nlevels;
+    uint32_t clamp_s, clamp_t;
 } mach64_tex_slot;
 static mach64_tex_slot g_slots[MACH64_TEX_SLOTS];
 static uint32_t        g_heap_next = MACH64_TEX_HEAP_BASE;
@@ -294,6 +296,13 @@ static int mach64_upload(gld_context *ctx, void *texobj)
     if (!slot) return 0;
     slot->has_alpha = (lvl[0].fmt == 0x1908);   /* GL_RGBA -> real alpha channel */
     slot->nlevels   = nlevels;
+    /* GL_TEXTURE_WRAP_S/T live in the state-obj at +0x10 as (WRAP_S<<16)|WRAP_T,
+     * raw GL enums (recovered via tools/mach64_wrapstate).  Any non-REPEAT (0x2901)
+     * mode -- GL_CLAMP/CLAMP_TO_EDGE/CLAMP_TO_BORDER -- maps to hardware clamp. */
+    {   uint32_t wrap = *(const uint32_t *)(s + 0x10);
+        slot->clamp_s = ((wrap >> 16) != 0x2901u);
+        slot->clamp_t = ((wrap & 0xffffu) != 0x2901u);
+    }
 
     /* Upload each level; index its offset by its maxLog2 (= its TEX_n_OFF reg). */
     cur = slot->off;
@@ -459,15 +468,14 @@ int mach64_bind_texture(gld_context *ctx)
                        |  (hl << 8));
 
     /* TEX_CNTL: COMP_COMBINE_MODULATE | TEX_CACHE_FLUSH | CACHE_SIZE_4K, plus
-     * TEXTURE_CLAMP_S (1<<17) | TEXTURE_CLAMP_T (1<<18).  Without clamp, the S
-     * interpolation underflows slightly below 0 at the left/top edge and the unit
-     * floor-addresses it to the LAST texel column -- a 1px wrong-colour line down
-     * the edge.  Clamping pins the edge sample to texel 0, which is exactly right
-     * for a texture drawn once with S,T in [0,1] (the common case).  (Following the
-     * app's actual GL_TEXTURE_WRAP_S/T so a genuinely TILING texture can REPEAT is
-     * future work; the reference sets these same bits for GL_CLAMP.) */
+     * TEXTURE_CLAMP_S (1<<17) / TEXTURE_CLAMP_T (1<<18) per the app's actual
+     * GL_TEXTURE_WRAP_S/T (ref mach64_texstate.c sets these for GL_CLAMP, nothing
+     * for GL_REPEAT).  A REPEAT texture drawn once in [0,1] shows the mach64's
+     * edge wrap (a 1px opposite-edge line) -- that IS GL_REPEAT's edge behaviour;
+     * apps wanting clean edges use GL_CLAMP. */
     st->tex_cntl       = (1u << 9) | (1u << 23) | (1u << 30)
-                       | (1u << 17) | (1u << 18);           /* TEXTURE_CLAMP_S | _T */
+                       | (bound->clamp_s ? (1u << 17) : 0u)
+                       | (bound->clamp_t ? (1u << 18) : 0u);
 
     /* SCALE_3D_CNTL textured: the shade default with TEXTURE_DISABLE(bit6)
      * cleared turns FCN_SHADE(3<<6) into FCN_TEXTURE(2<<6).  Fixed set (ref,
