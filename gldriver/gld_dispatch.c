@@ -42,8 +42,17 @@ int gldUpdateDispatch(gld_context *ctx, void *table, uint32_t flags)
     SET(SLOT_LINES,      mach64_render_lines);
     SET(SLOT_LINE_LOOP,  mach64_render_line_loop);
     SET(SLOT_LINE_STRIP, mach64_render_line_strip);
+    /* EMPIRICAL: GLEngine dispatches glDrawArrays(GL_TRIANGLES) to slot 0x2c (what
+     * we labeled TRI_STRIP), delivering INDEPENDENT triangles (6 verts = 2 tris);
+     * slot 0x28 is never called for array triangles.  Installing the STRIP
+     * decomposer at 0x2c mis-built every quad -- it treated the 2 independent
+     * triangles as a strip, producing a redundant overlapping triangle whose
+     * differing interpolation showed as a diagonal seam.  Install the correct
+     * independent-triangle body at 0x2c.  (0x2c is really GL_TRIANGLES; the
+     * remaining triangle-region labels are likely off by one, but only the
+     * triangles path is exercised/confirmed -- leave the rest until tested.) */
     SET(SLOT_TRIANGLES,  mach64_render_triangles);
-    SET(SLOT_TRI_STRIP,  mach64_render_tri_strip);
+    SET(SLOT_TRI_STRIP,  mach64_render_triangles);
     SET(SLOT_TRI_FAN,    mach64_render_tri_fan);
     SET(SLOT_POLYGON,    mach64_render_polygon);
     SET(SLOT_QUADS,      mach64_render_quads);
