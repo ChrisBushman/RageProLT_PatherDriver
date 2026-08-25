@@ -142,7 +142,13 @@ int gldAttachDrawable(gld_context *ctx, int type, void *drawable, uint32_t flags
                     dd[0x28/4] = 0x00000008;
                     dd[0x2c/4] = 0x00000008;
                     dd[0x34/4] = 0x00000020;
-                    gld_log("  [desc-exp] populated descriptor (dims 0x800x0x800)\n");
+                    /* GL_MAX_TEXTURE_SIZE: GLEngine's glGetIntegerv worker reads
+                     * it as a HALFWORD from descriptor+0xb2 (traced: GLEngine
+                     * 0xb6e6c -> lhz r0,0xb2(gli[0x789c])).  Zero here made every
+                     * glTexImage2D fail GL_INVALID_VALUE.  mach64 texture unit
+                     * maxes at 1024x1024 -> advertise 1024 (power-of-two). */
+                    *(uint16_t *)(uintptr_t)(descp + 0xb2) = 1024;
+                    gld_log("  [desc-exp] populated descriptor (dims 0x800x0x800, maxtex=1024)\n");
                 }
             }
         }
@@ -182,6 +188,8 @@ int gldGetError(gld_context *ctx) { (void)ctx; gld_log("gldGetError()\n"); retur
 
 int gldGetInteger(gld_context *ctx, uint32_t pname, int *params)
 {
+    /* GLEngine never calls this for the texture caps (GL_MAX_TEXTURE_SIZE comes
+     * from the drawable descriptor +0xb2, set in gldAttachDrawable). */
     (void)ctx;
     gld_log("gldGetInteger(pname=0x%x)\n", pname);
     if (params) *params = 0;
@@ -269,7 +277,13 @@ int gldCreateTextureLevel(void *ctx, void *t, uint32_t a3, uint32_t lvl, uint32_
 int gldDeleteTextureLevel(void *ctx, void *t, uint32_t lvl)
 { (void)ctx; gld_log("gldDeleteTextureLevel(t=%p lvl=%u)\n", t, lvl); return 0; }
 int gldModifyTexture(void *ctx, void *t, uint32_t a3)
-{ (void)ctx; gld_log("gldModifyTexture(t=%p a3=0x%x)\n", t, a3); return 0; }
+{
+    (void)ctx;
+    gld_log("gldModifyTexture(t=%p a3=0x%x)\n", t, a3);
+    if (a3 & 0x80)                          /* image dirty: upload at next draw */
+        mach64_texture_dirtied(t);
+    return 0;
+}
 int gldModifyTextureLevel(void *ctx, void *t, uint32_t a3, uint32_t lvl, uint32_t a5, uint32_t a6, uint32_t a7)
 { (void)ctx; gld_log("gldModifyTextureLevel(t=%p a3=0x%x lvl=%u a5=0x%x a6=0x%x a7=0x%x)\n", t,a3,lvl,a5,a6,a7); return 0; }
 int gldGetTextureLevel(void *ctx, void *t, uint32_t a3, uint32_t a4, uint32_t a5, uint32_t a6, uint32_t a7)

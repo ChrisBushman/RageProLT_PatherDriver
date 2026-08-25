@@ -9,7 +9,8 @@ CFLAGS ?= -O2 -Wall -std=gnu99 -I..
 EXEC   := ATIRageProGLDriver
 BUNDLE := $(EXEC).bundle
 SRC    := gld_glue.c gld_context.c gld_state.c gld_render.c gld_prims.c \
-          gld_dispatch.c gld_pixelformat.c gld_entry.c ../common/mach64_emit.c
+          gld_texture.c gld_dispatch.c gld_pixelformat.c gld_entry.c \
+          ../common/mach64_emit.c
 
 .PHONY: bundle clean
 bundle: $(BUNDLE)

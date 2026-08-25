@@ -102,6 +102,11 @@ typedef struct {
     uint32_t   z_off;              /* depth buffer byte offset (0 = none)  */
     uint32_t   z_pitch;            /* depth buffer pitch (16-bit Z pixels)  */
     uint32_t   frame_new;          /* 1 => clear Z before next frame's geom */
+    /* ---- texture state (first cut: one bound 2D texture) -------------- */
+    void      *tex_obj;            /* bound/uploaded texobj (t[0x30]=state) */
+    uint32_t   tex_off;            /* texel VRAM byte offset (0 = none up)  */
+    uint32_t   tex_w, tex_h;       /* texel dimensions                     */
+    uint32_t   tex_active;         /* 1 => emit textured state this draw    */
     uint32_t   scratch[1024];      /* host-order command-buffer staging    */
 } mach64_priv;
 
@@ -118,6 +123,17 @@ void mach64_clear_zbuffer(gld_context *ctx);
 void mach64_sync_depth_from_gli(gld_context *ctx);
 uint32_t mach64_gli_u32(gld_context *ctx, uint32_t off);   /* read a gli field */
 void mach64_set_scissor(gld_context *ctx, int x, int y, int w, int h);
+
+/* ---- texture upload/bind (gld_texture.c) ----------------------------
+ * The gld* texture entry points only set dirty bits; the real VRAM upload is
+ * the driver's job at draw time.  mach64_texture_dirtied() records the texobj
+ * GLEngine image-dirtied (from gldModifyTexture, a3&0x80); mach64_bind_texture()
+ * -- called from the draw path -- pulls the image from the texobj's state object
+ * (t[0x30]+0x9c record: w/h/fmt/pixels), converts to ARGB8888, DMAs it into
+ * VRAM, and programs the mach64 texture registers into p->hw.  Returns 1 if a
+ * texture is bound for this draw (so the primitive emits S/T). */
+void mach64_texture_dirtied(void *texobj);
+int  mach64_bind_texture(gld_context *ctx);
 
 /* ---- geometry translation + submission (gld_render.c) --------------- */
 void mach64_pack_vertex(m64_vertex *out, float x, float y, float z,

@@ -58,6 +58,15 @@ typedef struct {
     uint32_t clr_cmp_cntl;    /* colour-compare (0 = off)                  */
     uint32_t dp_mix;          /* 0x00070007 = BKGD/FRGD_MIX_S              */
     uint32_t dp_src;          /* 0x0505 gouraud (3D scaler) / 0x0101 flat  */
+    /* ---- texturing: emitted only when `textured` is set ---------------
+     * When textured, scale_3d_cntl is overridden with FCN_TEXTURE (tex_scale_3d)
+     * and the three texture registers are emitted; otherwise the untextured
+     * shade path above is emitted unchanged (proven gouraud state). */
+    uint32_t textured;        /* 1 => emit the texture registers below      */
+    uint32_t tex_scale_3d;    /* SCALE_3D_CNTL with FCN_TEXTURE (textured)  */
+    uint32_t tex_cntl;        /* TEX_CNTL (0x774)                          */
+    uint32_t tex_size_pitch;  /* TEX_SIZE_PITCH (0x770) log2 dims           */
+    uint32_t tex_0_off;       /* TEX_0_OFF (0x5c0) texel VRAM base          */
 } m64_state;
 
 void m64_cb_init(m64_cmdbuf *cb, uint32_t *storage, size_t cap_dwords);

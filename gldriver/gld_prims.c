@@ -52,6 +52,12 @@ void mach64_read_vertex(const void *vp, m64_vertex *o, float fb_h)
                   | (chan(*(const float *)(v + GVOFF_G)) <<  8)
                   |  chan(*(const float *)(v + GVOFF_B));
     mach64_pack_vertex(o, x, fb_h - y, depth, w, argb);  /* GL y-up -> FB y-down */
+    /* Per-vertex texcoords: GLEngine stores S,T as floats at gli-vertex +0x80/
+     * +0x84 (recovered via TEXHUNT).  pack_vertex zeroed s/t; feed the raw float
+     * bits (the engine multiplies by W via TEX_ST_MULT_W).  Harmless untextured
+     * -- the setup engine ignores S/T unless SCALE_3D_FCN=TEXTURE. */
+    o->s = (int32_t)*(const uint32_t *)(v + 0x80);
+    o->t = (int32_t)*(const uint32_t *)(v + 0x84);
 }
 
 #define VTX(base, i)  ((const void *)((const unsigned char *)(base) + (i) * MACH64_GLIVERTEX_STRIDE))
@@ -141,22 +147,15 @@ void mach64_render_triangles(gld_context *ctx, const void *v, uint32_t n)
                 *(const uint32_t *)(p + VOFF_ARGB),
                 *(const uint32_t *)(p + VOFF_Z));
     }
+    mach64_bind_texture(ctx);            /* upload+program texture if bound */
     for (i = 0; i + 3 <= n; i += 3) emit_tri(ctx, v, i, i+1, i+2);
 }
 
 void mach64_render_tri_strip(gld_context *ctx, const void *v, uint32_t n)
 {
     uint32_t i;
-    /* TEXCOORD HUNT: dump v[0] fully so the app's distinctive S/T can be located. */
-    if (v && n) { const unsigned char *q = (const unsigned char *)v; uint32_t j;
-        gld_log("TEXHUNT tri_strip n=%u:\n", n);
-        for (j = 0; j < 0x100; j += 0x20)
-            gld_log("  v0+0x%02x: %08x %08x %08x %08x %08x %08x %08x %08x\n", j,
-                *(const uint32_t*)(q+j+0x00),*(const uint32_t*)(q+j+0x04),
-                *(const uint32_t*)(q+j+0x08),*(const uint32_t*)(q+j+0x0c),
-                *(const uint32_t*)(q+j+0x10),*(const uint32_t*)(q+j+0x14),
-                *(const uint32_t*)(q+j+0x18),*(const uint32_t*)(q+j+0x1c)); }
     mach64_sync_depth_from_gli(ctx);   /* Z_CNTL follows the app's GL depth state */
+    mach64_bind_texture(ctx);          /* upload+program texture if bound */
     for (i = 2; i < n; i++)                      /* flip winding on odd tris */
         if (i & 1) emit_tri(ctx, v, i-1, i-2, i);
         else       emit_tri(ctx, v, i-2, i-1, i);

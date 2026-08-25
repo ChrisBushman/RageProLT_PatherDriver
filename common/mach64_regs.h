@@ -82,6 +82,9 @@
 #define MACH64_DST_X_Y              0x06e8
 #define MACH64_DST_WIDTH_HEIGHT     0x06ec
 #define MACH64_GUI_TRAJ_CNTL        0x0730
+#define MACH64_HOST_DATA0           0x0600   /* host-data FIFO 0..15 (0x600-0x63c) */
+#define MACH64_DP_SRC_HOST          0x00000200u  /* FRGD_SRC_HOST | MONO_SRC_ONE   */
+#define MACH64_DP_MIX_DS            0x00070003u  /* BKGD_MIX_D | FRGD_MIX_S (blit) */
 
 /* ---- Bus-master DMA control (VERIFIED ring, bus-master-ring.md) -------
  * The engine bus-master-reads a descriptor ring (BM_GUI_TABLE) and, per

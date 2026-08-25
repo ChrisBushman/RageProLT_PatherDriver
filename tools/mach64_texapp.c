@@ -30,7 +30,24 @@ int main(void)
     glClear(GL_COLOR_BUFFER_BIT);
 
     {   GLuint tex = 0; GLint mx = -1, mtu = -1;
-        static const GLubyte px[64];  /* 4x4 RGBA, zeroed */
+        /* DIAGNOSTIC 8x8 RGB texture: four solid quadrants so the screenshot
+         * reveals colour-channel order AND orientation at a glance --
+         *   top-left RED  top-right GREEN  bottom-left BLUE  bottom-right WHITE
+         * (texel row 0 = T=0).  If channels are swapped we'll see it; if the
+         * image is flipped/rotated the quadrant layout shows how. */
+        /* Four-quadrant 8x8: top-left RED, top-right GREEN, bottom-left BLUE,
+         * bottom-right WHITE (row 0 = T=0).  Validates per-texel upload AND S/T
+         * addressing/orientation at a glance. */
+        static GLubyte px[8*8*3];
+        int x, y;
+        for (y = 0; y < 8; y++) for (x = 0; x < 8; x++) {
+            GLubyte *p = &px[(y*8 + x)*3];
+            int top = (y < 4), left = (x < 4);
+            if      ( top &&  left) { p[0]=255; p[1]=0;   p[2]=0;   }   /* red   */
+            else if ( top && !left) { p[0]=0;   p[1]=255; p[2]=0;   }   /* green */
+            else if (!top &&  left) { p[0]=0;   p[1]=0;   p[2]=255; }   /* blue  */
+            else                    { p[0]=255; p[1]=255; p[2]=255; }   /* white */
+        }
         printf("clear err=0x%x\n", glGetError());
         glGetIntegerv(GL_MAX_TEXTURE_SIZE, &mx);
         printf("GL_MAX_TEXTURE_SIZE=%d (err=0x%x)\n", mx, glGetError());
@@ -42,27 +59,28 @@ int main(void)
         glBindTexture(GL_TEXTURE_2D, tex);            printf("bind err=0x%x\n", glGetError());
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST); printf("minf err=0x%x\n", glGetError());
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST); printf("magf err=0x%x\n", glGetError());
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 4, 4, 0, GL_RGBA, GL_UNSIGNED_BYTE, px);
-        printf("texImage2D(4x4 RGBA) err=0x%x\n", glGetError());
-        glTexImage2D(GL_TEXTURE_2D, 0, 4, 4, 4, 0, GL_RGBA, GL_UNSIGNED_BYTE, px);
-        printf("texImage2D(intfmt=4) err=0x%x\n", glGetError());
         glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, 8, 8, 0, GL_RGB, GL_UNSIGNED_BYTE, px);
-        printf("texImage2D(8x8 RGB) err=0x%x\n", glGetError());
+        printf("texImage2D(8x8 RGB quadrants) err=0x%x\n", glGetError());
+        glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
         glEnable(GL_TEXTURE_2D);     printf("enable err=0x%x\n", glGetError());
     }
 
-    {   static const GLfloat verts[6] = { -0.5f,-0.5f,  0.5f,-0.5f,  0.f,0.5f };
-        static const GLfloat tc[6]    = {  0.25f,0.75f, 0.5f,0.5f,   0.75f,0.25f };
+    /* A centred quad (two triangles) with texcoords spanning the full [0,1]x[0,1]
+     * texture, so all four colour quadrants are visible. */
+    {   static const GLfloat verts[12] = { -0.6f,-0.6f,  0.6f,-0.6f,  0.6f,0.6f,
+                                           -0.6f,-0.6f,  0.6f, 0.6f, -0.6f,0.6f };
+        static const GLfloat tc[12]    = {  0.f,0.f,  1.f,0.f,  1.f,1.f,
+                                            0.f,0.f,  1.f,1.f,  0.f,1.f };
         glColor3f(1.f, 1.f, 1.f);
         glEnableClientState(GL_VERTEX_ARRAY);
         glEnableClientState(GL_TEXTURE_COORD_ARRAY);
         glVertexPointer(2, GL_FLOAT, 0, verts);
         glTexCoordPointer(2, GL_FLOAT, 0, tc);
-        glDrawArrays(GL_TRIANGLES, 0, 3);
+        glDrawArrays(GL_TRIANGLES, 0, 6);
     }
     glFlush(); glFinish();
-    printf("drew textured triangle (GL err=0x%x)\n", glGetError()); fflush(stdout);
-    sleep(3);
+    printf("drew textured quad (GL err=0x%x)\n", glGetError()); fflush(stdout);
+    sleep(4);
 
     aglSetCurrentContext(NULL); aglSetDrawable(ctx, NULL);
     aglDestroyContext(ctx); aglDestroyPixelFormat(pf);

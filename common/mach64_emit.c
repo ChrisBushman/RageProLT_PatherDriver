@@ -32,8 +32,28 @@ void m64_regs(m64_cmdbuf *cb, uint32_t reg, const uint32_t *vals, int n)
 
 void m64_emit_state(m64_cmdbuf *cb, const m64_state *st)
 {
-    /* Single-register writes are fine for state (proven in mach64_ringtest). */
-    m64_reg(cb, MACH64_SCALE_3D_CNTL,  st->scale_3d_cntl);
+    /* Single-register writes are fine for state (proven in mach64_ringtest).
+     * Textured draws override SCALE_3D_CNTL with the FCN_TEXTURE value and emit
+     * the three texture registers; untextured draws keep the proven shade path. */
+    if (st->textured) {
+        /* The base-level texel offset goes into TEX_[maxLog2]_OFF, NOT TEX_0_OFF:
+         * the mach64 has one offset register per mip level and the LARGEST level
+         * uses the register matching its log2 size.  reg = TEX_0_OFF + maxLog2*4,
+         * and maxLog2 lives in TEX_SIZE_PITCH bits [7:4] -> (sp & 0xf0) >> 2 is
+         * the byte offset from TEX_0_OFF (ref drm_mach64_state.c mach64_emit_state). */
+        uint32_t tex_reg = MACH64_TEX_0_OFF + ((st->tex_size_pitch & 0xf0) >> 2);
+        m64_reg(cb, tex_reg,               st->tex_0_off);
+        m64_reg(cb, MACH64_TEX_SIZE_PITCH, st->tex_size_pitch);
+        /* Force a texture-cache flush: write TEX_CNTL with the flush bit CLEAR
+         * then SET, so the 0->1 edge fires a fresh fetch every textured draw
+         * (a constantly-latched flush bit gives no edge and can serve stale
+         * texels).  TEX_CACHE_FLUSH = bit 23. */
+        m64_reg(cb, MACH64_TEX_CNTL,       st->tex_cntl & ~(1u << 23));
+        m64_reg(cb, MACH64_TEX_CNTL,       st->tex_cntl |  (1u << 23));
+        m64_reg(cb, MACH64_SCALE_3D_CNTL,  st->tex_scale_3d);
+    } else {
+        m64_reg(cb, MACH64_SCALE_3D_CNTL,  st->scale_3d_cntl);
+    }
     m64_reg(cb, MACH64_SETUP_CNTL,     st->setup_cntl);
     if (st->z_off_pitch)               /* only bind a Z buffer when one exists */
         m64_reg(cb, MACH64_Z_OFF_PITCH, st->z_off_pitch);
