@@ -163,6 +163,52 @@ void mach64_texture_deleted(void *texobj)
 
 static uint32_t ilog2u(uint32_t v) { uint32_t r = 0; while (v > 1) { v >>= 1; r++; } return r; }
 
+/* Texels per host-data submit: the scratch command buffer is 1024 dwords; one
+ * blit setup (~13 regs) + count texels + a packet header per 16 + terminator must
+ * fit, so cap a chunk at 768 texels (leaves comfortable headroom).  Larger
+ * textures are uploaded in several chunks (mach64_upload). */
+#define MACH64_BLIT_MAX  768u
+
+/* One host-data DMA blit of `count` ARGB8888 texels (converted from src[first..])
+ * into VRAM at byte offset `dst_off`, laid out `bw` wide x `bh` tall with row
+ * pitch `pitch_units`*8 pixels.  count must be <= MACH64_BLIT_MAX. */
+static void mach64_blit_texels(gld_context *ctx, uint32_t dst_off, uint32_t pitch_units,
+                               uint32_t bw, uint32_t bh, const unsigned char *src,
+                               uint32_t first, uint32_t count, uint16_t fmt)
+{
+    mach64_priv *p = MACH64_PRIV(ctx);
+    m64_cmdbuf cb;
+    uint32_t i;
+    m64_cb_init(&cb, p->scratch, sizeof(p->scratch) / sizeof(p->scratch[0]));
+    m64_reg(&cb, MACH64_Z_CNTL,        0);
+    m64_reg(&cb, MACH64_SCALE_3D_CNTL, 0);
+    m64_reg(&cb, MACH64_SC_LEFT_RIGHT, (8191u << 16));
+    m64_reg(&cb, MACH64_SC_TOP_BOTTOM, (16383u << 16));
+    m64_reg(&cb, MACH64_CLR_CMP_CNTL,  0);
+    m64_reg(&cb, MACH64_GUI_TRAJ_CNTL, (1u << 0) | (1u << 1));
+    m64_reg(&cb, MACH64_DP_PIX_WIDTH,  0x60060666u);
+    m64_reg(&cb, MACH64_DP_WRITE_MASK, 0xffffffffu);
+    m64_reg(&cb, MACH64_DP_MIX,        MACH64_DP_MIX_DS);
+    m64_reg(&cb, MACH64_DP_SRC,        MACH64_DP_SRC_HOST);
+    m64_reg(&cb, MACH64_DST_OFF_PITCH, (pitch_units << 22) | (dst_off >> 3));
+    m64_reg(&cb, MACH64_DST_X_Y,       0);
+    m64_reg(&cb, MACH64_DST_WIDTH_HEIGHT, (bh << 16) | bw);   /* starts the blit */
+    for (i = first; i < first + count; ) {
+        uint32_t chunk[16], k = 0;
+        while (k < 16 && i < first + count) {
+            uint32_t argb;
+            if (fmt == 0x1908) { const unsigned char *px = src + i*4;
+                argb = ((uint32_t)px[3]<<24)|((uint32_t)px[0]<<16)|((uint32_t)px[1]<<8)|px[2];
+            } else { const unsigned char *px = src + i*3;
+                argb = 0xff000000u|((uint32_t)px[0]<<16)|((uint32_t)px[1]<<8)|px[2];
+            }
+            chunk[k++] = argb; i++;
+        }
+        m64_regs(&cb, MACH64_HOST_DATA0, chunk, (int)k);
+    }
+    mach64_submit(ctx, &cb);
+}
+
 /* Pull the base-level image from the texobj state object and DMA it (converted
  * to ARGB8888) into VRAM via a host-data DMA blit.  Returns 1 on success.
  *
@@ -176,11 +222,10 @@ static int mach64_upload(gld_context *ctx, void *texobj)
 {
     mach64_priv *p = MACH64_PRIV(ctx);
     const unsigned char *t = (const unsigned char *)texobj;
-    uint32_t state, srcp, w, h, i, n, pitch_units, dst_w, dst_h;
+    uint32_t state, srcp, w, h, n;
     const unsigned char *s, *rec, *src;
     uint16_t fmt;
     mach64_tex_slot *slot;
-    m64_cmdbuf cb;
 
     if (!t) return 0;
     state = *(const uint32_t *)(t + 0x30);
@@ -194,10 +239,9 @@ static int mach64_upload(gld_context *ctx, void *texobj)
     if (!w || !h || srcp < 0x10000 || srcp >= 0x40000000) return 0;
     src = (const unsigned char *)(uintptr_t)srcp;
     n = w * h;
-    /* Command budget: state (~15 regs) + n host-data dwords + packet headers.
-     * scratch is 1024 dwords -> cap the texel count so we never overflow the
-     * single-submit staging (larger textures need chunked blits -- TODO). */
-    if (n > 900) { gld_log("mach64 texture upload: %ux%u too big for one blit\n", w, h); return 0; }
+    /* A single row wider than the per-blit budget can't be chunked by rows; such
+     * widths are impractical (w>768 -> a >=768x768 texture, past the VRAM heap). */
+    if (w > MACH64_BLIT_MAX) { gld_log("mach64 texture upload: %ux%u too wide\n", w, h); return 0; }
 
     /* Allocate this texture's own VRAM region (keyed by its state-obj pointer). */
     slot = slot_alloc(tex_key(texobj), w, h);
@@ -209,56 +253,40 @@ static int mach64_upload(gld_context *ctx, void *texobj)
      * (s,t) at base + (t*w + s)*4.  The DST_OFF_PITCH pitch field is in 8-pixel
      * units (min 1 = 8 px), so a rectangular w x h blit only lands rows at the
      * natural stride when w is a multiple of 8.  For w >= 8 (every power-of-two
-     * width >= 8) that holds -- keep the proven rectangular blit.  For w < 8
-     * (1/2/4) the 8-px min pitch would over-stride each row; instead blit the
-     * whole image as a SINGLE linear row of w*h texels -- height 1 makes the
-     * pitch irrelevant and packs the texels contiguously at stride w, exactly the
-     * layout the texture unit samples.  (Both forms write the identical bytes for
-     * w >= 8, so this only changes the narrow case.)
+     * width >= 8) that holds; for w < 8 (1/2/4) the 8-px min pitch would over-
+     * stride each row, so the image is blitted as a linear 1-row run of texels
+     * (pitch irrelevant, packed at stride w -- the layout the texture unit reads).
+     *
+     * Textures larger than one command buffer (MACH64_BLIT_MAX texels) are split
+     * across several host-data blits: w>=8 by whole rows (each band at its own
+     * base offset in the linear layout), w<8 by contiguous runs of the 1-row blit.
+     * Every chunk writes to slot->off + first_texel*4, so the VRAM stays a single
+     * contiguous natural-width image.
      *
      * GLEngine's texel copy is TIGHTLY PACKED (pitch = w*bpp; confirmed by a
-     * source-byte dump), so we read it contiguously.  Note: an app that hands GL
-     * a sub-4-wide RGB image MUST glPixelStorei(GL_UNPACK_ALIGNMENT,1) or GL's own
-     * unpack (default alignment 4) mis-strides it before we ever see it. */
-    if (w >= 8) { pitch_units = w / 8; dst_w = w;     dst_h = h; }
-    else        { pitch_units = 1;     dst_w = w * h; dst_h = 1; }
-
-    /* Host-data DMA blit: stream the real per-texel ARGB8888 data into VRAM at
-     * the texture base, through the engine's own offset space (DST_OFF_PITCH).
-     * Now that the base offset lands in TEX_[maxLog2]_OFF this is finally
-     * testable.  Sequence from the reference mach64_dma_blit. */
-    m64_cb_init(&cb, p->scratch, sizeof(p->scratch) / sizeof(p->scratch[0]));
-    m64_reg(&cb, MACH64_Z_CNTL,        0);
-    m64_reg(&cb, MACH64_SCALE_3D_CNTL, 0);
-    m64_reg(&cb, MACH64_SC_LEFT_RIGHT, (8191u << 16));
-    m64_reg(&cb, MACH64_SC_TOP_BOTTOM, (16383u << 16));
-    m64_reg(&cb, MACH64_CLR_CMP_CNTL,  0);
-    m64_reg(&cb, MACH64_GUI_TRAJ_CNTL, (1u << 0) | (1u << 1));
-    m64_reg(&cb, MACH64_DP_PIX_WIDTH,  0x60060666u);
-    m64_reg(&cb, MACH64_DP_WRITE_MASK, 0xffffffffu);
-    m64_reg(&cb, MACH64_DP_MIX,        MACH64_DP_MIX_DS);
-    m64_reg(&cb, MACH64_DP_SRC,        MACH64_DP_SRC_HOST);
-    m64_reg(&cb, MACH64_DST_OFF_PITCH, (pitch_units << 22) | (slot->off >> 3));
-    m64_reg(&cb, MACH64_DST_X_Y,       0);
-    m64_reg(&cb, MACH64_DST_WIDTH_HEIGHT, (dst_h << 16) | dst_w);  /* starts blit */
-    for (i = 0; i < n; ) {
-        uint32_t chunk[16], k = 0;
-        while (k < 16 && i < n) {
-            uint32_t argb;
-            if (fmt == 0x1908) { const unsigned char *px = src + i*4;
-                argb = ((uint32_t)px[3]<<24)|((uint32_t)px[0]<<16)|((uint32_t)px[1]<<8)|px[2];
-            } else { const unsigned char *px = src + i*3;
-                argb = 0xff000000u|((uint32_t)px[0]<<16)|((uint32_t)px[1]<<8)|px[2];
-            }
-            chunk[k++] = argb; i++;
+     * source-byte dump), read contiguously.  An app handing GL a sub-4-wide RGB
+     * image MUST glPixelStorei(GL_UNPACK_ALIGNMENT,1) or GL's own unpack mangles
+     * it before we ever see it. */
+    if (w >= 8) {
+        uint32_t rows_per = MACH64_BLIT_MAX / w;        /* whole rows per chunk */
+        uint32_t y0;
+        for (y0 = 0; y0 < h; y0 += rows_per) {
+            uint32_t rows = (h - y0 < rows_per) ? (h - y0) : rows_per;
+            mach64_blit_texels(ctx, slot->off + y0 * w * 4u, w / 8, w, rows,
+                               src, y0 * w, rows * w, fmt);
         }
-        m64_regs(&cb, MACH64_HOST_DATA0, chunk, (int)k);
+    } else {
+        uint32_t start;
+        for (start = 0; start < n; start += MACH64_BLIT_MAX) {
+            uint32_t cnt = (n - start < MACH64_BLIT_MAX) ? (n - start) : MACH64_BLIT_MAX;
+            mach64_blit_texels(ctx, slot->off + start * 4u, 1, cnt, 1,
+                               src, start, cnt, fmt);
+        }
     }
-    mach64_submit(ctx, &cb);
 
     p->dirty |= MACH64_DIRTY_STATE;      /* new texels -> re-emit tex state       */
-    gld_log("mach64 texture upload: %ux%u fmt=0x%x -> VRAM 0x%x (key 0x%x) blit %ux%u\n",
-            w, h, fmt, slot->off, slot->key, dst_w, dst_h);
+    gld_log("mach64 texture upload: %ux%u fmt=0x%x -> VRAM 0x%x (key 0x%x) %u texels\n",
+            w, h, fmt, slot->off, slot->key, n);
     return 1;
 }
 
