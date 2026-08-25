@@ -29,19 +29,34 @@
 
 /* ---- texture VRAM allocator ------------------------------------------
  * Texels live above the depth buffer (Z @ 0x400000) in the 8 MB VRAM aperture.
- * Each texture gets its own region, bump-allocated in [HEAP_BASE, HEAP_END) and
- * keyed by its GLEngine state-object pointer (texobj+0x30) -- the one identity we
- * have at BOTH upload time (gldModifyTexture) and draw time (the bound texture).
- * Delete marks the slot reusable but does not reclaim VRAM (no compaction yet). */
+ * Each texture gets its own region in [HEAP_BASE, HEAP_END), keyed by its
+ * GLEngine state-object pointer (texobj+0x30) -- the one identity we have at
+ * BOTH upload time (gldModifyTexture) and draw time (the bound texture).
+ *
+ * Allocation is a bump pointer (g_heap_next) backed by a free list: delete
+ * returns a texture's region to the free list, alloc reuses a free block
+ * (best fit) before bumping, adjacent free blocks coalesce, and freeing the
+ * block at the top of the heap simply lowers the bump pointer.  So a
+ * bind/delete/bind churn no longer leaks VRAM. */
 #define MACH64_TEX_HEAP_BASE  0x00600000u
 #define MACH64_TEX_HEAP_END   0x00780000u   /* 1.5 MB texture heap */
 #define MACH64_TEX_SLOTS      64
 
-typedef struct { uint32_t key, off, w, h; } mach64_tex_slot;
+/* rsize = bytes actually reserved for this region (>= w*h*4, 32B-aligned).
+ * Tracked separately from w/h so a texture re-uploaded SMALLER still frees its
+ * full original region instead of leaking the tail. */
+typedef struct { uint32_t key, off, w, h, rsize; } mach64_tex_slot;
 static mach64_tex_slot g_slots[MACH64_TEX_SLOTS];
 static uint32_t        g_heap_next = MACH64_TEX_HEAP_BASE;
+
+typedef struct { uint32_t off, size; } mach64_free_blk;
+static mach64_free_blk g_free[MACH64_TEX_SLOTS];
+static int             g_nfree;
+
 static void           *g_pending[16];   /* texobjs image-dirtied, to upload next draw */
 static int             g_npending;
+
+static uint32_t tex_align(uint32_t bytes) { return (bytes + 31u) & ~31u; }
 
 static uint32_t tex_key(const void *texobj)
 {
@@ -54,23 +69,70 @@ static mach64_tex_slot *slot_find(uint32_t key)
     for (i = 0; i < MACH64_TEX_SLOTS; i++) if (g_slots[i].key == key) return &g_slots[i];
     return 0;
 }
-/* Find or bump-allocate a 32-byte-aligned region for `key` sized for w*h
- * ARGB8888 texels.  Re-uploads reuse the region if it still fits. */
+
+/* Return [off,off+size) to the heap.  Coalesce with any adjacent free block; if
+ * the result sits at the top of the heap, drop the bump pointer instead of
+ * listing it (keeps the live region tight so bump allocs keep succeeding). */
+static void heap_free(uint32_t off, uint32_t size)
+{
+    int i;
+    if (!size) return;
+    for (i = 0; i < g_nfree; ) {
+        if (g_free[i].off + g_free[i].size == off) {        /* free block before */
+            off = g_free[i].off; size += g_free[i].size;
+            g_free[i] = g_free[--g_nfree]; i = 0; continue;
+        }
+        if (off + size == g_free[i].off) {                  /* free block after  */
+            size += g_free[i].size;
+            g_free[i] = g_free[--g_nfree]; i = 0; continue;
+        }
+        i++;
+    }
+    if (off + size == g_heap_next) { g_heap_next = off; return; }
+    if (g_nfree < MACH64_TEX_SLOTS) {
+        g_free[g_nfree].off = off; g_free[g_nfree].size = size; g_nfree++;
+    } else {
+        gld_log("mach64 tex: free list full, 0x%x (%u B) leaked\n", off, size);
+    }
+}
+
+/* Reserve `size` bytes: best-fit from the free list (split the remainder back),
+ * else bump the heap pointer.  Returns 0 if the heap is exhausted. */
+static uint32_t heap_alloc(uint32_t size)
+{
+    int i, best = -1;
+    for (i = 0; i < g_nfree; i++)
+        if (g_free[i].size >= size && (best < 0 || g_free[i].size < g_free[best].size))
+            best = i;
+    if (best >= 0) {
+        uint32_t off = g_free[best].off;
+        if (g_free[best].size == size) g_free[best] = g_free[--g_nfree];
+        else { g_free[best].off += size; g_free[best].size -= size; }
+        return off;
+    }
+    if (g_heap_next + size > MACH64_TEX_HEAP_END) return 0;
+    { uint32_t off = g_heap_next; g_heap_next += size; return off; }
+}
+
+/* Find or allocate a 32-byte-aligned region for `key` sized for w*h ARGB8888
+ * texels.  A re-upload reuses its region if the new image still fits; if it
+ * grew, the old region is freed back to the heap before a fresh one is taken. */
 static mach64_tex_slot *slot_alloc(uint32_t key, uint32_t w, uint32_t h)
 {
-    uint32_t sz = ((w * h * 4u) + 31u) & ~31u;
+    uint32_t sz = tex_align(w * h * 4u);
+    uint32_t off;
     mach64_tex_slot *s = slot_find(key);
     if (s) {
-        if (((s->w * s->h * 4u + 31u) & ~31u) >= sz) { s->w = w; s->h = h; return s; }
-        /* grew beyond its region: fall through and bump a fresh one (old leaks) */
+        if (s->rsize >= sz) { s->w = w; s->h = h; return s; }  /* still fits */
+        heap_free(s->off, s->rsize);                           /* grew: reclaim */
     } else {
         int i;
         for (i = 0; i < MACH64_TEX_SLOTS; i++) if (!g_slots[i].key) { s = &g_slots[i]; break; }
         if (!s) { gld_log("mach64 tex: slot table full\n"); return 0; }
     }
-    if (g_heap_next + sz > MACH64_TEX_HEAP_END) { gld_log("mach64 tex: heap full\n"); return 0; }
-    s->key = key; s->off = g_heap_next; s->w = w; s->h = h;
-    g_heap_next += sz;
+    off = heap_alloc(sz);
+    if (!off) { gld_log("mach64 tex: heap full\n"); if (s->key != key) s->key = 0; return 0; }
+    s->key = key; s->off = off; s->w = w; s->h = h; s->rsize = sz;
     return s;
 }
 
@@ -95,7 +157,7 @@ void mach64_texture_bound(void *texobj) { (void)texobj; }   /* no bind hook; see
 void mach64_texture_deleted(void *texobj)
 {
     mach64_tex_slot *s = slot_find(tex_key(texobj));
-    if (s) s->key = 0;                              /* slot reusable; VRAM leaks */
+    if (s) { heap_free(s->off, s->rsize); s->key = 0; }   /* reclaim VRAM + slot */
 }
 
 static uint32_t ilog2u(uint32_t v) { uint32_t r = 0; while (v > 1) { v >>= 1; r++; } return r; }
