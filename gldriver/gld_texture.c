@@ -274,6 +274,7 @@ static int mach64_upload(gld_context *ctx, void *texobj)
 {
     mach64_priv *p = MACH64_PRIV(ctx);
     const unsigned char *t = (const unsigned char *)texobj;
+    mach64_flush_batch(ctx);   /* order: pending triangles before texture VRAM changes */
     struct { uint32_t w, h, src, fmt, bytes; } lvl[12];
     uint32_t state, base_lod, total, cur;
     const unsigned char *s;

@@ -76,6 +76,7 @@ void mach64_clear_zbuffer(gld_context *ctx)
     uint32_t w32  = p->z_pitch / 2;                 /* 16-bit px -> 32-bit px */
     uint32_t h    = *(const uint32_t *)((const char *)ctx + 0x1f4);  /* height */
     if (!zoff || !w32 || !h) return;
+    mach64_flush_batch(ctx);   /* order: pending triangles before the Z clear */
     m64_cb_init(&cb, p->scratch, sizeof(p->scratch) / sizeof(p->scratch[0]));
     m64_reg(&cb, MACH64_Z_CNTL,          0);              /* Z off for the fill */
     m64_reg(&cb, MACH64_SCALE_3D_CNTL,   0);
@@ -137,6 +138,7 @@ void mach64_fill_rect(gld_context *ctx, uint32_t off, uint32_t x, uint32_t y,
     m64_cmdbuf cb;
     uint32_t op = (pitch_px / 8) << 22;
     if (!off || !w || !h) return;
+    mach64_flush_batch(ctx);   /* order: pending triangles before the fill */
     m64_cb_init(&cb, p->scratch, sizeof(p->scratch) / sizeof(p->scratch[0]));
     m64_reg(&cb, MACH64_Z_CNTL,           0);
     m64_reg(&cb, MACH64_SCALE_3D_CNTL,    0);
@@ -180,6 +182,7 @@ void mach64_blit_surface(gld_context *ctx, uint32_t src_off, uint32_t dst_off,
     m64_cmdbuf cb;
     uint32_t op = (pitch_px / 8) << 22;
     if (!src_off || !dst_off || !w || !h) return;
+    mach64_flush_batch(ctx);   /* order: pending triangles before the blit */
     m64_cb_init(&cb, p->scratch, sizeof(p->scratch) / sizeof(p->scratch[0]));
     m64_reg(&cb, MACH64_Z_CNTL,           0);               /* Z off for the blit */
     m64_reg(&cb, MACH64_SCALE_3D_CNTL,    0);
@@ -209,11 +212,23 @@ void mach64_blit_surface(gld_context *ctx, uint32_t src_off, uint32_t dst_off,
  * ringtest).  For throughput, accumulate many triangles into one command buffer
  * and submit once per flush -- the emit core already supports that; just move
  * the submit out of here and flush on buffer-full / gldFlush. */
+/* Submit the accumulated triangle batch (if any) as ONE DMA kick, then reset it.
+ * Called at frame boundaries (gldFlush/Finish/FlushBuffer) and before any operation
+ * that must observe the triangles (fill/blit/clear/texture upload). */
+void mach64_flush_batch(gld_context *ctx)
+{
+    mach64_priv *p = MACH64_PRIV(ctx);
+    if (!p->batch.buf || p->batch.n == 0) return;
+    mach64_submit(ctx, &p->batch);
+    m64_cb_init(&p->batch, p->batchbuf,
+                sizeof(p->batchbuf) / sizeof(p->batchbuf[0]));
+}
+
 int mach64_draw_triangle(gld_context *ctx, const m64_vertex *v0,
                          const m64_vertex *v1, const m64_vertex *v2)
 {
     mach64_priv *p = MACH64_PRIV(ctx);
-    m64_cmdbuf cb;
+    size_t limit, need;
 
     /* Frame start (first triangle of a new frame; frame_new armed at attach and at
      * each swap/finish).  The driver owns the clears GLEngine won't do for us --
@@ -222,7 +237,8 @@ int mach64_draw_triangle(gld_context *ctx, const m64_vertex *v0,
      *  - Colour: to the app's glClearColor (front buffer, or the back buffer when
      *    double-buffered -- GLEngine's own clear only ever hits the front).
      *  - Z: GLEngine never touches our depth buffer.
-     * (Assumes the app issues glClear once per frame -- the standard pattern.) */
+     * (Assumes the app issues glClear once per frame -- the standard pattern.)
+     * The clears flush any pending batch first, so ordering holds. */
     if (p->frame_new) {
         mach64_clear_color(ctx);
         if (p->z_off && (p->hw.z_cntl & MACH64_Z_EN))
@@ -230,16 +246,27 @@ int mach64_draw_triangle(gld_context *ctx, const m64_vertex *v0,
         p->frame_new = 0;
     }
 
-    m64_cb_init(&cb, p->scratch, sizeof(p->scratch) / sizeof(p->scratch[0]));
+    if (!p->batch.buf)
+        m64_cb_init(&p->batch, p->batchbuf,
+                    sizeof(p->batchbuf) / sizeof(p->batchbuf[0]));
+
+    /* Flush before this triangle if the state block (~96 dwords when dirty) + the
+     * triangle (~64 dwords) might not fit -- bounded by what the shared command
+     * buffer (ctx->fb) holds when the batch is packed + kicked.  State emitted in a
+     * prior batch persists in the hardware, so a fresh batch needs no re-emit. */
+    limit = ctx->fb_size / 4;
+    if (limit > 4096) limit = 4096;
+    if (limit < 256)  limit = 256;
+    need = ((p->dirty & MACH64_DIRTY_STATE) ? 96u : 0u) + 64u;
+    if (p->batch.n + need > limit - 8)
+        mach64_flush_batch(ctx);
 
     if (p->dirty & MACH64_DIRTY_STATE) {
-        m64_emit_state(&cb, &p->hw);
+        m64_emit_state(&p->batch, &p->hw);
         p->dirty &= ~MACH64_DIRTY_STATE;
     }
-    if (!m64_emit_triangle(&cb, v0, v1, v2))
-        return 0;                  /* degenerate: nothing emitted worth kicking */
-
-    mach64_submit(ctx, &cb);
+    if (!m64_emit_triangle(&p->batch, v0, v1, v2))
+        return 0;                  /* degenerate: nothing emitted */
     return 1;
 }
 
@@ -273,13 +300,14 @@ int gldCompleteVertexBuffer(gld_context *ctx, void *vb)
 void gldFreeVertexBuffer(gld_context *ctx, void *vb) { (void)ctx; (void)vb; }
 
 /* glFlush: ensure submitted work is kicked (already synchronous today). */
-int gldFlush(gld_context *ctx) { gld_log("gldFlush()\n"); (void)ctx; return 0; }
+int gldFlush(gld_context *ctx) { gld_log("gldFlush()\n"); mach64_flush_batch(ctx); return 0; }
 
 /* glFinish: block until the newest submission has retired. */
 int gldFinish(gld_context *ctx)
 {
     mach64_priv *p = MACH64_PRIV(ctx);
     gld_log("gldFinish() last_stamp=%u\n", (unsigned)p->last_stamp);
+    mach64_flush_batch(ctx);   /* submit any pending triangles before fencing */
     IOConnectMethodScalarIStructureI(ctx->connect, kMach64Sel_wait_for_stamp,
                                      1, 0, (int)p->last_stamp, NULL);
     /* Double-buffered: single-buffer apps end a frame with glFinish (which lands

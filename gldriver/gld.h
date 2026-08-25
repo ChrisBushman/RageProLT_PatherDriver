@@ -114,6 +114,12 @@ typedef struct {
     uint32_t   tex_w, tex_h;       /* texel dimensions                     */
     uint32_t   tex_active;         /* 1 => emit textured state this draw    */
     uint32_t   scratch[1024];      /* host-order command-buffer staging    */
+    /* ---- triangle batching: accumulate many triangles' register writes into one
+     * command buffer and DMA-kick once per flush, instead of one kick per triangle
+     * (each kick quiesces/activates/waits the bus-master ring).  Flushed at
+     * gldFlush/Finish/FlushBuffer, before any fill/blit/clear/upload, and when full. */
+    m64_cmdbuf batch;              /* persistent cmd buffer over batchbuf    */
+    uint32_t   batchbuf[4096];     /* host-order batch staging               */
 } mach64_priv;
 
 static __inline__ mach64_priv *MACH64_PRIV(gld_context *c)
@@ -126,6 +132,7 @@ void mach64_set_shade_model(gld_context *ctx, int smooth);  /* GL_SMOOTH? */
 void mach64_set_depth_test(gld_context *ctx, int enable, uint32_t gl_func);
 void mach64_set_zbuffer(gld_context *ctx, uint32_t off, uint32_t pitch_px);
 void mach64_clear_zbuffer(gld_context *ctx);
+void mach64_flush_batch(gld_context *ctx);   /* submit accumulated triangles */
 void mach64_clear_color(gld_context *ctx);
 void mach64_fill_rect(gld_context *ctx, uint32_t off, uint32_t x, uint32_t y,
                       uint32_t w, uint32_t h, uint32_t pitch_px, uint32_t color);
