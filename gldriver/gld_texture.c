@@ -388,6 +388,36 @@ static uint32_t mach64_blend_dst(uint32_t glf)
     }
 }
 
+/* GL_ALPHA_TEST state (recovered via tools/mach64_alphatest -DGLD_ATSCAN):
+ *   gli+0x62e0 = glAlphaFunc REF (float 0..1)
+ *   gli+0x62e4 = (GL compare enum << 16) | (bit8 = GL_ALPHA_TEST enabled) */
+#define GLI_ALPHA_FUNC   0x62e4
+#define GLI_ALPHA_REF    0x62e0
+#define GLI_ALPHA_EN_BIT 0x00000100u
+
+/* Build ALPHA_TST_CNTL (0x550).  Disabled default = ALPHA_TEST_ALWAYS |
+ * ALPHA_DST_SEL=As (0x470, matches the reference init and our old fixed value).
+ * When GL_ALPHA_TEST is on: ALPHA_TST_EN(bit0) | mach64 test func([6:4]) |
+ * ALPHA_DST_SEL=As([10:8]=4) | ALPHA_TST_SRC_SEL([12]: 0=texel / 1=source) |
+ * REF_ALPHA([23:16]).  GL compare enums (low 3 bits) map to the mach64 test codes
+ * (never/less/lequal/equal/gequal/greater/notequal/always) NOT one-to-one. */
+static uint32_t mach64_alpha_tst(gld_context *ctx, int use_texel_alpha)
+{
+    uint32_t af = mach64_gli_u32(ctx, GLI_ALPHA_FUNC);
+    if (af & GLI_ALPHA_EN_BIT) {
+        static const unsigned char map[8] = { 0,1,3,2,5,6,4,7 };  /* GL func -> mach64 */
+        uint32_t func = map[(af >> 16) & 7u];
+        float rf; uint32_t rb = mach64_gli_u32(ctx, GLI_ALPHA_REF);
+        int c;
+        __builtin_memcpy(&rf, &rb, 4);
+        c = (int)(rf * 255.0f + 0.5f); if (c < 0) c = 0; else if (c > 255) c = 255;
+        return 1u | (func << 4) | (4u << 8)
+             | (use_texel_alpha ? 0u : (1u << 12))
+             | ((uint32_t)c << 16);
+    }
+    return (7u << 4) | (4u << 8);   /* ALPHA_TEST_ALWAYS, disabled */
+}
+
 /* Called from the draw path.  Uploads any pending image (so the texture is ready
  * in VRAM regardless of enable state), then -- only if the app has GL_TEXTURE_2D
  * enabled -- programs the texture registers into p->hw and enables textured state
@@ -429,10 +459,14 @@ int mach64_bind_texture(gld_context *ctx)
                | mach64_blend_src(bf >> 16) | mach64_blend_dst(bf & 0xffffu)
                | (1u << 11);
         }
-        if (st->textured || st->scale_3d_cntl != sc) {
-            st->textured      = 0;
-            st->scale_3d_cntl = sc;
-            p->dirty |= MACH64_DIRTY_STATE;
+        {   /* GL_ALPHA_TEST on untextured geometry: source (vertex) alpha. */
+            uint32_t atc = mach64_alpha_tst(ctx, 0);
+            if (st->textured || st->scale_3d_cntl != sc || st->alpha_tst_cntl != atc) {
+                st->textured       = 0;
+                st->scale_3d_cntl  = sc;
+                st->alpha_tst_cntl = atc;
+                p->dirty |= MACH64_DIRTY_STATE;
+            }
         }
         return 0;
     }
@@ -473,8 +507,14 @@ int mach64_bind_texture(gld_context *ctx)
     /* Re-emit the texture state when the bound texture OR the env mode changes
      * (not just on the untextured->textured transition) -- otherwise switching
      * texA->texB, or MODULATE->REPLACE, leaves the hardware in the old state. */
-    changed = (!st->textured || st->tex_0_off != bound->off
-                              || st->tex_scale_3d != new_scale_3d);
+    {   /* GL_ALPHA_TEST on textured geometry: the texel alpha (needs TEX_MAP_AEN,
+         * set for an RGBA texture) is compared to the reference. */
+        uint32_t atc = mach64_alpha_tst(ctx, 1);
+        changed = (!st->textured || st->tex_0_off != bound->off
+                                  || st->tex_scale_3d != new_scale_3d
+                                  || st->alpha_tst_cntl != atc);
+        st->alpha_tst_cntl = atc;
+    }
     if (changed) p->dirty |= MACH64_DIRTY_STATE;
 
     p->tex_off = bound->off;

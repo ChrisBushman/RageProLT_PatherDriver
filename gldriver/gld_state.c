@@ -41,6 +41,7 @@ void mach64_init_state(mach64_priv *p)
     s->clr_cmp_cntl  = 0;
     s->dp_mix        = MACH64_DP_MIX_SS;            /* 0x00070007           */
     s->dp_src        = MACH64_DP_SRC_3D;            /* gouraud (3D scaler)  */
+    s->alpha_tst_cntl = (7u << 4) | (4u << 8);      /* 0x470: test ALWAYS, off */
     p->dirty        |= MACH64_DIRTY_STATE;
 }
 

@@ -63,14 +63,14 @@ void m64_emit_state(m64_cmdbuf *cb, const m64_state *st)
          * opaque interpolated vertex alpha and a translucent texture never blends.
          * ALPHA_TEST_ALWAYS | ALPHA_DST_SRCALPHA | ALPHA_TST_SRC_TEXEL (ref default
          * mach64_init_context; test itself stays disabled, EN=0). */
-        m64_reg(cb, MACH64_ALPHA_TST_CNTL, (7u << 4) | (4u << 8) | (0u << 12));
+        m64_reg(cb, MACH64_ALPHA_TST_CNTL, st->alpha_tst_cntl);
     } else {
         m64_reg(cb, MACH64_SCALE_3D_CNTL,  st->scale_3d_cntl);
         /* Same alpha pipe as the textured path so UNTEXTURED blending works: the
          * blend As is the interpolated vertex alpha (enabled by ALPHA_FOG_EN_ALPHA
          * in scale_3d_cntl).  ALPHA_TEST_ALWAYS keeps the alpha test disabled.
          * (Reference mach64_init_context uses this same value for all draws.) */
-        m64_reg(cb, MACH64_ALPHA_TST_CNTL, (7u << 4) | (4u << 8) | (0u << 12));
+        m64_reg(cb, MACH64_ALPHA_TST_CNTL, st->alpha_tst_cntl);
     }
     m64_reg(cb, MACH64_SETUP_CNTL,     st->setup_cntl);
     if (st->z_off_pitch)               /* only bind a Z buffer when one exists */
