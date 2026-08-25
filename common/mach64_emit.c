@@ -41,8 +41,15 @@ void m64_emit_state(m64_cmdbuf *cb, const m64_state *st)
          * uses the register matching its log2 size.  reg = TEX_0_OFF + maxLog2*4,
          * and maxLog2 lives in TEX_SIZE_PITCH bits [7:4] -> (sp & 0xf0) >> 2 is
          * the byte offset from TEX_0_OFF (ref drm_mach64_state.c mach64_emit_state). */
-        uint32_t tex_reg = MACH64_TEX_0_OFF + ((st->tex_size_pitch & 0xf0) >> 2);
-        m64_reg(cb, tex_reg,               st->tex_0_off);
+        if (st->tex_mip) {
+            /* One offset register per mip level: TEX_r_OFF for r in [0,maxlog2]. */
+            int r;
+            for (r = 0; r <= st->tex_maxlog2 && r < 12; r++)
+                m64_reg(cb, MACH64_TEX_0_OFF + (uint32_t)r * 4u, st->tex_mip_off[r]);
+        } else {
+            uint32_t tex_reg = MACH64_TEX_0_OFF + ((st->tex_size_pitch & 0xf0) >> 2);
+            m64_reg(cb, tex_reg,           st->tex_0_off);
+        }
         m64_reg(cb, MACH64_TEX_SIZE_PITCH, st->tex_size_pitch);
         /* Force a texture-cache flush: write TEX_CNTL with the flush bit CLEAR
          * then SET, so the 0->1 edge fires a fresh fetch every textured draw

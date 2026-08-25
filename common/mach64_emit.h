@@ -66,7 +66,13 @@ typedef struct {
     uint32_t tex_scale_3d;    /* SCALE_3D_CNTL with FCN_TEXTURE (textured)  */
     uint32_t tex_cntl;        /* TEX_CNTL (0x774)                          */
     uint32_t tex_size_pitch;  /* TEX_SIZE_PITCH (0x770) log2 dims           */
-    uint32_t tex_0_off;       /* TEX_0_OFF (0x5c0) texel VRAM base          */
+    uint32_t tex_0_off;       /* base texel VRAM offset (single-level path)  */
+    /* Mipmapping: when tex_mip, emit TEX_r_OFF = tex_mip_off[r] for r in
+     * [0, tex_maxlog2] (one per level) and clear MIP_MAP_DISABLE in tex_scale_3d;
+     * otherwise the single base offset above goes to TEX_[maxlog2]_OFF. */
+    uint32_t tex_mip_off[12]; /* per-level offset, index = level maxLog2      */
+    int      tex_maxlog2;     /* highest TEX_n_OFF register used (base)       */
+    int      tex_mip;         /* 1 => a full mip chain is loaded              */
 } m64_state;
 
 void m64_cb_init(m64_cmdbuf *cb, uint32_t *storage, size_t cap_dwords);

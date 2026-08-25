@@ -45,8 +45,14 @@
 /* rsize = bytes actually reserved for this region (>= w*h*4, 32B-aligned).
  * Tracked separately from w/h so a texture re-uploaded SMALLER still frees its
  * full original region instead of leaking the tail.  has_alpha = the texture has
- * a real (GL_RGBA) alpha channel, so TEX_MAP_AEN should be set when it's bound. */
-typedef struct { uint32_t key, off, w, h, rsize, has_alpha; } mach64_tex_slot;
+ * a real (GL_RGBA) alpha channel, so TEX_MAP_AEN should be set when it's bound.
+ * mip_off[r] = VRAM offset of the mip level whose maxLog2 == r (the register
+ * TEX_r_OFF); nlevels = number of loaded mip levels (1 = base only). */
+typedef struct {
+    uint32_t key, off, w, h, rsize, has_alpha;
+    uint32_t mip_off[12];
+    int      nlevels;
+} mach64_tex_slot;
 static mach64_tex_slot g_slots[MACH64_TEX_SLOTS];
 static uint32_t        g_heap_next = MACH64_TEX_HEAP_BASE;
 
@@ -115,12 +121,13 @@ static uint32_t heap_alloc(uint32_t size)
     { uint32_t off = g_heap_next; g_heap_next += size; return off; }
 }
 
-/* Find or allocate a 32-byte-aligned region for `key` sized for w*h ARGB8888
- * texels.  A re-upload reuses its region if the new image still fits; if it
- * grew, the old region is freed back to the heap before a fresh one is taken. */
-static mach64_tex_slot *slot_alloc(uint32_t key, uint32_t w, uint32_t h)
+/* Find or allocate a 32-byte-aligned VRAM region of `nbytes` for `key` (a base
+ * w*h texture, or a whole mip chain -- caller sizes it).  w/h are the BASE dims
+ * stored for the texture registers.  A re-upload reuses its region if the new one
+ * still fits; if it grew, the old region is freed before a fresh one is taken. */
+static mach64_tex_slot *slot_alloc(uint32_t key, uint32_t w, uint32_t h, uint32_t nbytes)
 {
-    uint32_t sz = tex_align(w * h * 4u);
+    uint32_t sz = tex_align(nbytes);
     uint32_t off;
     mach64_tex_slot *s = slot_find(key);
     if (s) {
@@ -209,84 +216,100 @@ static void mach64_blit_texels(gld_context *ctx, uint32_t dst_off, uint32_t pitc
     mach64_submit(ctx, &cb);
 }
 
-/* Pull the base-level image from the texobj state object and DMA it (converted
- * to ARGB8888) into VRAM via a host-data DMA blit.  Returns 1 on success.
- *
- * WHY A BLIT (not a CPU poke): the userspace VRAM aperture (ctx->regs) is NOT
- * offset-aligned with the engine's VRAM offset space (a wide CPU write there
- * panics the box, and pokes to ctx->regs+0x600000 never appear at engine offset
- * 0x600000).  A 2D host-data blit writes through DST_OFF_PITCH in the ENGINE's
- * own offset space -- exactly where TEX_0_OFF then reads -- so it is guaranteed
- * to land.  Sequence + register values are from the reference mach64_dma_blit. */
-static int mach64_upload(gld_context *ctx, void *texobj)
+/* Upload ONE w x h ARGB image from `src` (contiguous, GLEngine fmt) into VRAM at
+ * byte offset dst_off.  mach64 textures are stored LINEARLY at natural width
+ * (2^widthLog2); TEX_SIZE_PITCH has no separate pitch, so the unit reads texel
+ * (s,t) at base + (t*w + s)*4.  DST_OFF_PITCH's pitch is in 8-pixel units (min 1
+ * = 8px), so a rectangular w x h blit only lands rows at the natural stride when
+ * w is a multiple of 8 -- true for w>=8; for w<8 blit a linear 1-row run instead
+ * (pitch irrelevant, packed at stride w).  Larger-than-one-buffer images are split
+ * into <=MACH64_BLIT_MAX chunks, each at its own sub-offset.  Returns 0 if w is
+ * too wide to chunk by rows. */
+static int mach64_upload_image(gld_context *ctx, uint32_t dst_off,
+                               uint32_t w, uint32_t h, const unsigned char *src, uint16_t fmt)
 {
-    mach64_priv *p = MACH64_PRIV(ctx);
-    const unsigned char *t = (const unsigned char *)texobj;
-    uint32_t state, srcp, w, h, n;
-    const unsigned char *s, *rec, *src;
-    uint16_t fmt;
-    mach64_tex_slot *slot;
-
-    if (!t) return 0;
-    state = *(const uint32_t *)(t + 0x30);
-    if (state < 0x10000 || state >= 0x40000000) return 0;
-    s   = (const unsigned char *)(uintptr_t)state;
-    rec = s + 0x9c + (uint32_t)s[0x5e] * 0x14;          /* base-level record   */
-    w   = *(const uint16_t *)(rec + 0x00);
-    h   = *(const uint16_t *)(rec + 0x02);
-    fmt = *(const uint16_t *)(rec + 0x0c);
-    srcp = *(const uint32_t *)(rec + 0x10);
-    if (!w || !h || srcp < 0x10000 || srcp >= 0x40000000) return 0;
-    src = (const unsigned char *)(uintptr_t)srcp;
-    n = w * h;
-    /* A single row wider than the per-blit budget can't be chunked by rows; such
-     * widths are impractical (w>768 -> a >=768x768 texture, past the VRAM heap). */
-    if (w > MACH64_BLIT_MAX) { gld_log("mach64 texture upload: %ux%u too wide\n", w, h); return 0; }
-
-    /* Allocate this texture's own VRAM region (keyed by its state-obj pointer). */
-    slot = slot_alloc(tex_key(texobj), w, h);
-    if (!slot) return 0;
-    slot->has_alpha = (fmt == 0x1908);      /* GL_RGBA -> real alpha channel */
-
-    /* mach64 textures are stored LINEARLY at their natural width (2^widthLog2);
-     * TEX_SIZE_PITCH carries no separate pitch, so the texture unit reads texel
-     * (s,t) at base + (t*w + s)*4.  The DST_OFF_PITCH pitch field is in 8-pixel
-     * units (min 1 = 8 px), so a rectangular w x h blit only lands rows at the
-     * natural stride when w is a multiple of 8.  For w >= 8 (every power-of-two
-     * width >= 8) that holds; for w < 8 (1/2/4) the 8-px min pitch would over-
-     * stride each row, so the image is blitted as a linear 1-row run of texels
-     * (pitch irrelevant, packed at stride w -- the layout the texture unit reads).
-     *
-     * Textures larger than one command buffer (MACH64_BLIT_MAX texels) are split
-     * across several host-data blits: w>=8 by whole rows (each band at its own
-     * base offset in the linear layout), w<8 by contiguous runs of the 1-row blit.
-     * Every chunk writes to slot->off + first_texel*4, so the VRAM stays a single
-     * contiguous natural-width image.
-     *
-     * GLEngine's texel copy is TIGHTLY PACKED (pitch = w*bpp; confirmed by a
-     * source-byte dump), read contiguously.  An app handing GL a sub-4-wide RGB
-     * image MUST glPixelStorei(GL_UNPACK_ALIGNMENT,1) or GL's own unpack mangles
-     * it before we ever see it. */
+    uint32_t n = w * h;
+    if (w > MACH64_BLIT_MAX) return 0;
     if (w >= 8) {
-        uint32_t rows_per = MACH64_BLIT_MAX / w;        /* whole rows per chunk */
-        uint32_t y0;
+        uint32_t rows_per = MACH64_BLIT_MAX / w, y0;
         for (y0 = 0; y0 < h; y0 += rows_per) {
             uint32_t rows = (h - y0 < rows_per) ? (h - y0) : rows_per;
-            mach64_blit_texels(ctx, slot->off + y0 * w * 4u, w / 8, w, rows,
+            mach64_blit_texels(ctx, dst_off + y0 * w * 4u, w / 8, w, rows,
                                src, y0 * w, rows * w, fmt);
         }
     } else {
         uint32_t start;
         for (start = 0; start < n; start += MACH64_BLIT_MAX) {
             uint32_t cnt = (n - start < MACH64_BLIT_MAX) ? (n - start) : MACH64_BLIT_MAX;
-            mach64_blit_texels(ctx, slot->off + start * 4u, 1, cnt, 1,
-                               src, start, cnt, fmt);
+            mach64_blit_texels(ctx, dst_off + start * 4u, 1, cnt, 1, src, start, cnt, fmt);
         }
+    }
+    return 1;
+}
+
+/* Pull the texture's image(s) from the texobj state object and DMA them into VRAM.
+ * GLEngine populates a record per mip level at state+0x9c+(baseLOD+L)*0x14 (w@0,
+ * h@2, fmt@0xc, src@0x10); we upload the WHOLE chain into one region and record
+ * each level's offset in mip_off[maxLog2] for its TEX_[maxLog2]_OFF register.
+ *
+ * WHY A BLIT (not a CPU poke): the userspace VRAM aperture (ctx->regs) is NOT
+ * offset-aligned with the engine's VRAM offset space (a wide CPU write there
+ * panics the box).  A 2D host-data blit writes through DST_OFF_PITCH in the
+ * ENGINE's own offset space -- exactly where TEX_n_OFF then reads. */
+static int mach64_upload(gld_context *ctx, void *texobj)
+{
+    mach64_priv *p = MACH64_PRIV(ctx);
+    const unsigned char *t = (const unsigned char *)texobj;
+    struct { uint32_t w, h, src, fmt, bytes; } lvl[12];
+    uint32_t state, base_lod, total, cur;
+    const unsigned char *s;
+    mach64_tex_slot *slot;
+    int nlevels = 0, L;
+
+    if (!t) return 0;
+    state = *(const uint32_t *)(t + 0x30);
+    if (state < 0x10000 || state >= 0x40000000) return 0;
+    s = (const unsigned char *)(uintptr_t)state;
+    base_lod = s[0x5e];
+
+    /* Enumerate the mip chain from the base level down to 1x1 (stops at the first
+     * empty/invalid record -- a non-mipmapped texture yields a single level). */
+    for (L = 0; L < 12; L++) {
+        const unsigned char *r = s + 0x9c + (base_lod + (uint32_t)L) * 0x14;
+        uint32_t lw = *(const uint16_t *)(r + 0x00), lh = *(const uint16_t *)(r + 0x02);
+        uint32_t lsrc = *(const uint32_t *)(r + 0x10);
+        if (!lw || !lh || lsrc < 0x10000 || lsrc >= 0x40000000) break;
+        if (lw > MACH64_BLIT_MAX) { if (L == 0) { gld_log("mach64 tex: %ux%u too wide\n", lw, lh); return 0; } break; }
+        lvl[nlevels].w = lw; lvl[nlevels].h = lh; lvl[nlevels].src = lsrc;
+        lvl[nlevels].fmt = *(const uint16_t *)(r + 0x0c);
+        lvl[nlevels].bytes = tex_align(lw * lh * 4u);
+        nlevels++;
+    }
+    if (!nlevels) return 0;
+
+    total = 0;
+    for (L = 0; L < nlevels; L++) total += lvl[L].bytes;
+
+    slot = slot_alloc(tex_key(texobj), lvl[0].w, lvl[0].h, total);
+    if (!slot) return 0;
+    slot->has_alpha = (lvl[0].fmt == 0x1908);   /* GL_RGBA -> real alpha channel */
+    slot->nlevels   = nlevels;
+
+    /* Upload each level; index its offset by its maxLog2 (= its TEX_n_OFF reg). */
+    cur = slot->off;
+    for (L = 0; L < nlevels; L++) {
+        uint32_t mx = lvl[L].w > lvl[L].h ? lvl[L].w : lvl[L].h;
+        uint32_t r  = ilog2u(mx);
+        mach64_upload_image(ctx, cur, lvl[L].w, lvl[L].h,
+                            (const unsigned char *)(uintptr_t)lvl[L].src, (uint16_t)lvl[L].fmt);
+        if (r < 12) slot->mip_off[r] = cur;
+        cur += lvl[L].bytes;
     }
 
     p->dirty |= MACH64_DIRTY_STATE;      /* new texels -> re-emit tex state       */
-    gld_log("mach64 texture upload: %ux%u fmt=0x%x -> VRAM 0x%x (key 0x%x) %u texels\n",
-            w, h, fmt, slot->off, slot->key, n);
+    gld_log("mach64 texture upload: %ux%u fmt=0x%x -> VRAM 0x%x (key 0x%x) %d level%s\n",
+            lvl[0].w, lvl[0].h, lvl[0].fmt, slot->off, slot->key,
+            nlevels, nlevels > 1 ? "s (mip)" : "");
     return 1;
 }
 
@@ -405,7 +428,8 @@ int mach64_bind_texture(gld_context *ctx)
     }
 
     new_scale_3d = 0x1u | (1u << 1) | (1u << 3) | (1u << 4)
-                 | (2u << 6) | blend | light_fcn | (1u << 24)
+                 | (2u << 6) | blend | light_fcn
+                 | (bound->nlevels > 1 ? 0u : (1u << 24))   /* MIP_MAP_DISABLE unless mipped */
                  | (bound->has_alpha ? (1u << 30) : 0u);   /* TEX_MAP_AEN */
 
     /* Re-emit the texture state when the bound texture OR the env mode changes
@@ -447,6 +471,16 @@ int mach64_bind_texture(gld_context *ctx)
      * (BILINEAR/TEX_BLEND=nearest -> clear; TEX_MAP_AEN clear = RGB no alpha.)
      * MODULATE gives the old 0x0141009b. */
     st->tex_scale_3d   = new_scale_3d;
+
+    /* Mipmapping: hand emit the per-level offsets so it programs one TEX_r_OFF per
+     * level and (via the cleared MIP_MAP_DISABLE above) lets the HW select the LOD.
+     * A non-mipped texture keeps the single-offset path (tex_mip = 0). */
+    st->tex_mip     = (bound->nlevels > 1);
+    st->tex_maxlog2 = (int)(wl > hl ? wl : hl);
+    if (st->tex_mip) {
+        int r;
+        for (r = 0; r < 12; r++) st->tex_mip_off[r] = bound->mip_off[r];
+    }
 
     st->textured = 1;
     if (changed)
