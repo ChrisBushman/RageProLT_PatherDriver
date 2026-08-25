@@ -72,8 +72,8 @@ int main(void)
             glVertexPointer(2,GL_FLOAT,0,v); glTexCoordPointer(2,GL_FLOAT,0,tc);
             glDrawArrays(s == 2 ? GL_TRIANGLE_FAN : GL_QUADS, 0, 4);
         }
-        glFlush(); glFinish();
     }
+    glFlush(); glFinish();   /* one frame: per-glFinish would now colour-clear between */
     printf("drew\n"); fflush(stdout);
     sleep(6);
     aglSetCurrentContext(NULL); aglSetDrawable(ctx, NULL);

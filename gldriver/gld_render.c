@@ -95,6 +95,36 @@ void mach64_clear_zbuffer(gld_context *ctx)
     p->dirty |= MACH64_DIRTY_STATE;
 }
 
+/* Clear the colour buffer (current render target) to the app's glClearColor.
+ * GLEngine never clears our hardware surface (it dispatches no clear entry point --
+ * verified with tools/mach64_clearscan), so the driver owns the colour clear just
+ * like the Z clear.  glClearColor lives in the gli as RGBA floats at +0x6320
+ * (offset recovered by mach64_clearscan).  target_off is the front buffer (single-
+ * buffered) or the back buffer (double-buffered); dims are ctx+0x1f0/0x1f4. */
+#define GLI_CLEAR_COLOR 0x6320
+static uint32_t mach64_gli(gld_context *ctx);   /* defined below */
+static uint32_t clampc(float f){ int c=(int)(f*255.0f+0.5f); return c<0?0:(c>255?255:(uint32_t)c); }
+void mach64_clear_color(gld_context *ctx)
+{
+    mach64_priv *p = MACH64_PRIV(ctx);
+    uint32_t gli = mach64_gli(ctx);
+    uint32_t w = *(const uint32_t *)((const char *)ctx + 0x1f0);
+    uint32_t h = *(const uint32_t *)((const char *)ctx + 0x1f4);
+    uint32_t col = 0;
+    if (!p->target_off || !w || !h) return;
+    if (gli) {
+        float rf, gf, bf;
+        uint32_t rb = mach64_gli_u32(ctx, GLI_CLEAR_COLOR + 0);
+        uint32_t gb = mach64_gli_u32(ctx, GLI_CLEAR_COLOR + 4);
+        uint32_t bb = mach64_gli_u32(ctx, GLI_CLEAR_COLOR + 8);
+        __builtin_memcpy(&rf, &rb, 4);
+        __builtin_memcpy(&gf, &gb, 4);
+        __builtin_memcpy(&bf, &bb, 4);
+        col = (clampc(rf) << 16) | (clampc(gf) << 8) | clampc(bf);
+    }
+    mach64_fill_rect(ctx, p->target_off, 0, 0, w, h, p->target_pitch, col);
+}
+
 /* ---- solid-colour rectangle fill via the 2D GUI engine --------------
  * Fill a w x h pixel box at (x,y) in `off` (byte offset, pitch in 32-bit px) with
  * `color` (0x00RRGGBB).  Same engine setup as the Z clear but with a caller colour
@@ -186,18 +216,15 @@ int mach64_draw_triangle(gld_context *ctx, const m64_vertex *v0,
     m64_cmdbuf cb;
 
     /* Frame start (first triangle of a new frame; frame_new armed at attach and at
-     * each swap/finish).  The driver owns two clears GLEngine won't do for us:
-     *  - Z buffer: GLEngine never touches our depth buffer.
-     *  - Colour, but ONLY when double-buffered: GLEngine's glClear targets the
-     *    FRONT surface, so our off-screen back buffer would otherwise blit stale
-     *    VRAM as the background (verified: garbage background, Picture 23).  Clear
-     *    it to black.  TODO: read the app's real glClearColor from the gli instead
-     *    of assuming black. */
-    if (p->frame_new &&
-        (p->dbuf || (p->z_off && (p->hw.z_cntl & MACH64_Z_EN)))) {
-        if (p->dbuf)
-            mach64_fill_rect(ctx, p->back_off, 0, 0, p->fb_w, p->fb_h,
-                             p->fb_pitch, 0x00000000u);
+     * each swap/finish).  The driver owns the clears GLEngine won't do for us --
+     * it dispatches no clear entry point, so neither colour nor Z is cleared for
+     * our HW surface unless we do it:
+     *  - Colour: to the app's glClearColor (front buffer, or the back buffer when
+     *    double-buffered -- GLEngine's own clear only ever hits the front).
+     *  - Z: GLEngine never touches our depth buffer.
+     * (Assumes the app issues glClear once per frame -- the standard pattern.) */
+    if (p->frame_new) {
+        mach64_clear_color(ctx);
         if (p->z_off && (p->hw.z_cntl & MACH64_Z_EN))
             mach64_clear_zbuffer(ctx);   /* separate submit; also marks state dirty */
         p->frame_new = 0;

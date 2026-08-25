@@ -72,8 +72,8 @@ int main(void)
         else if (s == 1) glDrawElements(GL_TRIANGLE_STRIP, 4, GL_UNSIGNED_BYTE, strip);
         else if (s == 2) glDrawElements(GL_TRIANGLE_FAN,   4, GL_UNSIGNED_BYTE, fan);
         else             glDrawElements(GL_QUADS,          4, GL_UNSIGNED_BYTE, quad);
-        glFlush(); glFinish();
     }
+    glFlush(); glFinish();   /* one frame: per-glFinish would now colour-clear between */
     printf("drew\n"); fflush(stdout);
     sleep(6);
     aglSetCurrentContext(NULL); aglSetDrawable(ctx, NULL);
