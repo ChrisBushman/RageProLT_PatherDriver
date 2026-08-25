@@ -175,7 +175,7 @@ static int mach64_upload(gld_context *ctx, void *texobj)
 {
     mach64_priv *p = MACH64_PRIV(ctx);
     const unsigned char *t = (const unsigned char *)texobj;
-    uint32_t state, srcp, w, h, i, n, pitch_units;
+    uint32_t state, srcp, w, h, i, n, pitch_units, dst_w, dst_h;
     const unsigned char *s, *rec, *src;
     uint16_t fmt;
     mach64_tex_slot *slot;
@@ -202,9 +202,19 @@ static int mach64_upload(gld_context *ctx, void *texobj)
     slot = slot_alloc(tex_key(texobj), w, h);
     if (!slot) return 0;
 
-    /* DST_OFF_PITCH pitch field is in 8-pixel units; at 32bpp a texel is a pixel.
-     * 8x8 -> 1 unit.  (w<8 would need a padded pitch -- TODO; test is 8x8.) */
-    pitch_units = (w >= 8) ? (w / 8) : 1;
+    /* mach64 textures are stored LINEARLY at their natural width (2^widthLog2);
+     * TEX_SIZE_PITCH carries no separate pitch, so the texture unit reads texel
+     * (s,t) at base + (t*w + s)*4.  The DST_OFF_PITCH pitch field is in 8-pixel
+     * units (min 1 = 8 px), so a rectangular w x h blit only lands rows at the
+     * natural stride when w is a multiple of 8.  For w >= 8 (every power-of-two
+     * width >= 8) that holds -- keep the proven rectangular blit.  For w < 8
+     * (1/2/4) the 8-px min pitch would over-stride each row; instead blit the
+     * whole image as a SINGLE linear row of w*h texels -- height 1 makes the
+     * pitch irrelevant and packs the texels contiguously at stride w, exactly the
+     * layout the texture unit samples.  (Both forms write the identical bytes for
+     * w >= 8, so this only changes the narrow case.) */
+    if (w >= 8) { pitch_units = w / 8; dst_w = w;     dst_h = h; }
+    else        { pitch_units = 1;     dst_w = w * h; dst_h = 1; }
 
     /* Host-data DMA blit: stream the real per-texel ARGB8888 data into VRAM at
      * the texture base, through the engine's own offset space (DST_OFF_PITCH).
@@ -223,7 +233,7 @@ static int mach64_upload(gld_context *ctx, void *texobj)
     m64_reg(&cb, MACH64_DP_SRC,        MACH64_DP_SRC_HOST);
     m64_reg(&cb, MACH64_DST_OFF_PITCH, (pitch_units << 22) | (slot->off >> 3));
     m64_reg(&cb, MACH64_DST_X_Y,       0);
-    m64_reg(&cb, MACH64_DST_WIDTH_HEIGHT, (h << 16) | w);          /* starts blit */
+    m64_reg(&cb, MACH64_DST_WIDTH_HEIGHT, (dst_h << 16) | dst_w);  /* starts blit */
     for (i = 0; i < n; ) {
         uint32_t chunk[16], k = 0;
         while (k < 16 && i < n) {
@@ -240,8 +250,8 @@ static int mach64_upload(gld_context *ctx, void *texobj)
     mach64_submit(ctx, &cb);
 
     p->dirty |= MACH64_DIRTY_STATE;      /* new texels -> re-emit tex state       */
-    gld_log("mach64 texture upload: %ux%u fmt=0x%x -> VRAM 0x%x (key 0x%x)\n",
-            w, h, fmt, slot->off, slot->key);
+    gld_log("mach64 texture upload: %ux%u fmt=0x%x -> VRAM 0x%x (key 0x%x) blit %ux%u\n",
+            w, h, fmt, slot->off, slot->key, dst_w, dst_h);
     return 1;
 }
 
