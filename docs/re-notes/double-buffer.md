@@ -100,6 +100,20 @@ Once found, capture it and, in gldAttachDrawable type 0x36, call registry[5](dra
 to register the back buffer + bump ctx+0x98 + caps-0x20 gate, instead of binding the
 front FB.  Then GLEngine should render the DB context via the primitive slots.
 
+### Runtime trace started (2026-08-25)
+Instrumented gldCreateContext(outp,pixfmt,shared,share_io,a7,a8,a9) to scan each arg
+for framework code pointers (0x9xxxxxxx) -- the surface vtable.  Result on a DB
+context: shared/share_io = NULL; a7/a8(gli)/a9 have NO framework pointers in their
+first 256 words (1 KB).  So GLEngine does not hand the surface vtable directly in
+gldCreateContext's args -- it is reached indirectly (follow a pointer inside the gli
+to the renderer object, whose vtable holds the surface fns) or passed at a different
+entry point.  NEXT runtime steps: (a) follow one level of indirection -- scan the
+structs that heap pointers in a7/a8/a9 point at; (b) instrument gldInitDispatch
+(table,outinfo) and gldGetRendererInfo args; (c) deep-scan the gli (80KB+) for a
+region of 0x9xxxxxxx pointers.  This is a multi-session RE; the mechanism (type-0x36
+back-buffer attach calling a GLEngine-populated registry[5] surface fn) is solid, but
+the registry's source hasn't been located yet.
+
 ## Fallback that works today
 Force dbuf for ALL (single-buffer) contexts — no DB pixel format, no 0x60: the
 render-to-back + present-on-glFinish path is proven (Picture 24).  Delivers the
