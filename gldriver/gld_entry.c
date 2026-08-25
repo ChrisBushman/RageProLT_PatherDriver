@@ -148,7 +148,11 @@ int gldAttachDrawable(gld_context *ctx, int type, void *drawable, uint32_t flags
                      * glTexImage2D fail GL_INVALID_VALUE.  mach64 texture unit
                      * maxes at 1024x1024 -> advertise 1024 (power-of-two). */
                     *(uint16_t *)(uintptr_t)(descp + 0xb2) = 1024;
-                    gld_log("  [desc-exp] populated descriptor (dims 0x800x0x800, maxtex=1024)\n");
+                    /* GL_MAX_TEXTURE_UNITS: read as a halfword from descriptor+0xac
+                     * (traced: GLEngine 0xb8204 -> lhz r0,0xac(gli[0x789c])).  We
+                     * support one texture unit; advertise 1 (was 0). */
+                    *(uint16_t *)(uintptr_t)(descp + 0xac) = 1;
+                    gld_log("  [desc-exp] populated descriptor (maxtex=1024, texunits=1)\n");
                 }
             }
         }
@@ -271,7 +275,7 @@ void gldCreateTexture(void *ctx, void **out, void *shared)
     if (out) *out = t;
 }
 int gldDeleteTexture(void *ctx, void *t)
-{ (void)ctx; gld_log("gldDeleteTexture(%p)\n", t); if (t) free(t); return 0; }
+{ (void)ctx; gld_log("gldDeleteTexture(%p)\n", t); if (t) { mach64_texture_deleted(t); free(t); } return 0; }
 int gldCreateTextureLevel(void *ctx, void *t, uint32_t a3, uint32_t lvl, uint32_t a5, uint32_t a6, uint32_t a7)
 { (void)ctx; gld_log("gldCreateTextureLevel(t=%p a3=0x%x lvl=%u a5=0x%x a6=0x%x a7=0x%x)\n", t,a3,lvl,a5,a6,a7); return 0; }
 int gldDeleteTextureLevel(void *ctx, void *t, uint32_t lvl)
@@ -280,7 +284,8 @@ int gldModifyTexture(void *ctx, void *t, uint32_t a3)
 {
     (void)ctx;
     gld_log("gldModifyTexture(t=%p a3=0x%x)\n", t, a3);
-    if (a3 & 0x80)                          /* image dirty: upload at next draw */
+    mach64_texture_bound(t);                /* this texture is now the current one */
+    if (a3 & 0x80)                          /* image dirty: upload at next draw    */
         mach64_texture_dirtied(t);
     return 0;
 }

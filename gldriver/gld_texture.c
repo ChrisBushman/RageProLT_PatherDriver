@@ -27,16 +27,76 @@
 #include "gld.h"
 #include "../common/mach64_regs.h"
 
-/* Texels live above the depth buffer (Z at 0x400000) in the 8 MB VRAM aperture
- * (ctx->regs = whole framebuffer, CPU-mapped uncached).  2 MB is plenty for the
- * small textures we handle; a real allocator comes with multi-texture support. */
-#define MACH64_TEX_VRAM_BASE  0x00600000u
+/* ---- texture VRAM allocator ------------------------------------------
+ * Texels live above the depth buffer (Z @ 0x400000) in the 8 MB VRAM aperture.
+ * Each texture gets its own region, bump-allocated in [HEAP_BASE, HEAP_END) and
+ * keyed by its GLEngine state-object pointer (texobj+0x30) -- the one identity we
+ * have at BOTH upload time (gldModifyTexture) and draw time (the bound texture).
+ * Delete marks the slot reusable but does not reclaim VRAM (no compaction yet). */
+#define MACH64_TEX_HEAP_BASE  0x00600000u
+#define MACH64_TEX_HEAP_END   0x00780000u   /* 1.5 MB texture heap */
+#define MACH64_TEX_SLOTS      64
 
-static void *g_pending_tex;    /* texobj GLEngine last image-dirtied (a3&0x80) */
+typedef struct { uint32_t key, off, w, h; } mach64_tex_slot;
+static mach64_tex_slot g_slots[MACH64_TEX_SLOTS];
+static uint32_t        g_heap_next = MACH64_TEX_HEAP_BASE;
+static void           *g_pending[16];   /* texobjs image-dirtied, to upload next draw */
+static int             g_npending;
 
-/* gldModifyTexture(a3&0x80) records the image-dirtied texobj here; the next
- * draw's mach64_bind_texture() performs the actual VRAM upload. */
-void mach64_texture_dirtied(void *texobj) { g_pending_tex = texobj; }
+static uint32_t tex_key(const void *texobj)
+{
+    return texobj ? *(const uint32_t *)((const unsigned char *)texobj + 0x30) : 0;
+}
+static mach64_tex_slot *slot_find(uint32_t key)
+{
+    int i;
+    if (!key) return 0;
+    for (i = 0; i < MACH64_TEX_SLOTS; i++) if (g_slots[i].key == key) return &g_slots[i];
+    return 0;
+}
+/* Find or bump-allocate a 32-byte-aligned region for `key` sized for w*h
+ * ARGB8888 texels.  Re-uploads reuse the region if it still fits. */
+static mach64_tex_slot *slot_alloc(uint32_t key, uint32_t w, uint32_t h)
+{
+    uint32_t sz = ((w * h * 4u) + 31u) & ~31u;
+    mach64_tex_slot *s = slot_find(key);
+    if (s) {
+        if (((s->w * s->h * 4u + 31u) & ~31u) >= sz) { s->w = w; s->h = h; return s; }
+        /* grew beyond its region: fall through and bump a fresh one (old leaks) */
+    } else {
+        int i;
+        for (i = 0; i < MACH64_TEX_SLOTS; i++) if (!g_slots[i].key) { s = &g_slots[i]; break; }
+        if (!s) { gld_log("mach64 tex: slot table full\n"); return 0; }
+    }
+    if (g_heap_next + sz > MACH64_TEX_HEAP_END) { gld_log("mach64 tex: heap full\n"); return 0; }
+    s->key = key; s->off = g_heap_next; s->w = w; s->h = h;
+    g_heap_next += sz;
+    return s;
+}
+
+/* GLEngine records the currently-bound texture's texobj (our gldCreateTexture
+ * result) as a gli field at +0x15748 (recovered by a within-process gli-region
+ * diff across two differently-bound draws, tools/mach64_texmulti).  bind_texture
+ * reads it to select the right VRAM region. */
+#define GLI_BOUND_TEXOBJ  0x15748
+
+/* gldModifyTexture(a3&0x80): queue this texobj for upload at the next draw (its
+ * state object isn't populated until then).  gldModifyTexture is NOT a bind hook
+ * -- binding is read from the gli at draw time. */
+void mach64_texture_dirtied(void *texobj)
+{
+    int i;
+    if (!texobj) return;
+    for (i = 0; i < g_npending; i++) if (g_pending[i] == texobj) return;
+    if (g_npending < 16) g_pending[g_npending++] = texobj;
+}
+void mach64_texture_bound(void *texobj) { (void)texobj; }   /* no bind hook; see gli */
+
+void mach64_texture_deleted(void *texobj)
+{
+    mach64_tex_slot *s = slot_find(tex_key(texobj));
+    if (s) s->key = 0;                              /* slot reusable; VRAM leaks */
+}
 
 static uint32_t ilog2u(uint32_t v) { uint32_t r = 0; while (v > 1) { v >>= 1; r++; } return r; }
 
@@ -56,6 +116,7 @@ static int mach64_upload(gld_context *ctx, void *texobj)
     uint32_t state, srcp, w, h, i, n, pitch_units;
     const unsigned char *s, *rec, *src;
     uint16_t fmt;
+    mach64_tex_slot *slot;
     m64_cmdbuf cb;
 
     if (!t) return 0;
@@ -74,6 +135,10 @@ static int mach64_upload(gld_context *ctx, void *texobj)
      * scratch is 1024 dwords -> cap the texel count so we never overflow the
      * single-submit staging (larger textures need chunked blits -- TODO). */
     if (n > 900) { gld_log("mach64 texture upload: %ux%u too big for one blit\n", w, h); return 0; }
+
+    /* Allocate this texture's own VRAM region (keyed by its state-obj pointer). */
+    slot = slot_alloc(tex_key(texobj), w, h);
+    if (!slot) return 0;
 
     /* DST_OFF_PITCH pitch field is in 8-pixel units; at 32bpp a texel is a pixel.
      * 8x8 -> 1 unit.  (w<8 would need a padded pitch -- TODO; test is 8x8.) */
@@ -94,7 +159,7 @@ static int mach64_upload(gld_context *ctx, void *texobj)
     m64_reg(&cb, MACH64_DP_WRITE_MASK, 0xffffffffu);
     m64_reg(&cb, MACH64_DP_MIX,        MACH64_DP_MIX_DS);
     m64_reg(&cb, MACH64_DP_SRC,        MACH64_DP_SRC_HOST);
-    m64_reg(&cb, MACH64_DST_OFF_PITCH, (pitch_units << 22) | (MACH64_TEX_VRAM_BASE >> 3));
+    m64_reg(&cb, MACH64_DST_OFF_PITCH, (pitch_units << 22) | (slot->off >> 3));
     m64_reg(&cb, MACH64_DST_X_Y,       0);
     m64_reg(&cb, MACH64_DST_WIDTH_HEIGHT, (h << 16) | w);          /* starts blit */
     for (i = 0; i < n; ) {
@@ -112,12 +177,9 @@ static int mach64_upload(gld_context *ctx, void *texobj)
     }
     mach64_submit(ctx, &cb);
 
-    p->tex_obj = texobj;
-    p->tex_off = MACH64_TEX_VRAM_BASE;
-    p->tex_w = w; p->tex_h = h;
-    p->dirty |= MACH64_DIRTY_STATE;
-    gld_log("mach64 texture upload: %ux%u fmt=0x%x -> VRAM 0x%x\n",
-            w, h, fmt, MACH64_TEX_VRAM_BASE);
+    p->dirty |= MACH64_DIRTY_STATE;      /* new texels -> re-emit tex state       */
+    gld_log("mach64 texture upload: %ux%u fmt=0x%x -> VRAM 0x%x (key 0x%x)\n",
+            w, h, fmt, slot->off, slot->key);
     return 1;
 }
 
@@ -134,17 +196,37 @@ int mach64_bind_texture(gld_context *ctx)
 {
     mach64_priv *p = MACH64_PRIV(ctx);
     m64_state *st = &p->hw;
+    mach64_tex_slot *bound;
     uint32_t wl, hl, tex_on;
 
-    if (g_pending_tex) { mach64_upload(ctx, g_pending_tex); g_pending_tex = 0; }
+    /* Upload any image-dirtied textures (their state objects are populated by
+     * draw time); each lands in its own VRAM slot. */
+    while (g_npending) mach64_upload(ctx, g_pending[--g_npending]);
 
     /* Follow the app's glEnable/glDisable(GL_TEXTURE_2D). */
     tex_on = (mach64_gli_u32(ctx, GLI_TEX2D_ENABLE) & GLI_TEX2D_BIT) != 0;
 
-    if (!p->tex_off || !tex_on) {          /* nothing uploaded, or texturing off */
+    /* Select the CURRENTLY-BOUND texture: GLEngine stores its texobj at
+     * gli+0x15748; our slot is keyed by texobj[0x30] (the state object). */
+    {   uint32_t bt = mach64_gli_u32(ctx, GLI_BOUND_TEXOBJ);
+        uint32_t key = (bt > 0x10000 && bt < 0x40000000)
+                     ? *(const uint32_t *)(uintptr_t)(bt + 0x30) : 0;
+        bound = slot_find(key);
+    }
+
+    if (!bound || !tex_on) {               /* no bound texture, or texturing off */
         if (st->textured) { st->textured = 0; p->dirty |= MACH64_DIRTY_STATE; }
         return 0;
     }
+    /* Re-emit the texture state when the bound texture changes (not just on the
+     * untextured->textured transition) -- otherwise switching from texA to texB
+     * leaves the hardware sampling the previous texture. */
+    if (!st->textured || st->tex_0_off != bound->off)
+        p->dirty |= MACH64_DIRTY_STATE;
+
+    p->tex_off = bound->off;
+    p->tex_w   = bound->w;
+    p->tex_h   = bound->h;
     wl = ilog2u(p->tex_w);
     hl = ilog2u(p->tex_h);
 
@@ -176,6 +258,6 @@ int mach64_bind_texture(gld_context *ctx)
                        | (2u << 6) | (1u << 16) | (1u << 22) | (1u << 24);
                                                               /* = 0x0141009b */
 
-    if (!st->textured) { st->textured = 1; p->dirty |= MACH64_DIRTY_STATE; }
+    st->textured = 1;
     return 1;
 }

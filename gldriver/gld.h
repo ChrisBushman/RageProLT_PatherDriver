@@ -132,7 +132,9 @@ void mach64_set_scissor(gld_context *ctx, int x, int y, int w, int h);
  * (t[0x30]+0x9c record: w/h/fmt/pixels), converts to ARGB8888, DMAs it into
  * VRAM, and programs the mach64 texture registers into p->hw.  Returns 1 if a
  * texture is bound for this draw (so the primitive emits S/T). */
-void mach64_texture_dirtied(void *texobj);
+void mach64_texture_dirtied(void *texobj);   /* gldModifyTexture a3&0x80: queue upload */
+void mach64_texture_bound(void *texobj);     /* gldModifyTexture: mark current texture */
+void mach64_texture_deleted(void *texobj);   /* gldDeleteTexture: free its VRAM slot   */
 int  mach64_bind_texture(gld_context *ctx);
 
 /* ---- geometry translation + submission (gld_render.c) --------------- */
