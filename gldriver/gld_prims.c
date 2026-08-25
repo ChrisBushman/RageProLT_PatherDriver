@@ -160,10 +160,19 @@ static void emit_tri(gld_context *ctx, const void *base,
     mach64_draw_triangle(ctx, &v0, &v1, &v2);
 }
 
+/* Reject an absurd vertex count: the STRIP/FAN/QUAD dispatch slots are mis-mapped
+ * (labels off by one -- see gld_dispatch.c) and a mis-dispatched slot can hand us
+ * a garbage count, which without this guard runs a loop over unmapped memory and
+ * crashes the app.  GL_TRIANGLES is correctly dispatched and unaffected. */
+#define PRIM_SANE(n) do { if ((n) > 0x40000u) { \
+        gld_log("mach64: bogus vertex count 0x%x -- skipping primitive\n", (n)); \
+        return; } } while (0)
+
 /* ---- triangle family (the proven hardware path) --------------------- */
 void mach64_render_triangles(gld_context *ctx, const void *v, uint32_t n)
 {
     uint32_t i;
+    PRIM_SANE(n);
     gld_log("mach64_render_triangles(n=%u v=%p)\n", n, v);
     if (v && n > 0) {
         const unsigned char *p = (const unsigned char *)v;
@@ -179,6 +188,7 @@ void mach64_render_triangles(gld_context *ctx, const void *v, uint32_t n)
 void mach64_render_tri_strip(gld_context *ctx, const void *v, uint32_t n)
 {
     uint32_t i;
+    PRIM_SANE(n);
     mach64_sync_depth_from_gli(ctx);   /* Z_CNTL follows the app's GL depth state */
     mach64_bind_texture(ctx);          /* upload+program texture if bound */
     for (i = 2; i < n; i++)                      /* flip winding on odd tris */
@@ -189,17 +199,20 @@ void mach64_render_tri_strip(gld_context *ctx, const void *v, uint32_t n)
 void mach64_render_tri_fan(gld_context *ctx, const void *v, uint32_t n)
 {
     uint32_t i;
+    PRIM_SANE(n);
     for (i = 2; i < n; i++) emit_tri(ctx, v, 0, i-1, i);
 }
 
 void mach64_render_polygon(gld_context *ctx, const void *v, uint32_t n)
 {
+    PRIM_SANE(n);
     mach64_render_tri_fan(ctx, v, n);            /* convex polygon = fan */
 }
 
 void mach64_render_quads(gld_context *ctx, const void *v, uint32_t n)
 {
     uint32_t i;
+    PRIM_SANE(n);
     for (i = 0; i + 4 <= n; i += 4) {            /* quad -> 2 tris */
         emit_tri(ctx, v, i,   i+1, i+2);
         emit_tri(ctx, v, i,   i+2, i+3);
@@ -209,6 +222,7 @@ void mach64_render_quads(gld_context *ctx, const void *v, uint32_t n)
 void mach64_render_quad_strip(gld_context *ctx, const void *v, uint32_t n)
 {
     uint32_t i;
+    PRIM_SANE(n);
     for (i = 0; i + 4 <= n; i += 2) {            /* strip quad -> 2 tris */
         emit_tri(ctx, v, i,   i+1, i+2);
         emit_tri(ctx, v, i+2, i+1, i+3);
@@ -228,24 +242,28 @@ void mach64_render_quad_strip(gld_context *ctx, const void *v, uint32_t n)
 void mach64_render_points(gld_context *ctx, const void *v, uint32_t n)
 {
     float fb_h = FB_H(ctx), s = gli_size(ctx, GLI_POINT_SIZE) * 0.5f; uint32_t i;
+    PRIM_SANE(n);
     mach64_sync_depth_from_gli(ctx);
     for (i = 0; i < n; i++) draw_point(ctx, VTX(v, i), fb_h, s);
 }
 void mach64_render_lines(gld_context *ctx, const void *v, uint32_t n)
 {
     float fb_h = FB_H(ctx), w = gli_size(ctx, GLI_LINE_WIDTH) * 0.5f; uint32_t i;
+    PRIM_SANE(n);
     mach64_sync_depth_from_gli(ctx);
     for (i = 0; i + 2 <= n; i += 2) draw_line(ctx, VTX(v, i), VTX(v, i+1), fb_h, w);
 }
 void mach64_render_line_strip(gld_context *ctx, const void *v, uint32_t n)
 {
     float fb_h = FB_H(ctx), w = gli_size(ctx, GLI_LINE_WIDTH) * 0.5f; uint32_t i;
+    PRIM_SANE(n);
     mach64_sync_depth_from_gli(ctx);
     for (i = 1; i < n; i++) draw_line(ctx, VTX(v, i-1), VTX(v, i), fb_h, w);
 }
 void mach64_render_line_loop(gld_context *ctx, const void *v, uint32_t n)
 {
     float fb_h = FB_H(ctx), w = gli_size(ctx, GLI_LINE_WIDTH) * 0.5f; uint32_t i;
+    PRIM_SANE(n);
     mach64_sync_depth_from_gli(ctx);
     for (i = 1; i < n; i++) draw_line(ctx, VTX(v, i-1), VTX(v, i), fb_h, w);
     if (n > 2) draw_line(ctx, VTX(v, n-1), VTX(v, 0), fb_h, w);   /* close the loop */
