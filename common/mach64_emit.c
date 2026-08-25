@@ -51,6 +51,12 @@ void m64_emit_state(m64_cmdbuf *cb, const m64_state *st)
         m64_reg(cb, MACH64_TEX_CNTL,       st->tex_cntl & ~(1u << 23));
         m64_reg(cb, MACH64_TEX_CNTL,       st->tex_cntl |  (1u << 23));
         m64_reg(cb, MACH64_SCALE_3D_CNTL,  st->tex_scale_3d);
+        /* Route the TEXEL alpha as the pixel "source alpha" that framebuffer
+         * blending (SCALE_3D_CNTL ALPHA_BLEND_SRC/DST) uses -- otherwise As is the
+         * opaque interpolated vertex alpha and a translucent texture never blends.
+         * ALPHA_TEST_ALWAYS | ALPHA_DST_SRCALPHA | ALPHA_TST_SRC_TEXEL (ref default
+         * mach64_init_context; test itself stays disabled, EN=0). */
+        m64_reg(cb, MACH64_ALPHA_TST_CNTL, (7u << 4) | (4u << 8) | (0u << 12));
     } else {
         m64_reg(cb, MACH64_SCALE_3D_CNTL,  st->scale_3d_cntl);
     }

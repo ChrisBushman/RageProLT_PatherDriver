@@ -276,6 +276,46 @@ static int mach64_upload(gld_context *ctx, void *texobj)
 #define GL_ENV_REPLACE     0x1e01u
 #define GL_ENV_DECAL       0x2101u
 
+/* GL_BLEND enable + glBlendFunc, recovered via a 3-way gli diff (off / srcalpha /
+ * additive, tools/mach64_blendstate).  Enable is bit 0x01000000 of gli+0x6304;
+ * the blend func is packed (srcRGB<<16)|dstRGB as raw GL factor enums at
+ * gli+0x62e8 (mirrored at +0x62ec = the alpha func). */
+#define GLI_BLEND_ENABLE   0x6304
+#define GLI_BLEND_EN_BIT   0x01000000u
+#define GLI_BLEND_FUNC     0x62e8
+
+/* Map a GL blend factor to the mach64 ALPHA_BLEND_SRC field (SCALE_3D_CNTL
+ * [18:16]) / ALPHA_BLEND_DST field ([21:19]) (values from mesa_mach64_reg.h).
+ * Unsupported factors fall back to opaque (SRC ONE / DST ZERO). */
+static uint32_t mach64_blend_src(uint32_t glf)
+{
+    switch (glf) {
+    case 0x0000: return 0u << 16;   /* GL_ZERO                 */
+    case 0x0001: return 1u << 16;   /* GL_ONE                  */
+    case 0x0306: return 2u << 16;   /* GL_DST_COLOR            */
+    case 0x0307: return 3u << 16;   /* GL_ONE_MINUS_DST_COLOR  */
+    case 0x0302: return 4u << 16;   /* GL_SRC_ALPHA            */
+    case 0x0303: return 5u << 16;   /* GL_ONE_MINUS_SRC_ALPHA  */
+    case 0x0304: return 6u << 16;   /* GL_DST_ALPHA            */
+    case 0x0305: return 7u << 16;   /* GL_ONE_MINUS_DST_ALPHA  */
+    default:     return 1u << 16;
+    }
+}
+static uint32_t mach64_blend_dst(uint32_t glf)
+{
+    switch (glf) {
+    case 0x0000: return 0u << 19;   /* GL_ZERO                 */
+    case 0x0001: return 1u << 19;   /* GL_ONE                  */
+    case 0x0300: return 2u << 19;   /* GL_SRC_COLOR            */
+    case 0x0301: return 3u << 19;   /* GL_ONE_MINUS_SRC_COLOR  */
+    case 0x0302: return 4u << 19;   /* GL_SRC_ALPHA            */
+    case 0x0303: return 5u << 19;   /* GL_ONE_MINUS_SRC_ALPHA  */
+    case 0x0304: return 6u << 19;   /* GL_DST_ALPHA            */
+    case 0x0305: return 7u << 19;   /* GL_ONE_MINUS_DST_ALPHA  */
+    default:     return 0u << 19;
+    }
+}
+
 /* Called from the draw path.  Uploads any pending image (so the texture is ready
  * in VRAM regardless of enable state), then -- only if the app has GL_TEXTURE_2D
  * enabled -- programs the texture registers into p->hw and enables textured state
@@ -285,7 +325,7 @@ int mach64_bind_texture(gld_context *ctx)
     mach64_priv *p = MACH64_PRIV(ctx);
     m64_state *st = &p->hw;
     mach64_tex_slot *bound;
-    uint32_t wl, hl, tex_on, env, light_fcn, new_scale_3d;
+    uint32_t wl, hl, tex_on, env, light_fcn, new_scale_3d, blend;
     int changed;
 
     /* Upload any image-dirtied textures (their state objects are populated by
@@ -320,8 +360,24 @@ int mach64_bind_texture(gld_context *ctx)
         case GL_ENV_DECAL:   light_fcn = 2u << 22; break;
         default:             light_fcn = 1u << 22; break;   /* MODULATE + fallback */
     }
+
+    /* Framebuffer alpha blend (SCALE_3D_CNTL ALPHA_BLEND_SRC/DST): follow the
+     * app's glEnable(GL_BLEND) + glBlendFunc from the gli.  Off -> SRC_ONE/DST_ZERO
+     * (opaque).  With TEX_MAP_AEN set for RGBA, the "source alpha" the SRC/DST
+     * factors reference IS the texel alpha. */
+    if (mach64_gli_u32(ctx, GLI_BLEND_ENABLE) & GLI_BLEND_EN_BIT) {
+        uint32_t bf = mach64_gli_u32(ctx, GLI_BLEND_FUNC);
+        /* ALPHA_FOG_EN_ALPHA (1<<11) turns ON the alpha channel in the 3D pipe --
+         * without it the alpha isn't computed and the blend sees opaque As, so a
+         * translucent texture never blends (ref sets it whenever BlendEnabled). */
+        blend = mach64_blend_src(bf >> 16) | mach64_blend_dst(bf & 0xffffu)
+              | (1u << 11);
+    } else {
+        blend = 1u << 16;                     /* SRC_ONE | DST_ZERO = opaque */
+    }
+
     new_scale_3d = 0x1u | (1u << 1) | (1u << 3) | (1u << 4)
-                 | (2u << 6) | (1u << 16) | light_fcn | (1u << 24)
+                 | (2u << 6) | blend | light_fcn | (1u << 24)
                  | (bound->has_alpha ? (1u << 30) : 0u);   /* TEX_MAP_AEN */
 
     /* Re-emit the texture state when the bound texture OR the env mode changes
@@ -366,8 +422,8 @@ int mach64_bind_texture(gld_context *ctx)
 
     st->textured = 1;
     if (changed)
-        gld_log("mach64 tex: env=0x%x light_fcn=%u alpha=%u off=0x%x %ux%u size_pitch=0x%x\n",
-                env, light_fcn >> 22, bound->has_alpha, p->tex_off, p->tex_w, p->tex_h,
-                st->tex_size_pitch);
+        gld_log("mach64 tex: env=0x%x light_fcn=%u alpha=%u blend=0x%x off=0x%x %ux%u sp=0x%x\n",
+                env, light_fcn >> 22, bound->has_alpha, blend, p->tex_off,
+                p->tex_w, p->tex_h, st->tex_size_pitch);
     return 1;
 }
