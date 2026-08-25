@@ -80,10 +80,13 @@ int gldUpdateDispatch(gld_context *ctx, void *table, uint32_t flags)
     SET(0x38, mach64_render_quads);        /* GL_QUADS */
     SET(0x3c, mach64_render_quad_strip);   /* GL_QUAD_STRIP */
 
-    /* DrawElements vector (0x40/0x44/0x48): never fired for DrawArrays.  Reuse the
-     * array bodies for now; GLEngine passes an extra index-buffer arg our 3-arg
-     * funcs ignore (PPC calling convention) -> renders sequentially.  TODO: real
-     * indexed path once the element width/format is recovered. */
+    /* DrawElements vector (0x40/0x44/0x48) is DEAD: GLEngine handles indexed draws
+     * itself -- it dereferences the indices, transforms the gathered vertices into
+     * its own draw-order buffer, and dispatches to the SAME primitive slots above
+     * as DrawArrays (verified byte-for-byte via tools/mach64_elementsprobe: same
+     * slots, same args, same internal buffer 0x23a2xx -- the app's index buffer
+     * never reaches us).  So indexed rendering already works; these three installs
+     * are just defensive in case a future GLEngine build routes here. */
     SET(SLOT_ELT_POINTS, mach64_render_points);
     SET(SLOT_ELT_LINES,  mach64_render_lines);
     SET(SLOT_ELT_TRIS,   mach64_render_triangles);
