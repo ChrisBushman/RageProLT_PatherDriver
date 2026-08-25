@@ -124,14 +124,39 @@ static void draw_line(gld_context *ctx, const void *v0, const void *v1,
     mach64_draw_triangle(ctx, &D, &C, &B);
 }
 
+/* Half-texel inset: remap the texcoord so u in [0,1] samples texel CENTRES
+ * [0.5/w .. (w-0.5)/w] instead of the boundaries (u' = u*(w-1)/w + 0.5/w).  The
+ * mach64's REPEAT floor-addresses the edge S slightly below 0 to the last column
+ * (a 1px wrong-colour line down the left/top edge); insetting pins the edge sample
+ * to texel 0 / w-1.  Applied ONLY when the triangle's texcoords are within [0,1]
+ * (a texture drawn once) -- a genuinely TILING texture (u>1) is left untouched so
+ * its tiling stays exact and isn't compressed by the inset. */
+static float vst(int32_t bits) { float f; __builtin_memcpy(&f, &bits, 4); return f; }
+static void  set_s(m64_vertex *v, float f) { __builtin_memcpy(&v->s, &f, 4); }
+static void  set_t(m64_vertex *v, float f) { __builtin_memcpy(&v->t, &f, 4); }
+
 static void emit_tri(gld_context *ctx, const void *base,
                      uint32_t a, uint32_t b, uint32_t c)
 {
+    mach64_priv *p = MACH64_PRIV(ctx);
     m64_vertex v0, v1, v2;
     float fb_h = (float)*(const uint32_t *)((const unsigned char *)ctx + 0x1f4);
     mach64_read_vertex(VTX(base, a), &v0, fb_h);
     mach64_read_vertex(VTX(base, b), &v1, fb_h);
     mach64_read_vertex(VTX(base, c), &v2, fb_h);
+    if (p->hw.textured && p->tex_w > 0 && p->tex_h > 0) {
+        float s0=vst(v0.s), s1=vst(v1.s), s2=vst(v2.s);
+        float t0=vst(v0.t), t1=vst(v1.t), t2=vst(v2.t);
+        int within = (s0>=-0.001f && s0<=1.001f && s1>=-0.001f && s1<=1.001f &&
+                      s2>=-0.001f && s2<=1.001f && t0>=-0.001f && t0<=1.001f &&
+                      t1>=-0.001f && t1<=1.001f && t2>=-0.001f && t2<=1.001f);
+        if (within) {                     /* non-tiling: inset to texel centres */
+            float ss=(float)(p->tex_w-1)/(float)p->tex_w, bs=0.5f/(float)p->tex_w;
+            float ts=(float)(p->tex_h-1)/(float)p->tex_h, bt=0.5f/(float)p->tex_h;
+            set_s(&v0,s0*ss+bs); set_s(&v1,s1*ss+bs); set_s(&v2,s2*ss+bs);
+            set_t(&v0,t0*ts+bt); set_t(&v1,t1*ts+bt); set_t(&v2,t2*ts+bt);
+        }
+    }
     mach64_draw_triangle(ctx, &v0, &v1, &v2);
 }
 
