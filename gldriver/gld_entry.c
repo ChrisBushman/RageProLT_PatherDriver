@@ -94,36 +94,38 @@ int gldAttachDrawable(gld_context *ctx, int type, void *drawable, uint32_t flags
 
         mach64_set_render_target(ctx, base_bytes, fb_pitch_px);
 
-#ifdef GLD_DBUF_TEST
-        /* Double-buffer bring-up (forced on; pixel-format gating comes later).
-         * Place the back buffer one full surface above the front/scanout, relocate
-         * the texture heap above the back buffer, and retarget rendering to the
-         * back.  VRAM (8MB): front 0x1000, back +one surface, heap after that.
-         * NOTE: this test map assumes no depth buffer in use (texprim). */
         {   mach64_priv *pv = MACH64_PRIV(ctx);
-            uint32_t surf = fb_pitch_px * 4u * height;      /* bytes per surface */
-            uint32_t back = base_bytes + surf;
-            pv->dbuf      = 1;
-            pv->front_off = base_bytes;
-            pv->back_off  = back;
-            pv->fb_w = width; pv->fb_h = height; pv->fb_pitch = fb_pitch_px;
-            mach64_set_texheap(back + surf, 0x800000u);     /* heap above back buf */
-            mach64_set_render_target(ctx, back, fb_pitch_px);   /* draw to back */
-            gld_log("  [dbuf] front=0x%x back=0x%x %ux%u pitch=%upx -> render->back\n",
-                    base_bytes, back, width, height, fb_pitch_px);
-        }
-#endif
+            uint32_t surf  = fb_pitch_px * 4u * height;   /* bytes per colour surface */
+            uint32_t z_off = 0x400000u;   /* single-buffered: Z past the front buffer */
 
-        /* DEPTH: bind a 16-bit Z buffer past the visible framebuffer (fb is base
-         * 0x1000 + 1024x768x4 ~ 0x301000, so 0x400000 doesn't overlap), enable
-         * GL_LESS + Z write, and clear it to far.  Real per-vertex Z now comes
-         * from the NDC z in mach64_read_vertex, so overlapping geometry occludes
-         * correctly (Z_CNTL/vertex-Z/Z_OFF_PITCH all verified vs the RRG spec). */
-        mach64_set_zbuffer(ctx, 0x400000u, fb_pitch_px);   /* bind the Z buffer */
-        /* Z_CNTL now follows the app's GL depth state (glEnable(GL_DEPTH_TEST)/
-         * glDepthFunc/glDepthMask), synced from the gli in mach64_flush /
-         * render_tri_strip -- not forced on here. */
-        MACH64_PRIV(ctx)->frame_new = 1;   /* clear Z before the first frame */
+            /* Double-buffered (dbuf armed by the DB pixel format in gldCreateContext):
+             * render off-screen to a back buffer and blit it to the front on present.
+             * 8MB VRAM map: front | back | Z | texture heap, packed to the top --
+             *   front 0x1000..            scanout, 3MB @ 1024x768x32
+             *   back  front+surf..        off-screen render target (3MB)
+             *   Z     back+surf..         16-bit depth (1.5MB)
+             *   heap  Z+zsize..0x800000   ~0.5MB (shrunk from 1.5MB to make room).
+             * GLEngine's glClear hits the FRONT, so the driver clears the back. */
+            if (pv->dbuf) {
+                uint32_t back  = base_bytes + surf;
+                uint32_t zsize = fb_pitch_px * 2u * height;
+                z_off = back + surf;
+                pv->front_off = base_bytes;
+                pv->back_off  = back;
+                pv->fb_w = width; pv->fb_h = height; pv->fb_pitch = fb_pitch_px;
+                mach64_set_texheap(z_off + zsize, 0x800000u);
+                mach64_set_render_target(ctx, back, fb_pitch_px);   /* draw to back */
+                gld_log("  [dbuf] front=0x%x back=0x%x z=0x%x %ux%u pitch=%upx -> render->back\n",
+                        base_bytes, back, z_off, width, height, fb_pitch_px);
+            }
+
+            /* DEPTH: bind the 16-bit Z buffer (single-buf: 0x400000 past the front;
+             * double-buf: above the back buffer).  Real per-vertex Z comes from the
+             * NDC z in mach64_read_vertex; Z_CNTL follows the app's GL depth state,
+             * synced per-draw in mach64_flush / render_tri_strip -- not forced here. */
+            mach64_set_zbuffer(ctx, z_off, fb_pitch_px);
+        }
+        MACH64_PRIV(ctx)->frame_new = 1;   /* clear Z (+ back) before the first frame */
 
         /* EXPERIMENT (root-cause validation): GLEngine leaves its drawable
          * descriptor gli[0x789c] ALL-ZEROS for our HW surface (surface-binding

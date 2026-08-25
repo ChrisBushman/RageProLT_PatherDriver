@@ -61,11 +61,18 @@ static const uint32_t gld_node_templates[GLD_NNODES][GLD_NODE_WORDS] = {
 int gldChoosePixelFormat(void **pf_out, const int *attribs)
 {
     uint32_t *node[GLD_NNODES];
-    int i;
+    int i, want_db = 0;
 
     gld_log("gldChoosePixelFormat(attribs=%p):", (void*)attribs);
-    { int k; for (k=0; attribs && k<48 && attribs[k]; k++) gld_log(" %d", attribs[k]); }
-    gld_log(" [end]\n");
+    /* Scan the CGL attribute tokens.  kCGLPFADoubleBuffer (=5) is a boolean
+     * attribute (no value word follows), so a plain scan is adequate for the
+     * common attribute sets (RGBA/DoubleBuffer/DepthSize/Accelerated/FullScreen).
+     * TODO: a value-aware parser if an app passes a value word that equals 5. */
+    { int k; for (k=0; attribs && k<48 && attribs[k]; k++) {
+        gld_log(" %d", attribs[k]);
+        if (attribs[k] == 5) want_db = 1;   /* kCGLPFADoubleBuffer */
+    } }
+    gld_log(" [end]%s\n", want_db ? "  DOUBLEBUFFER" : "");
     if (!pf_out) return 0x271e;
     *pf_out = 0;
 
@@ -79,6 +86,22 @@ int gldChoosePixelFormat(void **pf_out, const int *attribs)
         node[i] = (uint32_t *)calloc(1, 0x40);
         if (!node[i]) return 0x2720;
         memcpy(node[i], gld_node_templates[i], GLD_NODE_WORDS * 4);
+        if (want_db) {
+#ifdef GLD_DBUF
+            /* Mark the config DOUBLE-BUFFERED via node[0x0c] bit 3 -- the field
+             * gldCreateContext's caps decode uses to pick double- (caps 0x400) vs
+             * single-buffer (caps 0x800); this alone is the CGL scorer's DB gate
+             * (node[0x08] must stay at its normal value; broadening it corrupts
+             * fmt_caps and routes the context off the hardware path).
+             * GATED OFF by default: advertising DB makes GLEngine route a DB
+             * context's geometry through dispatch slot 0x60 (render-control), which
+             * is still an unimplemented stub -> a DB context renders BLACK.  Until
+             * the 0x60 batched-render path is reverse-engineered, do NOT advertise
+             * DB in shipping builds (a clean aglChoosePixelFormat rejection is
+             * better than a black screen).  Build -DGLD_DBUF to continue that work. */
+            node[i][3] |= 0x8u;         /* node[0x0c] bit 3 = double-buffered */
+#endif
+        }
     }
     for (i = 0; i < GLD_NNODES - 1; i++)
         node[i][0] = (uint32_t)node[i + 1];   /* PPC32: pointer fits in a word */

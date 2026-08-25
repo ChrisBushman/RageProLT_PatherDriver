@@ -127,9 +127,19 @@ int gldCreateContext(gld_context **outp, void *pixfmt, void *shared,
           if (d == 1) caps |= 0x100; else if (d == 2) caps |= 0x200; }
         { short s = (short)((n[9] >> 16) & 0xffff);        /* halfword @0x24  */
           if (s > 0) caps |= 0x1000; }
+        /* node[0x0c] bit 3 = double-buffered (the field this decode uses to emit
+         * caps 0x400 vs single-buffer 0x800).  Setting bit 3 for a DB config also
+         * hits the earlier `f0c & 0xa -> caps = 0x8000` branch; a single-buffered
+         * context never has 0x8000, and a DB context WITH it gets zero geometry
+         * dispatched (GLEngine routes it off the hardware path).  Strip 0x8000 for
+         * DB so the caps match a hardware context plus the double-buffer bit 0x400. */
+        if (ctx->backend && (f0c & 8)) {
+            caps &= ~0x8000u;
+            MACH64_PRIV(ctx)->dbuf = 1;
+        }
         *(uint32_t *)((unsigned char *)ctx + 0x2c) = caps;
-        gld_log("  ctx+0x2c fmt_caps = 0x%x (node [08]=0x%x [10]=0x%x)\n",
-                caps, f08, f10);
+        gld_log("  ctx+0x2c fmt_caps = 0x%x (node [08]=0x%x [0c]=0x%x)%s\n",
+                caps, f08, f0c, (f0c & 8) ? "  DBUF armed" : "");
     }
 
     /* Store GLEngine's gli context (6th arg, r8) at ctx+0x10 -- the render flush
