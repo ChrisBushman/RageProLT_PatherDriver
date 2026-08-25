@@ -59,6 +59,8 @@ typedef struct {
     uint32_t dp_mix;          /* 0x00070007 = BKGD/FRGD_MIX_S              */
     uint32_t dp_src;          /* 0x0505 gouraud (3D scaler) / 0x0101 flat  */
     uint32_t alpha_tst_cntl;  /* ALPHA_TST_CNTL (0x550): GL_ALPHA_TEST      */
+    uint32_t dp_fog_clr;      /* DP_FOG_CLR (0x6c4, aliases DP_FRGD_CLR): GL_FOG
+                               * blend target when ALPHA_FOG_EN=FOG (0=don't emit) */
     /* ---- texturing: emitted only when `textured` is set ---------------
      * When textured, scale_3d_cntl is overridden with FCN_TEXTURE (tex_scale_3d)
      * and the three texture registers are emitted; otherwise the untextured

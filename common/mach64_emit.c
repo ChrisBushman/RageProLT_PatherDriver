@@ -84,6 +84,11 @@ void m64_emit_state(m64_cmdbuf *cb, const m64_state *st)
     m64_reg(cb, MACH64_CLR_CMP_CNTL,   st->clr_cmp_cntl);
     m64_reg(cb, MACH64_DP_MIX,         st->dp_mix);
     m64_reg(cb, MACH64_DP_SRC,         st->dp_src);
+    /* GL_FOG blend colour.  DP_FOG_CLR aliases DP_FRGD_CLR (0x6c4, the 2D-fill
+     * foreground), so emit it ONLY when fog is armed -- a plain 3D draw leaves it
+     * alone, and the 2D engine re-sets it for its own fills. */
+    if (st->dp_fog_clr)
+        m64_reg(cb, MACH64_DP_FRGD_CLR, st->dp_fog_clr);
 }
 
 void m64_emit_vertex(m64_cmdbuf *cb, int slot, const m64_vertex *v)

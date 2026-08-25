@@ -48,10 +48,24 @@ void mach64_read_vertex(const void *vp, m64_vertex *o, float fb_h)
      * for our surface), so derive it from the NDC z at +0x18: [-1,1] -> [0,1]. */
     float ndcz  = *(const float *)(v + 0x18);
     float depth = ndcz * 0.5f + 0.5f;
-    uint32_t argb = (chan(*(const float *)(v + 0x3c)) << 24)   /* vertex alpha  */
+    uint32_t argb = (chan(*(const float *)(v + 0x3c)) << 24)   /* vertex colour alpha */
                   | (chan(*(const float *)(v + GVOFF_R)) << 16)
                   | (chan(*(const float *)(v + GVOFF_G)) <<  8)
                   |  chan(*(const float *)(v + GVOFF_B));
+#ifdef GLD_FOGSCAN
+    /* Learn the fog factor (+0x4c) vs colour alpha (+0x3c): print only when +0x4c
+     * changes.  Tells us +0x4c's fog-OFF default (if a fixed 1.0, fog could run
+     * unconditionally without the enable flag) and confirms it varies with depth. */
+    {   static uint32_t fs_last = 0xdeadbeefu;
+        uint32_t f4c = *(const uint32_t *)(v + 0x4c);
+        if (f4c != fs_last) {
+            fs_last = f4c;
+            gld_log("FOGSCAN vtx +0x4c=0x%08x (%.3f)  +0x3c=0x%08x (%.3f)\n",
+                    f4c, *(const float *)(v + 0x4c),
+                    *(const uint32_t *)(v + 0x3c), *(const float *)(v + 0x3c));
+        }
+    }
+#endif
     mach64_pack_vertex(o, x, fb_h - y, depth, w, argb);  /* GL y-up -> FB y-down */
     /* Per-vertex texcoords: GLEngine stores S,T as floats at gli-vertex +0x80/
      * +0x84 (recovered via TEXHUNT).  pack_vertex zeroed s/t; feed the raw float
@@ -59,6 +73,13 @@ void mach64_read_vertex(const void *vp, m64_vertex *o, float fb_h)
      * -- the setup engine ignores S/T unless SCALE_3D_FCN=TEXTURE. */
     o->s = (int32_t)*(const uint32_t *)(v + 0x80);
     o->t = (int32_t)*(const uint32_t *)(v + 0x84);
+    /* GL_FOG: the LT Pro sources the interpolated fog factor from the SPECULAR alpha
+     * (VERTEX_SPEC_ARGB[31:24]) -- NOT the primary vertex alpha the Rage128 reference
+     * driver assumes (HW-proven inert here).  The per-vertex fog factor is at gli-vtx
+     * +0x4c; the fog blend (fragment vs DP_FOG_CLR) is armed by SCALE_3D_CNTL
+     * ALPHA_FOG_EN=FOG (bit12) in mach64_apply_fog.  mach64_fog_on is set per-draw by
+     * mach64_bind_texture. */
+    if (mach64_fog_on) o->spec_argb = chan(*(const float *)(v + 0x4c)) << 24;
 }
 
 #define VTX(base, i)  ((const void *)((const unsigned char *)(base) + (i) * MACH64_GLIVERTEX_STRIDE))

@@ -389,6 +389,58 @@ static uint32_t mach64_blend_dst(uint32_t glf)
     }
 }
 
+/* GL_FOG (HW-verified 2026-08-25, Picture 40/41).  The mach64 has no fog table/plane
+ * the driver solves; the setup engine interpolates a per-vertex FOG FACTOR and blends
+ * the fragment against DP_FOG_CLR by it:  pixel = factor*fragment + (1-factor)*fogcolor.
+ * TWO findings diverge from the reference DRI mach64UpdateFogAttrib (which is INERT on
+ * the LT Pro -- proven: its recipe emitted perfect state but drew no fog):
+ *   1. The factor source is the SPECULAR alpha (VERTEX_SPEC_ARGB[31:24]), NOT the
+ *      primary vertex alpha the reference assumes.  mach64_read_vertex packs +0x4c
+ *      into spec alpha when mach64_fog_on.
+ *   2. FOG mode is ALPHA_FOG_EN = bit12 ONLY (0x1000).  The reference's bit11|bit12
+ *      (0x1800) was HW-proven to give NO fog; bit12-only is the mode that blends.
+ * Kept from the reference: SRC=SRC_ALPHA, DST=INV_SRC_ALPHA, clear TEX_MAP_AEN, and
+ * DP_FOG_CLR = GL_FOG_COLOR.  Mutually exclusive with GL_BLEND (both own the alpha
+ * channel), so blend wins.
+ * GL_FOG enable = gli+0x6380 bit 8 (GLD_FOGSCAN: the ONLY word that changed on
+ * glEnable(GL_FOG) was 0x6380: 0x855c0000 -> 0x855c0100).  NOT 0x6354 (dither), NOT
+ * bit24.  The per-vertex fog factor (+0x4c) reads 0.0 when fog is OFF, so the pipe MUST
+ * be gated on this enable -- an always-on pipe would fog everything (factor 0 = full fog). */
+#define GLI_FOG_ENABLE   0x6380u          /* GL_FOG enable word                   */
+#define GLI_FOG_EN_BIT   0x00000100u      /* bit 8 (recovered via GLD_FOGSCAN)    */
+#define GLI_FOG_COLOR    0x6358u          /* GL_FOG_COLOR RGBA floats (verified)  */
+
+int mach64_fog_on = 0;                    /* consumed by mach64_read_vertex       */
+
+/* Clamp a 0..1 float colour channel to a 0..255 byte. */
+static uint32_t chan_u8(float f){ int c=(int)(f*255.0f+0.5f); return c<0?0u:(c>255?255u:(uint32_t)c); }
+
+/* Is GL_FOG active for the current draw?  Requires a known enable offset, the
+ * enable bit set, and GL_BLEND OFF (blend takes precedence over fog). */
+static int mach64_fog_active(gld_context *ctx)
+{
+    if (!GLI_FOG_ENABLE) return 0;                                   /* dormant   */
+    if (mach64_gli_u32(ctx, GLI_BLEND_ENABLE) & GLI_BLEND_EN_BIT) return 0;
+    return (mach64_gli_u32(ctx, GLI_FOG_ENABLE) & GLI_FOG_EN_BIT) != 0;
+}
+
+/* Overlay the fog fields onto a SCALE_3D_CNTL value and latch DP_FOG_CLR from the
+ * gli fog colour.  Clears ALPHA_BLEND_SRC[18:16], DST[21:19], ALPHA_FOG_EN[12:11]
+ * and TEX_MAP_AEN[30], then sets FOG mode (bit12) + SRC_ALPHA/INV_SRC_ALPHA. */
+static uint32_t mach64_apply_fog(gld_context *ctx, m64_state *st, uint32_t sc)
+{
+    uint32_t r = mach64_gli_u32(ctx, GLI_FOG_COLOR + 0);
+    uint32_t g = mach64_gli_u32(ctx, GLI_FOG_COLOR + 4);
+    uint32_t b = mach64_gli_u32(ctx, GLI_FOG_COLOR + 8);
+    float rf, gf, bf;
+    __builtin_memcpy(&rf, &r, 4); __builtin_memcpy(&gf, &g, 4); __builtin_memcpy(&bf, &b, 4);
+    st->dp_fog_clr = 0xff000000u                                     /* opaque    */
+                   | (chan_u8(rf) << 16) | (chan_u8(gf) << 8) | chan_u8(bf);
+    return (sc & ~0x403f1800u)                 /* clear SRC,DST,FOG_EN,TEX_MAP_AEN */
+         | (4u << 16) | (5u << 19)             /* SRC_ALPHA | DST_INV_SRC_ALPHA    */
+         | (1u << 12);                         /* ALPHA_FOG_EN = FOG (bit12 only)  */
+}
+
 /* GL_ALPHA_TEST state (recovered via tools/mach64_alphatest -DGLD_ATSCAN):
  *   gli+0x62e0 = glAlphaFunc REF (float 0..1)
  *   gli+0x62e4 = (GL compare enum << 16) | (bit8 = GL_ALPHA_TEST enabled) */
@@ -435,6 +487,27 @@ int mach64_bind_texture(gld_context *ctx)
      * draw time); each lands in its own VRAM slot. */
     while (g_npending) mach64_upload(ctx, g_pending[--g_npending]);
 
+#ifdef GLD_FOGSCAN
+    /* Recover the GL_FOG-enable gli offset (0x6354 was disproven = dither).  Snapshot
+     * the whole pipeline-state region silently on the first draw, then print ONLY the
+     * words that changed on later draws.  tools/mach64_fogscan draws a fog-OFF frame
+     * then a fog-ON frame changing nothing else, so the delta pinpoints the enable
+     * word (a 0x01000000-style flag) alongside the fog colour at +0x6358. */
+    {   static uint32_t fs_snap[(0x6780u - 0x6200u) / 4];
+        static int fs_inited = 0;
+        uint32_t o; int any = 0;
+        for (o = 0x6200u; o < 0x6780u; o += 4) {
+            uint32_t val = mach64_gli_u32(ctx, o), idx = (o - 0x6200u) / 4;
+            if (fs_inited && val != fs_snap[idx]) {
+                if (!any) { gld_log("FOGSCAN delta:\n"); any = 1; }
+                gld_log("  gli+0x%04x: 0x%08x -> 0x%08x\n", o, fs_snap[idx], val);
+            }
+            fs_snap[idx] = val;
+        }
+        fs_inited = 1;
+    }
+#endif
+
     /* GL_COLOR_MASK (glColorMask): gli+0x63b4 holds 4 bytes R,G,B,A (each 0/1,
      * recovered via GLD_CMSCAN).  Map to DP_WRITE_MASK for the 32bpp ARGB8888 target
      * (A[31:24] R[23:16] G[15:8] B[7:0]) -- a cleared channel drops those bits so the
@@ -446,6 +519,14 @@ int mach64_bind_texture(gld_context *ctx)
                     | ((cm        & 0xffu) ? 0xff000000u : 0u);  /* A */
         if (st->dp_write_mask != wm) { st->dp_write_mask = wm; p->dirty |= MACH64_DIRTY_STATE; }
     }
+
+    /* GL_FOG: decide once per draw.  Sets mach64_fog_on so mach64_read_vertex packs
+     * the fog factor into the vertex alpha, and forces a state re-emit while fogging
+     * so DP_FOG_CLR (which aliases the 2D DP_FRGD_CLR a clear/fill may have trampled)
+     * is re-latched every fog draw. */
+    mach64_fog_on = mach64_fog_active(ctx);
+    if (mach64_fog_on) p->dirty |= MACH64_DIRTY_STATE;
+    else               st->dp_fog_clr = 0;   /* leave DP_FRGD_CLR to the 2D engine */
 
     /* Follow the app's glEnable/glDisable(GL_TEXTURE_2D). */
     tex_on = (mach64_gli_u32(ctx, GLI_TEX2D_ENABLE) & GLI_TEX2D_BIT) != 0;
@@ -472,6 +553,9 @@ int mach64_bind_texture(gld_context *ctx)
                | mach64_blend_src(bf >> 16) | mach64_blend_dst(bf & 0xffffu)
                | (1u << 11);
         }
+        /* GL_FOG (blend off, checked in mach64_fog_active): blend the fragment
+         * against DP_FOG_CLR by the interpolated per-vertex fog factor. */
+        if (mach64_fog_on) sc = mach64_apply_fog(ctx, st, sc);
         {   /* GL_ALPHA_TEST on untextured geometry: source (vertex) alpha. */
             uint32_t atc = mach64_alpha_tst(ctx, 0);
             if (st->textured || st->scale_3d_cntl != sc || st->alpha_tst_cntl != atc) {
@@ -516,6 +600,11 @@ int mach64_bind_texture(gld_context *ctx)
                  | (2u << 6) | blend | light_fcn
                  | (bound->nlevels > 1 ? 0u : (1u << 24))   /* MIP_MAP_DISABLE unless mipped */
                  | (bound->has_alpha ? (1u << 30) : 0u);   /* TEX_MAP_AEN */
+
+    /* GL_FOG on textured geometry: fog wins the alpha channel (clears TEX_MAP_AEN,
+     * "can't use texture alpha when fogging") and blends the textured fragment
+     * against DP_FOG_CLR by the per-vertex fog factor. */
+    if (mach64_fog_on) new_scale_3d = mach64_apply_fog(ctx, st, new_scale_3d);
 
     /* Re-emit the texture state when the bound texture OR the env mode changes
      * (not just on the untextured->textured transition) -- otherwise switching
