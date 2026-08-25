@@ -250,6 +250,15 @@ static int mach64_upload(gld_context *ctx, void *texobj)
 #define GLI_TEX2D_ENABLE   0x6748
 #define GLI_TEX2D_BIT      0x00000008u
 
+/* GL_TEXTURE_ENV_MODE lives in the very next gli word, at +0x674c, stored as the
+ * raw GL enum in the HIGH 16 bits (recovered via a 3-way gli diff
+ * MODULATE/REPLACE/DECAL, tools/mach64_texenv): MODULATE=0x2100, REPLACE=0x1e01,
+ * DECAL=0x2101, so the field = enum << 16. */
+#define GLI_TEX_ENV_MODE   0x674c
+#define GL_ENV_MODULATE    0x2100u
+#define GL_ENV_REPLACE     0x1e01u
+#define GL_ENV_DECAL       0x2101u
+
 /* Called from the draw path.  Uploads any pending image (so the texture is ready
  * in VRAM regardless of enable state), then -- only if the app has GL_TEXTURE_2D
  * enabled -- programs the texture registers into p->hw and enables textured state
@@ -259,7 +268,7 @@ int mach64_bind_texture(gld_context *ctx)
     mach64_priv *p = MACH64_PRIV(ctx);
     m64_state *st = &p->hw;
     mach64_tex_slot *bound;
-    uint32_t wl, hl, tex_on;
+    uint32_t wl, hl, tex_on, env, light_fcn, new_scale_3d;
 
     /* Upload any image-dirtied textures (their state objects are populated by
      * draw time); each lands in its own VRAM slot. */
@@ -280,11 +289,29 @@ int mach64_bind_texture(gld_context *ctx)
         if (st->textured) { st->textured = 0; p->dirty |= MACH64_DIRTY_STATE; }
         return 0;
     }
-    /* Re-emit the texture state when the bound texture changes (not just on the
-     * untextured->textured transition) -- otherwise switching from texA to texB
-     * leaves the hardware sampling the previous texture. */
-    if (!st->textured || st->tex_0_off != bound->off)
+    /* Map the app's GL_TEXTURE_ENV_MODE -> mach64 TEX_LIGHT_FCN (SCALE_3D_CNTL
+     * [23:22]; mesa_mach64_reg.h): REPLACE=0<<22, MODULATE=1<<22, DECAL->
+     * ALPHA_DECAL=2<<22.  For our RGB textures the texel alpha is assumed 0xff
+     * (TEX_MAP_AEN off), so ALPHA_DECAL evaluates to Ctex -- identical to REPLACE,
+     * which is exactly GL_DECAL's defined result for an RGB internal format. */
+    env = mach64_gli_u32(ctx, GLI_TEX_ENV_MODE) >> 16;
+    switch (env) {
+        case GL_ENV_REPLACE: light_fcn = 0u << 22; break;
+        case GL_ENV_DECAL:   light_fcn = 2u << 22; break;
+        default:             light_fcn = 1u << 22; break;   /* MODULATE + fallback */
+    }
+    new_scale_3d = 0x1u | (1u << 1) | (1u << 3) | (1u << 4)
+                 | (2u << 6) | (1u << 16) | light_fcn | (1u << 24);
+
+    /* Re-emit the texture state when the bound texture OR the env mode changes
+     * (not just on the untextured->textured transition) -- otherwise switching
+     * texA->texB, or MODULATE->REPLACE, leaves the hardware in the old state. */
+    if (!st->textured || st->tex_0_off != bound->off
+                      || st->tex_scale_3d != new_scale_3d) {
         p->dirty |= MACH64_DIRTY_STATE;
+        gld_log("mach64 tex: env=0x%x light_fcn=%u off=0x%x\n",
+                env, light_fcn >> 22, bound->off);
+    }
 
     p->tex_off = bound->off;
     p->tex_w   = bound->w;
@@ -311,14 +338,13 @@ int mach64_bind_texture(gld_context *ctx)
     st->tex_cntl       = (1u << 9) | (1u << 23) | (1u << 30);   /* 0x40800200 */
 
     /* SCALE_3D_CNTL textured: the shade default with TEXTURE_DISABLE(bit6)
-     * cleared turns FCN_SHADE(3<<6) into FCN_TEXTURE(2<<6).  Full set (ref,
+     * cleared turns FCN_SHADE(3<<6) into FCN_TEXTURE(2<<6).  Fixed set (ref,
      * cpp==4, nearest, no alpha): EXPAND_DYNAMIC | DITHER_2D_TABLE |
      * DITHER_INIT_RESET | ROUND_EN | FCN_TEXTURE | ALPHA_BLEND_SRC_ONE |
-     * TEX_LIGHT_FCN_MODULATE | MIP_MAP_DISABLE.  (BILINEAR/TEX_BLEND=nearest
-     * -> clear; TEX_MAP_AEN clear = RGB no alpha.) */
-    st->tex_scale_3d   = 0x1u | (1u << 1) | (1u << 3) | (1u << 4)
-                       | (2u << 6) | (1u << 16) | (1u << 22) | (1u << 24);
-                                                              /* = 0x0141009b */
+     * MIP_MAP_DISABLE, plus the env-mode-dependent TEX_LIGHT_FCN computed above.
+     * (BILINEAR/TEX_BLEND=nearest -> clear; TEX_MAP_AEN clear = RGB no alpha.)
+     * MODULATE gives the old 0x0141009b. */
+    st->tex_scale_3d   = new_scale_3d;
 
     st->textured = 1;
     return 1;
