@@ -373,8 +373,20 @@ void mach64_dispatch_complete(gld_context *ctx, const void *v, uint32_t n)
     gld_log("mach64_dispatch_complete(0x4c) v=%p n=%u\n", v, n);
     (void)ctx;
 }
-void mach64_dispatch_render_ctl(gld_context *ctx, const void *v, uint32_t n)
+/* Dispatch slot 0x60 = the SOLE render entry GLEngine uses for a DOUBLE-BUFFERED
+ * context (the per-primitive slots 0x18-0x3c and control slots 0x00-0x14 never
+ * fire for DB -- verified).  RE status (tools/mach64_dbufanim, -DGLD_DBUF):
+ *   r4 = a state buffer (const across frames though the geometry moves -> NOT the
+ *        vertex data; no heap pointer inside it),
+ *   r5 = a small count (4,6,8 seen),  r6 = 0xa8,  r7 = 0xc03,
+ *   r8 = a GLEngine FUNCTION pointer (PPC code: mflr/mtlr/blr) -- a callback.
+ * So the transformed geometry is reached via the r8 callback / an internal buffer,
+ * not the args -- recovering it needs GLEngine disassembly.  Until then a DB
+ * context renders nothing; DB advertising stays gated OFF (see gld_pixelformat). */
+void mach64_dispatch_render_ctl(gld_context *ctx, uint32_t a4, uint32_t a5,
+                                uint32_t a6, uint32_t a7, uint32_t a8)
 {
-    gld_log("mach64_dispatch_render_ctl(0x60) v=%p n=%u\n", v, n);
+    gld_log("render_ctl(0x60) r4=0x%x r5=0x%x r6=0x%x r7=0x%x r8=0x%x (DB render -- TODO)\n",
+            a4, a5, a6, a7, a8);
     (void)ctx;
 }
