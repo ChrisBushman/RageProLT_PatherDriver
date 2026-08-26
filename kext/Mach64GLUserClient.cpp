@@ -111,7 +111,7 @@ IOReturn Mach64GLUserClient::get_surface_size(UInt32 *crtc, UInt32 *base,
     *crtc  = v;
     *base  = (v & 0x3fffff) << 3;          // display start, byte offset
     *pitch = ((v >> 22) & 0x3ff) * 8;      // pitch in pixels
-    *hi    = 0;
+    *hi    = ((fProvider->crtcVTotalDisp() >> 16) & 0x7ff) + 1;  // displayed lines (height)
     return kIOReturnSuccess;
 }
 

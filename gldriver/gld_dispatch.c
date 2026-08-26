@@ -80,17 +80,16 @@ int gldUpdateDispatch(gld_context *ctx, void *table, uint32_t flags)
     SET(0x38, mach64_render_quads);        /* GL_QUADS */
     SET(0x3c, mach64_render_quad_strip);   /* GL_QUAD_STRIP */
 
-    /* Elements vector (0x40/0x44/0x48).  Plain glDrawElements is flattened by GLEngine back
+    /* Elements vectors (0x40/0x44/0x48).  Plain glDrawElements is flattened by GLEngine back
      * into the DrawArrays slots above (verified via tools/mach64_elementsprobe), so those
-     * never fire for simple indexed draws.  BUT the elements-TRIS slot (0x48) IS used for
-     * software-CLIPPED geometry: when GLEngine clips a primitive (GL_SCISSOR_TEST, or a
-     * frustum-crossing triangle) it re-dispatches the clipped convex polygon here as an
-     * ARRAY OF VERTEX POINTERS -- a different format than the flat DrawArrays slots, handled
-     * by mach64_render_elt_tris (docs/re-notes/scissor.md).  Points/lines clipping (0x40/
-     * 0x44) is not yet proven to use this format; leave the flat-array bodies as-is. */
-    SET(SLOT_ELT_POINTS, mach64_render_points);
-    SET(SLOT_ELT_LINES,  mach64_render_lines);
-    SET(SLOT_ELT_TRIS,   mach64_render_elt_tris);   /* clipped pointer-array convex polygons */
+     * never fire for simple indexed draws.  BUT these slots ARE used for software-CLIPPED
+     * geometry: when GLEngine clips a primitive (GL_SCISSOR_TEST, or a frustum crossing) it
+     * re-dispatches the survivors here as an ARRAY OF VERTEX POINTERS -- a different format
+     * than the flat DrawArrays slots -- handled by mach64_render_elt_points/lines/tris
+     * (docs/re-notes/scissor.md, tools/mach64_clipptlntest). */
+    SET(SLOT_ELT_POINTS, mach64_render_elt_points); /* clipped points (pointer array) */
+    SET(SLOT_ELT_LINES,  mach64_render_elt_lines);  /* clipped lines  (pointer-pair array) */
+    SET(SLOT_ELT_TRIS,   mach64_render_elt_tris);   /* clipped convex polygons (pointer array) */
 #endif  /* GLD_DISPATCH_PROBE */
 
     /* control slots (0x58/0x5c symbol-confirmed == gldFinish/gldFlush) */

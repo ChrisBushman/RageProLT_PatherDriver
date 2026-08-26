@@ -27,6 +27,7 @@
 #define MACH64_DST_OFF_PITCH    0x0500  /* render target base+pitch       */
 #define MACH64_CRTC_OFF_PITCH   0x0414  /* live scanout base+pitch: block(0x400)+MM 0x14 */
 #define MACH64_CRTC_VLINE_CRNT_VLINE 0x0410 /* [26:16] = current scanline (vblank sync) */
+#define MACH64_CRTC_V_TOTAL_DISP 0x0408 /* MM 0x02: V_TOTAL[10:0], V_DISP[26:16]=lines-1 */
 #define MACH64_HW_DEBUG         0x047c  /* RRG 0_1F; bit10=DBL_BUFFER_EN, bit15=BLOCK_DBL_BUF */
 #define MACH64_HW_DEBUG_DBL_BUFFER_EN 0x00000400u /* enable CRTC_OFFSET vblank double-buffer */
 #define MACH64_HW_DEBUG_BLOCK_DBL_BUF 0x00008000u /* blocks CRTC_OFFSET double-buffering     */

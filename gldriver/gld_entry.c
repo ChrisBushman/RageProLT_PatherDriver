@@ -54,23 +54,29 @@ int gldAttachDrawable(gld_context *ctx, int type, void *drawable, uint32_t flags
     {
         const uint32_t *d = (const uint32_t *)drawable;
         uint8_t *c = (uint8_t *)ctx;
-        uint32_t width  = d[1];        /* full-screen descriptor: [1]=1024   */
-        uint32_t height = d[2];        /*                         [2]=768    */
+        uint32_t width  = d[1];        /* windowed descriptor: [1]=width      */
+        uint32_t height = d[2];        /*                      [2]=height     */
         uint32_t base_bytes  = 0x600000u;   /* fallback: off-screen scratch  */
-        uint32_t pitch_bytes = width * 4;
-        uint32_t fb_pitch_px = width;
+        uint32_t pitch_bytes;
+        uint32_t fb_pitch_px;
 
-        /* Bind the LIVE display framebuffer as the render target (full-screen):
-         * read the mach64 CRTC_OFF_PITCH via the kext -> DMA lands on screen. */
+        /* Bind the LIVE display framebuffer as the render target (full-screen): read the
+         * mach64 CRTC via the kext -> DMA lands on screen.  Take the render dims from the
+         * CRTC HARDWARE (pitch = width, V_DISP+1 = height), NOT the drawable descriptor:
+         * GLEngine's fullscreen descriptor has been observed pointing at reused heap (d[2]
+         * = ASCII "path", d[1] a growing garbage value) which would leave ctx+0x1f4 junk
+         * and render everything offscreen.  The CRTC is the authoritative fullscreen size. */
         if ((type == 0x36 || type == 0x5a) && ctx->connect) {
             uint32_t crtc = 0, base = 0, pitch = 0, hi = 0;
             IOConnectMethodScalarIScalarO(ctx->connect, kMach64Sel_get_surface_size,
                                           0, 4, &crtc, &base, &pitch, &hi);
-            gld_log("  framebuffer CRTC_OFF_PITCH=0x%x -> base=0x%x pitch=%upx\n",
-                    crtc, base, pitch);
-            if (pitch) { base_bytes = base; fb_pitch_px = pitch;
-                         pitch_bytes = pitch * 4; }
+            gld_log("  framebuffer CRTC_OFF_PITCH=0x%x -> base=0x%x pitch=%upx v_disp=%u\n",
+                    crtc, base, pitch, hi);
+            if (pitch) { base_bytes = base; width = pitch;
+                         if (hi >= 16 && hi <= 4096) height = hi; }
         }
+        pitch_bytes = width * 4;
+        fb_pitch_px = width;
 
         gld_log("  drawable[0..2] = 0x%x 0x%x 0x%x  -> surface %ux%u target base=0x%x\n",
                 d[0], d[1], d[2], width, height, base_bytes);

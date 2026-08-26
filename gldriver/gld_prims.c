@@ -356,3 +356,39 @@ void mach64_render_line_loop(gld_context *ctx, const void *v, uint32_t n)
     for (i = 1; i < n; i++) draw_line(ctx, VTX(v, i-1), VTX(v, i), fb_h, w);
     if (n > 2) draw_line(ctx, VTX(v, n-1), VTX(v, 0), fb_h, w);   /* close the loop */
 }
+
+/* ---- element (clipped) point/line vectors, slots 0x40 / 0x44 -------------
+ * Like the tris case (mach64_render_elt_tris / slot 0x48), Apple's GLEngine software-clips
+ * points and lines (scissor / frustum) and re-dispatches the survivors HERE as an ARRAY OF
+ * VERTEX POINTERS (v[0..n-1] are heap addresses), not the flat contiguous array the
+ * DrawArrays slots (0x18/0x1c) receive -- HW-verified via tools/mach64_clipptlntest.  A
+ * clipped point survives unchanged (n = the surviving points); a clipped line keeps its 2
+ * endpoints (moved onto the box edge).  Each pointer targets a vertex in the usual layout,
+ * so draw_point/draw_line (which read window x,y @ +0x00/+0x04) work on the deref.  The
+ * elt_is_ptr guard skips any non-pointer entry defensively. */
+static int elt_is_ptr(uint32_t p) { return p > 0x10000u && p < 0x40000000u; }
+
+void mach64_render_elt_points(gld_context *ctx, const void *v, uint32_t n)
+{
+    const uint32_t *pa = (const uint32_t *)v;
+    float fb_h = FB_H(ctx), s = gli_size(ctx, GLI_POINT_SIZE) * 0.5f; uint32_t i;
+    PRIM_SANE(n);
+    if (!v) return;
+    mach64_sync_depth_from_gli(ctx);
+    mach64_bind_texture(ctx);
+    for (i = 0; i < n; i++)
+        if (elt_is_ptr(pa[i])) draw_point(ctx, (const void *)(uintptr_t)pa[i], fb_h, s);
+}
+void mach64_render_elt_lines(gld_context *ctx, const void *v, uint32_t n)
+{
+    const uint32_t *pa = (const uint32_t *)v;
+    float fb_h = FB_H(ctx), w = gli_size(ctx, GLI_LINE_WIDTH) * 0.5f; uint32_t i;
+    PRIM_SANE(n);
+    if (!v) return;
+    mach64_sync_depth_from_gli(ctx);
+    mach64_bind_texture(ctx);
+    for (i = 0; i + 2 <= n; i += 2)                 /* pointer pairs = clipped segments */
+        if (elt_is_ptr(pa[i]) && elt_is_ptr(pa[i+1]))
+            draw_line(ctx, (const void *)(uintptr_t)pa[i],
+                           (const void *)(uintptr_t)pa[i+1], fb_h, w);
+}

@@ -33,18 +33,37 @@ correctly.  This same path also fixes **frustum-clipped** triangles in general.
    dereferencing them gave clean box-boundary window coords -> the model above.
 
 ## Implementation
-- `gld_dispatch.c`: slot 0x48 (SLOT_ELT_TRIS) -> `mach64_render_elt_tris` (was folded into
-  the flat render_triangles / treated as dead).
-- `gld_prims.c mach64_render_elt_tris`: treat v as n vertex pointers; deref each; feed to
-  mach64_read_vertex (same y-flip/colour fold as the flat path); tessellate the convex
-  polygon as a FAN (tri(0,i-1,i) for i=2..n-1), same winding as the source primitive.
+- `gld_dispatch.c`: the elements vectors now handle clipped geometry -- slot 0x48
+  (SLOT_ELT_TRIS) -> `mach64_render_elt_tris`, 0x40 -> `mach64_render_elt_points`, 0x44 ->
+  `mach64_render_elt_lines` (all were folded into the flat bodies / treated as dead).
+- `gld_prims.c`:
+  - `mach64_render_elt_tris`: treat v as n vertex pointers; deref each; feed to
+    mach64_read_vertex (same y-flip/colour fold as the flat path); tessellate the convex
+    polygon as a FAN (tri(0,i-1,i)), same winding as the source primitive.
+  - `mach64_render_elt_points`: n pointers, one per surviving clipped point -> draw_point.
+  - `mach64_render_elt_lines`: pointer PAIRS, each a clipped segment -> draw_line.
 - `gld_texture.c`: the hardware-scissor sync block was REMOVED (GLEngine self-clips; the SC
   registers stay wide-open).  `mach64_set_scissor` in gld_state.c is now unused by the GL
   path (kept as a manual/2D HW-scissor entry point).
 
+## Point/line clipping -- DONE & HW-VERIFIED (Picture 93, tools/mach64_clipptlntest)
+GLEngine clips points/lines the same way it clips triangles and routes the survivors through
+the elements vectors 0x40 (points) / 0x44 (lines) as vertex-POINTER arrays: a clipped point
+survives unchanged (n = surviving points), a clipped line keeps its 2 endpoints moved onto
+the box edge (n = 2 x segments, consecutive pointer pairs).  Verified: glScissor(300,250,
+400,300) clips a full-width point row to the box x-span and trims crossing lines to the box.
+
+### Gotcha found on the way: the drawable descriptor is unreliable
+mach64_clipptlntest first came up BLANK because `gldAttachDrawable` read the drawable
+descriptor's width/height (d[1]/d[2]) and GLEngine had handed it a stale/aliased pointer
+(d[2] = ASCII "path", d[1] a garbage value that GREW between runs) -> ctx+0x1f4 height was
+junk -> everything rendered offscreen.  FIX: for a FULLSCREEN context (type 0x36/0x5a) the
+render target IS the live framebuffer, so take BOTH dims from the CRTC hardware -- width from
+CRTC_OFF_PITCH pitch, height from CRTC_V_TOTAL_DISP (V_DISP[26:16]+1) -- via the kext
+get_surface_size (now returns height in *hi).  The descriptor dims are used only as the
+windowed fallback.  This is a general robustness fix, not point/line-specific.
+
 ## Caveats / follow-ups
-- Points/lines clipping (elements vectors 0x40/0x44) is not yet proven to use this
-  pointer-array format; those slots keep the flat-array bodies for now.
 - mach64_render_elt_tris carries no half-texel inset (emit_tri's texture path), so a
   *textured* clipped polygon samples raw texcoords -- fine for the common untextured case.
 
