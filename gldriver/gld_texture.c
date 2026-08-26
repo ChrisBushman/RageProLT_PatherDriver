@@ -552,6 +552,29 @@ int mach64_bind_texture(gld_context *ctx)
     }
 #endif
 
+#ifdef GLD_SCISSCAN
+    /* Recover the GL_SCISSOR_TEST enable + box gli offsets.  Same snapshot-then-diff
+     * mechanism as FOGSCAN but over a WIDE window (scissor could sit outside the raster
+     * cluster).  tools/mach64_scissortest draws a scissor-OFF frame (baseline) then a
+     * scissor-ON frame with a DISTINCTIVE box glScissor(101,203,305,407) changing nothing
+     * else -- so the delta is the enable flag plus the box words.  The box is integer, so
+     * look for 101/203/305/407 (0x65/0xcb/0x131/0x197) or right=406/top=610 in the dump. */
+    {   static uint32_t sc_snap[(0x7000u - 0x5000u) / 4];
+        static int sc_inited = 0;
+        uint32_t o; int any = 0;
+        for (o = 0x5000u; o < 0x7000u; o += 4) {
+            uint32_t val = mach64_gli_u32(ctx, o), idx = (o - 0x5000u) / 4;
+            if (sc_inited && val != sc_snap[idx]) {
+                if (!any) { gld_log("SCISSCAN delta:\n"); any = 1; }
+                gld_log("  gli+0x%04x: 0x%08x -> 0x%08x  (%u -> %u)\n",
+                        o, sc_snap[idx], val, sc_snap[idx], val);
+            }
+            sc_snap[idx] = val;
+        }
+        sc_inited = 1;
+    }
+#endif
+
     /* GL_COLOR_MASK (glColorMask): gli+0x63b4 holds 4 bytes R,G,B,A (each 0/1,
      * recovered via GLD_CMSCAN).  Map to DP_WRITE_MASK for the 32bpp ARGB8888 target
      * (A[31:24] R[23:16] G[15:8] B[7:0]) -- a cleared channel drops those bits so the
@@ -563,6 +586,13 @@ int mach64_bind_texture(gld_context *ctx)
                     | ((cm        & 0xffu) ? 0xff000000u : 0u);  /* A */
         if (st->dp_write_mask != wm) { st->dp_write_mask = wm; p->dirty |= MACH64_DIRTY_STATE; }
     }
+
+    /* NOTE on GL_SCISSOR_TEST: Apple's GLEngine does T&L *and clipping* in software, so it
+     * clips scissored (and frustum-crossing) primitives itself and re-dispatches the clipped
+     * convex polygons through the elements-tris vector (slot 0x48 -> mach64_render_elt_tris)
+     * as an array of vertex pointers.  It never relies on the mach64 hardware scissor
+     * (SC_LEFT_RIGHT/SC_TOP_BOTTOM stay wide-open), so there is nothing to program here --
+     * scissor "works" by our rendering that clipped geometry correctly. */
 
     /* GL_COLOR_LOGIC_OP (glLogicOp): a datapath ROP via DP_MIX.  Takes precedence
      * over blending AND fog (GL spec: logic op disables blending), so when active we

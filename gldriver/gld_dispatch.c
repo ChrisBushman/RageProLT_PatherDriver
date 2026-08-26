@@ -80,16 +80,17 @@ int gldUpdateDispatch(gld_context *ctx, void *table, uint32_t flags)
     SET(0x38, mach64_render_quads);        /* GL_QUADS */
     SET(0x3c, mach64_render_quad_strip);   /* GL_QUAD_STRIP */
 
-    /* DrawElements vector (0x40/0x44/0x48) is DEAD: GLEngine handles indexed draws
-     * itself -- it dereferences the indices, transforms the gathered vertices into
-     * its own draw-order buffer, and dispatches to the SAME primitive slots above
-     * as DrawArrays (verified byte-for-byte via tools/mach64_elementsprobe: same
-     * slots, same args, same internal buffer 0x23a2xx -- the app's index buffer
-     * never reaches us).  So indexed rendering already works; these three installs
-     * are just defensive in case a future GLEngine build routes here. */
+    /* Elements vector (0x40/0x44/0x48).  Plain glDrawElements is flattened by GLEngine back
+     * into the DrawArrays slots above (verified via tools/mach64_elementsprobe), so those
+     * never fire for simple indexed draws.  BUT the elements-TRIS slot (0x48) IS used for
+     * software-CLIPPED geometry: when GLEngine clips a primitive (GL_SCISSOR_TEST, or a
+     * frustum-crossing triangle) it re-dispatches the clipped convex polygon here as an
+     * ARRAY OF VERTEX POINTERS -- a different format than the flat DrawArrays slots, handled
+     * by mach64_render_elt_tris (docs/re-notes/scissor.md).  Points/lines clipping (0x40/
+     * 0x44) is not yet proven to use this format; leave the flat-array bodies as-is. */
     SET(SLOT_ELT_POINTS, mach64_render_points);
     SET(SLOT_ELT_LINES,  mach64_render_lines);
-    SET(SLOT_ELT_TRIS,   mach64_render_triangles);
+    SET(SLOT_ELT_TRIS,   mach64_render_elt_tris);   /* clipped pointer-array convex polygons */
 #endif  /* GLD_DISPATCH_PROBE */
 
     /* control slots (0x58/0x5c symbol-confirmed == gldFinish/gldFlush) */

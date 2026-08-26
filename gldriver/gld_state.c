@@ -103,8 +103,12 @@ void mach64_set_depth_test(gld_context *ctx, int enable, uint32_t gl_func)
 }
 
 /* glScissor: SC_LEFT_RIGHT = (right<<16)|left, SC_TOP_BOTTOM = (bottom<<16)|top.
- * GL gives (x,y,w,h) with y up from bottom-left; the caller converts to the
- * drawable's top-left pixel box first (drawable height needed -- TODO). */
+ * GL gives (x,y,w,h) with y up from bottom-left.  NOTE: GL_SCISSOR_TEST is NOT served by
+ * the mach64 hardware scissor on this stack -- Apple's GLEngine clips scissored geometry in
+ * software and re-dispatches the clipped polygons (mach64_render_elt_tris; see
+ * docs/re-notes/scissor.md), so SC_LEFT_RIGHT/SC_TOP_BOTTOM stay wide-open.  This setter is
+ * unused by the GL path (kept as a direct-call entry point for 2D/manual HW-scissor use);
+ * it does NOT y-flip (top=y). */
 void mach64_set_scissor(gld_context *ctx, int x, int y, int w, int h)
 {
     mach64_priv *p = MACH64_PRIV(ctx);

@@ -190,6 +190,36 @@ static void emit_tri(gld_context *ctx, const void *base,
         gld_log("mach64: bogus vertex count 0x%x -- skipping primitive\n", (n)); \
         return; } } while (0)
 
+/* Elements-tris vector (dispatch slot 0x48).  Apple's GLEngine does T&L + clipping in
+ * software: when a primitive is clipped (GL_SCISSOR_TEST, or a triangle crossing the view
+ * frustum), it re-dispatches the resulting clipped CONVEX POLYGON here as an ARRAY OF
+ * VERTEX POINTERS (v[0..n-1] are uint32 addresses), NOT the flat contiguous array the
+ * DrawArrays slots receive.  Each pointer targets a vertex in the SAME layout as the flat
+ * path (window x,y @ +0x00/+0x04, colour @ +0x30..+0x3c, NDC z @ +0x18, s/t @ +0x80/+0x84),
+ * so mach64_read_vertex works on the dereferenced vertex.  The polygon is convex, so
+ * tessellate it as a triangle FAN from vertex 0 -- the same winding the source primitive
+ * had (the clip preserves it, matching the flat path's setup-engine face test).
+ * Recovered 2026-08-26 via the scissor RE (docs/re-notes/scissor.md).  Note: carries no
+ * half-texel inset (emit_tri's texture path), so a *textured* clipped polygon samples the
+ * raw texcoords -- fine for the common untextured/colour case. */
+void mach64_render_elt_tris(gld_context *ctx, const void *v, uint32_t n)
+{
+    const uint32_t *pa = (const uint32_t *)v;
+    float fb_h = (float)*(const uint32_t *)((const unsigned char *)ctx + 0x1f4);
+    m64_vertex v0, vp, vc;
+    uint32_t i;
+    PRIM_SANE(n);
+    if (!v || n < 3) return;
+    mach64_sync_depth_from_gli(ctx);
+    mach64_bind_texture(ctx);
+    mach64_read_vertex((const void *)(uintptr_t)pa[0], &v0, fb_h);   /* fan apex */
+    for (i = 2; i < n; i++) {
+        mach64_read_vertex((const void *)(uintptr_t)pa[i-1], &vp, fb_h);
+        mach64_read_vertex((const void *)(uintptr_t)pa[i],   &vc, fb_h);
+        mach64_draw_triangle(ctx, &v0, &vp, &vc);
+    }
+}
+
 /* ---- triangle family (the proven hardware path) --------------------- */
 void mach64_render_triangles(gld_context *ctx, const void *v, uint32_t n)
 {
