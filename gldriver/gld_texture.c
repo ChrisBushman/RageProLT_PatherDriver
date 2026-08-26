@@ -584,8 +584,12 @@ int mach64_bind_texture(gld_context *ctx)
     #define GLI_POLY_STIPPLE_PAT 0x665cu
     if (!lop_on && (mach64_gli_u32(ctx, GLI_POLY_STIPPLE_EN) & 0x01000000u)) {
         uint32_t r[8], k, p0, p1;
-        for (k = 0; k < 8; k++)      /* leftmost 8 px (top byte, MSB-first) of rows 0-7 */
-            r[k] = (mach64_gli_u32(ctx, GLI_POLY_STIPPLE_PAT + k * 4u) >> 24) & 0xffu;
+        /* leftmost 8 px (top byte, MSB-first == GL bit order, verified Picture 85) of the
+         * pattern rows, but with the ROW ORDER REVERSED: GL's origin is lower-left (row 0
+         * = bottom) while the mach64 pattern is top-left, so GL row 0 -> mach64 tile bottom
+         * (verified: without the flip a "/" pattern rendered as "\"). */
+        for (k = 0; k < 8; k++)
+            r[k] = (mach64_gli_u32(ctx, GLI_POLY_STIPPLE_PAT + (7u - k) * 4u) >> 24) & 0xffu;
         p0 = r[0] | (r[1] << 8) | (r[2] << 16) | (r[3] << 24);
         p1 = r[4] | (r[5] << 8) | (r[6] << 16) | (r[7] << 24);
         if (!st->stipple || st->pat_reg0 != p0 || st->pat_reg1 != p1) {

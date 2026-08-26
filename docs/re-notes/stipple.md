@@ -34,13 +34,16 @@ on it -- same as blend/fog/logicop.
 - `gld_texture.c` mach64_bind_texture: reads enable+pattern, extracts the 8x8 tile,
   sets the stipple datapath.
 
-## Known caveat (orientation)
-Verified with a symmetric horizontal-stripe pattern, which pins the row->row mapping but
-NOT the intra-tile bit order (GL default MSB-first, GL origin lower-left vs the mach64's
-top-left).  For an ARBITRARY asymmetric 8x8 the tile may be mirrored/phase-shifted.
-Since polygon stipple is a screen-aligned repeating pattern this is usually invisible,
-but a pixel-exact asymmetric pattern would need an orientation-verification pass (test
-with a distinctive 8x8 -- e.g. a single-corner bit -- and adjust the extraction).
+## Orientation -- VERIFIED + FIXED (Picture 85/86)
+Verified with two asymmetric patterns: vertical stripes (each row 0xAA) and a diagonal
+(row r bit = 0x80>>r).  Findings:
+- **No transpose**: vertical-stripe pattern -> vertical stripes (rows->rows, cols->cols).
+- **Bit order correct**: MSB-first == GL default (the diagonal started at the LEFT edge,
+  i.e. bit7 = leftmost pixel).
+- **Row order needed flipping**: the diagonal rendered "\" instead of GL's "/" -- GL's
+  origin is lower-left (pattern row 0 = bottom) but the mach64 pattern is top-left.  Fix:
+  extract mach64 tile row k from GL pattern row (7-k).  After the flip the diagonal is
+  "/" (Picture 86) = GL-correct.  So the 8x8 tile is now pixel-exact (within the 8x8 cap).
 
 ## Tooling
 `tools/mach64_stiptest.c` + `stiptest.sh` (default build = HW test; build the driver

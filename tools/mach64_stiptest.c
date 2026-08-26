@@ -25,9 +25,6 @@ int main(void)
     GLfloat lq[8] = { -0.9f,-0.6f, -0.1f,-0.6f, -0.1f,0.6f, -0.9f,0.6f };  /* left  */
     GLfloat rq[8] = {  0.1f,-0.6f,  0.9f,-0.6f,  0.9f,0.6f,  0.1f,0.6f };  /* right */
 
-    /* coarse stripes: 4 solid rows then 4 empty rows, repeated */
-    for (i = 0; i < 128; i++) stip[i] = ((i / 4) & 1) ? 0x00 : 0xff;
-
     if (!pf) { printf("no pf\n"); return 1; }
     ctx = aglCreateContext(pf, NULL);
     if (!ctx) return 1;
@@ -39,17 +36,28 @@ int main(void)
     glColor3f(1, 1, 1);
     glEnableClientState(GL_VERTEX_ARRAY);
     glClearColor(0, 0, 0.4f, 1); glClear(GL_COLOR_BUFFER_BIT);   /* blue bg */
-
-    glDisable(GL_POLYGON_STIPPLE);
-    glVertexPointer(2, GL_FLOAT, 0, lq); glDrawArrays(GL_QUADS, 0, 4);   /* LEFT: no stipple */
-
-    glPolygonStipple(stip);
     glEnable(GL_POLYGON_STIPPLE);
-    glVertexPointer(2, GL_FLOAT, 0, rq); glDrawArrays(GL_QUADS, 0, 4);   /* RIGHT: stipple on */
+
+    /* LEFT: VERTICAL stripes (each row 0xAA = columns alternate).  Detects a row<->column
+     * TRANSPOSE: correct -> vertical stripes; transposed -> horizontal stripes. */
+    for (i = 0; i < 128; i++) stip[i] = 0xAA;
+    glPolygonStipple(stip);
+    glVertexPointer(2, GL_FLOAT, 0, lq); glDrawArrays(GL_QUADS, 0, 4);
+
+    /* RIGHT: a DIAGONAL (row r's set bit = 0x80>>r, MSB-first, 8-row period).  GL's
+     * lower-left origin + MSB-first means this should draw as a "/" hatch (bottom-left
+     * to top-right).  "\" => vertical flip or bit reversal; not diagonal => transpose. */
+    for (i = 0; i < 32; i++) {
+        GLubyte b = (GLubyte)(0x80u >> (i % 8));
+        stip[i*4+0] = b; stip[i*4+1] = b; stip[i*4+2] = b; stip[i*4+3] = b;
+    }
+    glPolygonStipple(stip);
+    glVertexPointer(2, GL_FLOAT, 0, rq); glDrawArrays(GL_QUADS, 0, 4);
 
     glFlush(); glFinish();
-    printf("drew LEFT(no-stipple) + RIGHT(stipple).  RIGHT solid=HW-reachable, "
-           "striped=SW, missing=fallback-failed\n"); fflush(stdout);
+    printf("drew LEFT(vertical stripes) + RIGHT(diagonal).  LEFT vertical + RIGHT '/' "
+           "= orientation correct; horizontal LEFT=transpose; '\\' RIGHT=flip/mirror\n");
+    fflush(stdout);
     sleep(6);
     aglSetCurrentContext(NULL); aglSetDrawable(ctx, NULL);
     aglDestroyContext(ctx); aglDestroyPixelFormat(pf);
