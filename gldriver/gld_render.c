@@ -296,6 +296,10 @@ void mach64_flush_batch(gld_context *ctx)
     mach64_submit(ctx, &p->batch);
     m64_cb_init(&p->batch, p->batchbuf,
                 sizeof(p->batchbuf) / sizeof(p->batchbuf[0]));
+    /* A submit only guarantees the emitted stream ran; the next batch must re-emit the
+     * render state (don't assume it survives the submit's engine quiesce/restore).  Needed
+     * now that large geometry splits across several submits within one frame. */
+    p->dirty |= MACH64_DIRTY_STATE;
 }
 
 int mach64_draw_triangle(gld_context *ctx, const m64_vertex *v0,
@@ -325,12 +329,15 @@ int mach64_draw_triangle(gld_context *ctx, const m64_vertex *v0,
                     sizeof(p->batchbuf) / sizeof(p->batchbuf[0]));
 
     /* Flush before this triangle if the state block (~96 dwords when dirty) + the
-     * triangle (~64 dwords) might not fit -- bounded by what the shared command
-     * buffer (ctx->fb) holds when the batch is packed + kicked.  State emitted in a
-     * prior batch persists in the hardware, so a fresh batch needs no re-emit. */
+     * triangle (~64 dwords) might not fit.  HARD CAP: the bus-master descriptor's
+     * byte-count field is 12-bit -- a submit larger than 4095 bytes (~1023 dwords) is
+     * TRUNCATED by the DMA to (bytes & 0xfff) and only its first ~1KB executes (HW-proven:
+     * a 5936-byte batch drew just its first ~8 points).  So bound each batch well under
+     * 4096 bytes; larger geometry splits across multiple submits (mach64_flush_batch
+     * re-marks state dirty so each fresh batch re-emits the render state). */
     limit = ctx->fb_size / 4;
-    if (limit > 4096) limit = 4096;
-    if (limit < 256)  limit = 256;
+    if (limit > 960) limit = 960;      /* 960 dwords = 3840 bytes < 4096 DMA limit */
+    if (limit < 256) limit = 256;
     need = ((p->dirty & MACH64_DIRTY_STATE) ? 96u : 0u) + 64u;
     if (p->batch.n + need > limit - 8)
         mach64_flush_batch(ctx);

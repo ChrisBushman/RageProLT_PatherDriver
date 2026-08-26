@@ -120,6 +120,19 @@ Kernel submission specifics that work:
 The DMA-coexistence risk (async collision with ATIRagePro, no shared HW lock) is
 still handled by quiesce+save/restore — acceptable headless over SSH.
 
+### DMA byte-count limit (12-bit) -- HW-proven 2026-08-26
+The bus-master descriptor's byte-count field (ring word 8, `byteCount | DMA_HOLD_OFFSET |
+DMA_EOL`) behaves as only **12 bits** on this chip: a submit larger than **4095 bytes (~1023
+dwords)** is TRUNCATED by the DMA to `bytes & 0xfff` and only its first ~1KB of register
+writes execute.  Proven with a 24-point draw: one 5936-byte batch drew just its first ~8
+points (5936 & 0xfff = 1840 bytes), while a 3024-byte batch drew fully.  Every earlier test
+was <=2 triangles so it never surfaced.  FIX (gld_render.c mach64_draw_triangle): cap the
+per-batch flush limit to 960 dwords (3840 bytes) so large geometry splits across multiple
+submits; mach64_flush_batch re-marks the render state dirty so each fresh batch re-emits state
+(don't assume it survives a submit's quiesce/restore).  A cleaner long-term fix would chain
+multiple ring descriptors for one buffer, but per-batch splitting reuses the existing flush
+path.
+
 ### Remaining before a real GL driver
 - **gld* translation layer**: map GL state/vertex calls to these register
   streams in the GLDriver bundle (the userspace half).
