@@ -284,25 +284,27 @@ IOReturn Mach64Accelerator::setSurface(Mach64GLUserClient *c,
     (void)c; (void)b; (void)cc; (void)d;
     /* PAGE FLIP (selector 0, repurposed from the set_surface stub).  `a` is the new
      * CRTC_OFF_PITCH value ((pitch/8<<22)|(offset>>3), same encoding as DST_OFF_PITCH).
-     * The CRTC offset on this board latches ~immediately, so the flip needs BOTH: write
-     * at the top of a frame (so the switch applies top-down, not mid-scan -> less
-     * tearing) AND a post-write settle of one full frame (so the previously-shown buffer
-     * stays free long enough for the caller to reuse it -> no flashing / band-trailing).
-     * Detect frame boundaries by the scanline counter (CRTC_VLINE_CRNT_VLINE [26:16])
-     * WRAPPING (max -> 0). */
-#define M64_VLN() (((UInt32)regRead(MACH64_CRTC_VLINE_CRNT_VLINE) >> 16) & 0x7ff)
+     *
+     * Enable the CRTC-offset HARDWARE double-buffer: HW_DEBUG.DBL_BUFFER_EN (bit10) set +
+     * BLOCK_DBL_BUF (bit15) clear (RRG 0_1F).  With it, a write to CRTC_OFF_PITCH is
+     * LATCHED AT VBLANK by the hardware -- atomic, tear-free -- instead of landing
+     * mid-scan.  Idempotent read-modify-write, touches only those two bits. */
     {
-        UInt32 prev;
-        int i;
-        /* (1) wait for the top of a fresh frame */
-        prev = M64_VLN();
-        for (i = 0; i < 200000; i++) { UInt32 c = M64_VLN(); if (c < prev) break; prev = c; IODelay(5); }
-        /* (2) flip at the top */
-        regWrite(MACH64_CRTC_OFF_PITCH, a);
-        /* (3) settle one full frame: let the new base scan out and keep the old buffer free */
-        prev = M64_VLN();
-        for (i = 0; i < 200000; i++) { UInt32 c = M64_VLN(); if (c < prev) break; prev = c; IODelay(5); }
+        UInt32 hd = regRead(MACH64_HW_DEBUG);
+        UInt32 nw = (hd | MACH64_HW_DEBUG_DBL_BUFFER_EN) & ~MACH64_HW_DEBUG_BLOCK_DBL_BUF;
+        if (nw != hd) regWrite(MACH64_HW_DEBUG, nw);
     }
-#undef M64_VLN
+    regWrite(MACH64_CRTC_OFF_PITCH, a);   /* loads at the next vblank (HW double-buffered) */
+    /* Wait for that vblank load (scanline counter wraps max->0) so the previously-shown
+     * buffer is free before the caller reuses it as the next render target. */
+    {
+        UInt32 prev = ((UInt32)regRead(MACH64_CRTC_VLINE_CRNT_VLINE) >> 16) & 0x7ff;
+        for (int i = 0; i < 200000; i++) {
+            UInt32 cur = ((UInt32)regRead(MACH64_CRTC_VLINE_CRNT_VLINE) >> 16) & 0x7ff;
+            if (cur < prev) break;
+            prev = cur;
+            IODelay(5);
+        }
+    }
     return kIOReturnSuccess;
 }

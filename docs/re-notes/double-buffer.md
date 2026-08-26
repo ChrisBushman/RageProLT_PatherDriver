@@ -193,12 +193,19 @@ flashing; tools/dbflip.sh, mach64_dbanim).  Implementation:
   flip to (all MATCH, non-empty batches) -- the alternation is correct; the earlier
   "flashing" was flip-vs-scanout TIMING, resolved by the synchronous wait-for-wrap flip.
 - Encoding: CRTC_OFF_PITCH = (pitch/8<<22)|(off>>3), same as DST_OFF_PITCH.
-- Known nuance: the CRTC offset appears to latch immediately (not vblank-double-buffered)
-  on this board, so fast motion can still show minor tearing.  A fully tear-free flip
-  would write CRTC_OFF_PITCH strictly within the vblank window (measure the max scanline,
-  write when scanline >= ~98% of it) OR set HW_DEBUG.DBL_BUFFER_EN (bit unknown; needs
-  the RRG HW_DEBUG page image, reg 0x1F).  A first vblank-window attempt mis-timed and
-  flashed; the wait-for-wrap flip is the stable baseline.
+- **TEAR-FREE via HW_DEBUG.DBL_BUFFER_EN** (2026-08-26).  The CRTC offset does NOT
+  vblank-latch by default; enabling the hardware double-buffer makes the write latch at
+  vblank atomically.  HW_DEBUG = reg 0x047c (RRG 0_1F -> 0x400 + 0x1F*4).  Bits confirmed
+  from the RRG HW_DEBUG page image (PDF p.87/88): **bit10 = DBL_BUFFER_EN** (set),
+  **bit15 = BLOCK_DBL_BUF** (clear).  setSurface does an idempotent RMW of just those two
+  bits before writing CRTC_OFF_PITCH.  Result HW-verified: the moving triangle is WHOLE,
+  no tearing.  (Screenshots still show a "staircase" -- that's a screen-CAPTURE artifact:
+  the grabber reads the WindowServer framebuffer at 0x1000, which is our HIDDEN mid-render
+  buffer half the time.  The LIVE display is clean.)
+- Remaining: motion is CHOPPY (low framerate), a PERF matter not correctness -- the flip
+  is synchronous (waits a full vblank for the offset to load + frees the buffer) and each
+  DMA submit waits for idle.  Speedups (later): poll the flip-pending status instead of a
+  full wrap-wait, and/or overlap CPU/GPU with a split command buffer.
 
 ## Fallback that works today
 Force dbuf for ALL (single-buffer) contexts — no DB pixel format, no 0x60: the
