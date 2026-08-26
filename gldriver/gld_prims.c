@@ -67,12 +67,20 @@ void mach64_read_vertex(const void *vp, m64_vertex *o, float fb_h)
     }
 #endif
     mach64_pack_vertex(o, x, fb_h - y, depth, w, argb);  /* GL y-up -> FB y-down */
-    /* Per-vertex texcoords: GLEngine stores S,T as floats at gli-vertex +0x80/
-     * +0x84 (recovered via TEXHUNT).  pack_vertex zeroed s/t; feed the raw float
-     * bits (the engine multiplies by W via TEX_ST_MULT_W).  Harmless untextured
-     * -- the setup engine ignores S/T unless SCALE_3D_FCN=TEXTURE. */
-    o->s = (int32_t)*(const uint32_t *)(v + 0x80);
-    o->t = (int32_t)*(const uint32_t *)(v + 0x84);
+    /* Per-vertex texcoords.  GLEngine hands us PERSPECTIVE-PREMULTIPLIED coords: +0x80/+0x84
+     * hold S/w and T/w, and +0x0c holds 1/w (HW-proven via the cube test).  But the mach64
+     * setup engine (with TEX_ST_DIRECT clear, our config) expects RAW S,T and does the
+     * perspective divide itself -- address = interp(S*W)/interp(W) with W = 1/w -- so feeding
+     * it the already-divided S/w makes it divide TWICE (address = S/w) and the texture warps
+     * with perspective.  Un-premultiply here: raw S = (S/w)/(1/w).  (2D was immune: w=1.)
+     * pack_vertex already put W = 1/w (from +0x0c) into o->w for the engine's divide. */
+    {   float sw = *(const float *)(v + 0x80);   /* S/w */
+        float tw = *(const float *)(v + 0x84);   /* T/w */
+        float rs = (w != 0.0f) ? sw / w : sw;    /* w == 1/w_clip (from +0x0c) -> raw S */
+        float rt = (w != 0.0f) ? tw / w : tw;
+        __builtin_memcpy(&o->s, &rs, 4);
+        __builtin_memcpy(&o->t, &rt, 4);
+    }
     /* GL_FOG: the LT Pro sources the interpolated fog factor from the SPECULAR alpha
      * (VERTEX_SPEC_ARGB[31:24]) -- NOT the primary vertex alpha the Rage128 reference
      * driver assumes (HW-proven inert here).  The per-vertex fog factor is at gli-vtx
