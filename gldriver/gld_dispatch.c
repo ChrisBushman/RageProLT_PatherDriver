@@ -137,6 +137,10 @@ int gldUpdateDispatch(gld_context *ctx, void *table, uint32_t flags)
              * as ONE submit.  Z clear self-gates on Z_EN (its own submit only when depth
              * is on); the colour clear is emitted straight into the batch, ahead of this
              * frame's triangles. */
+            /* Keep the Z clear as its OWN submit (not folded into the batch): it overlaps
+             * the pending page-flip / vblank dead time and is effectively free there --
+             * folding it into the geometry submit serialised it into the critical path and
+             * measured ~7ms/frame SLOWER (HW-timed).  So the separate submit wins. */
             if (p->z_off) mach64_clear_zbuffer(ctx);
             mach64_batch_clear_color(ctx);        /* clear folded into the triangle batch */
             p->frame_new = 0;

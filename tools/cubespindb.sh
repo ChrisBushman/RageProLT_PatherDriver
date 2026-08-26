@@ -4,6 +4,8 @@
 # complete frame each swap -- no single-buffered tearing.  PASS = a smooth spinning solid
 # cube, correctly occluded, no flicker/tearing.  Run on the Lombard:  sudo sh tools/cubespindb.sh
 DIR=`cd \`dirname "$0"\` && pwd`; ROOT=`cd "$DIR/.." && pwd`; B=Mach64Accelerator.kext
+# Rebuilds the kext too (HW_DEBUG auto-fast-fill/block-write enable in start()).
+( cd "$ROOT/kext" && make clean >/dev/null 2>&1; make kext ) || { echo "KEXT BUILD FAILED"; exit 1; }
 ( cd "$ROOT/gldriver" && make clean >/dev/null 2>&1; \
   make CFLAGS="-O2 -Wall -std=gnu99 -I.. -DGLD_DBUF" bundle ) || exit 1
 GLB="$ROOT/gldriver/ATIRageProGLDriver.bundle"

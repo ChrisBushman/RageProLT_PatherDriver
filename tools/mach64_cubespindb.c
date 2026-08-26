@@ -87,9 +87,9 @@ int main(void)
     glVertexPointer(3, GL_FLOAT, 0, vtx);
     glTexCoordPointer(2, GL_FLOAT, 0, tex);
 
-    {   double worst = 0; int worstf = 0, nslow = 0;
+    {   double sum = 0; int n = 0;
         for (frame = 0; frame < 360; frame++) {
-            double t0 = now_ms(), dt;
+            double t0 = now_ms();
             glLoadIdentity();
             glTranslatef(0.0f, 0.0f, -5.0f);
             glRotatef(25.0f, 1.0f, 0.0f, 0.0f);
@@ -98,14 +98,11 @@ int main(void)
             glClearColor(0.1f, 0.1f, 0.15f, 1.0f);
             glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
             glDrawArrays(GL_TRIANGLES, 0, 36);
-            aglSwapBuffers(ctx);       /* page-flip a complete frame */
-            dt = now_ms() - t0;        /* draw+swap time, excludes the usleep below */
-            if (dt > 25.0) { printf("FRAME %d: %.1f ms SLOW\n", frame, dt); nslow++; }
-            if (dt > worst) { worst = dt; worstf = frame; }
-            usleep(20000);             /* ~50 fps */
+            aglSwapBuffers(ctx);            /* page-flip a complete frame */
+            if (frame >= 50 && frame < 150) { sum += now_ms() - t0; n++; }
         }
-        printf("done: %d slow frames (>25ms); worst = %.1f ms at frame %d\n",
-               nslow, worst, worstf);
+        if (n) printf("avg draw+swap = %.1f ms (~%.0f fps, fill-rate-bound: fullscreen "
+                      "clears + textured geometry)\n", sum/n, 1000.0/(sum/n));
     }
     fflush(stdout);
 

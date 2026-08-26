@@ -106,6 +106,19 @@ bool Mach64Accelerator::start(IOService *provider)
     fConfig0 = 0;
     fConfig1 = 0x00800000;   /* 8 MB VRAM (verified on this Lombard)         */
 
+    /* Enable the engine's AUTO-fast-fill and AUTO-block-write (HW_DEBUG bits 12/13 are the
+     * *_DIS bits, 0 = enabled -- RRG 0_1F).  With them on, solid fills (every frame's
+     * full-screen colour + Z clears) run at memory bandwidth via SGRAM fast-fill instead of
+     * pixel-by-pixel, which is the dominant per-frame cost for animation.  We own the engine
+     * exclusively (GA plugin removed), so a global HW_DEBUG tweak is safe. */
+    {
+        UInt32 hd = regRead(MACH64_HW_DEBUG);
+        UInt32 nw = hd & ~(MACH64_HW_DEBUG_AUTO_FF_DIS | MACH64_HW_DEBUG_AUTO_BLKWRT_DIS);
+        IOLog("Mach64Accelerator: HW_DEBUG 0x%08lx -> 0x%08lx (enable auto fast-fill/block-write)\n",
+              (unsigned long)hd, (unsigned long)nw);
+        if (nw != hd) regWrite(MACH64_HW_DEBUG, nw);
+    }
+
     IOLog("Mach64Accelerator: started on %s\n", fPCI->getName());
     registerService();
     return true;

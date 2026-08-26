@@ -31,6 +31,8 @@
 #define MACH64_HW_DEBUG         0x047c  /* RRG 0_1F; bit10=DBL_BUFFER_EN, bit15=BLOCK_DBL_BUF */
 #define MACH64_HW_DEBUG_DBL_BUFFER_EN 0x00000400u /* enable CRTC_OFFSET vblank double-buffer */
 #define MACH64_HW_DEBUG_BLOCK_DBL_BUF 0x00008000u /* blocks CRTC_OFFSET double-buffering     */
+#define MACH64_HW_DEBUG_AUTO_FF_DIS   0x00001000u /* bit12: 1=disable engine auto-fast-fills  */
+#define MACH64_HW_DEBUG_AUTO_BLKWRT_DIS 0x00002000u /* bit13: 1=disable engine auto-block-writes */
 #define MACH64_SCALE_3D_CNTL    0x05fc  /* blend/fog/tex-func/dither      */
 #define MACH64_TEX_0_OFF        0x05c0  /* primary texture base           */
 #define MACH64_SECONDARY_TEX_OFF 0x0778
