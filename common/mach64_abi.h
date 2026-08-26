@@ -52,8 +52,8 @@ enum {
  * (or 'S' = variable-size struct).
  */
 enum {
-    kMach64Sel_set_surface        = 0,  /* ScalarI_StructI  in=4          */
-    kMach64Sel_set_swap_rect      = 1,  /* ScalarI_StructI  in=4          */
+    kMach64Sel_set_surface        = 0,  /* page-flip write: ScalarI_ScalarO in=1  */
+    kMach64Sel_wait_flip          = 1,  /* deferred flip wait: ScalarI_ScalarO in=0 */
     kMach64Sel_set_swap_interval  = 2,  /* ScalarI_StructI  in=2          */
     kMach64Sel_get_config         = 3,  /* ScalarI_ScalarO  in=0 out=3    */
     kMach64Sel_get_status         = 4,  /* ScalarI_ScalarO  in=0 out=1    */

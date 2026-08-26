@@ -202,10 +202,22 @@ flashing; tools/dbflip.sh, mach64_dbanim).  Implementation:
   no tearing.  (Screenshots still show a "staircase" -- that's a screen-CAPTURE artifact:
   the grabber reads the WindowServer framebuffer at 0x1000, which is our HIDDEN mid-render
   buffer half the time.  The LIVE display is clean.)
-- Remaining: motion is CHOPPY (low framerate), a PERF matter not correctness -- the flip
-  is synchronous (waits a full vblank for the offset to load + frees the buffer) and each
-  DMA submit waits for idle.  Speedups (later): poll the flip-pending status instead of a
-  full wrap-wait, and/or overlap CPU/GPU with a split command buffer.
+### Perf pass (2026-08-26) -- "much smoother"
+- **One DMA submit per frame** (was 3): the Z clear self-gates on Z_EN (skips its whole
+  submit when depth is off), and the colour clear is emitted INTO the triangle batch
+  (mach64_batch_clear_color) so clear+geometry go out as one kick.  Each submit quiesces
+  and waits the engine, so this was the dominant cost.
+- **Deferred vblank wait**: mach64_flip now only WRITES CRTC_OFF_PITCH and records the
+  flip pending (kext fFlipPending/fFlipScanline); the wait moved to a new kext call
+  (selector 1, waitFlip) invoked at the START of the next frame -- after GLEngine has
+  dispatched that frame's geometry -- so the ~vblank wait overlaps that dispatch instead
+  of stalling in the flip.  Buffer-free is still guaranteed (we wait for the previous
+  flip to retire before reusing its buffer).  Marginal on the 1-triangle demo (tiny
+  dispatch), bigger on real geometry.
+- NOT done (deliberately): overlapping the DMA submit itself with the vblank wait -- the
+  submit's quiesce+save/restore warns of an async-collision reboot risk, and the DMA is
+  microseconds for small draws anyway.  Triple buffering would remove the flip wait from
+  the critical path but 3x 1024x768x32 = 9MB > 8MB VRAM, so it does not fit.
 
 ## Fallback that works today
 Force dbuf for ALL (single-buffer) contexts — no DB pixel format, no 0x60: the

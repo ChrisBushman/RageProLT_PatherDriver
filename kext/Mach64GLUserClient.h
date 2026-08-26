@@ -38,7 +38,8 @@ public:
     IOReturn get_status(UInt32 *status);                               // sel 4
     IOReturn get_surface_size(UInt32 *crtc, UInt32 *base, UInt32 *pitch, UInt32 *hi); // sel 5
     IOReturn set_surface(UInt32 surfaceID, UInt32 modeBits,
-                         UInt32 a, UInt32 b);                          // sel 0
+                         UInt32 a, UInt32 b);                          // sel 0 (page-flip write)
+    IOReturn wait_flip(void);                                          // sel 1 (deferred flip wait)
     IOReturn new_vertex_buffer(UInt32 size, UInt32 *bufferID);         // sel 15
     IOReturn delete_vertex_buffer(UInt32 bufferID);                    // sel 16
     IOReturn finish(void);                                             // sel 8

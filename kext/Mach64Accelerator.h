@@ -44,6 +44,8 @@ class Mach64Accelerator : public IOService
     IOLock                   *fLock;      // serialize submits from our clients
     volatile UInt32           fCompletedStamp; // highest retired stamp
     UInt32                    fCmdBufSize;     // bytes in the command buffer
+    UInt32                    fFlipPending;    // 1 => a page flip was written, not yet retired
+    UInt32                    fFlipScanline;   // scanline at the flip write (vblank-load detect)
 
     // ---- register / ring MMIO helpers (little-endian, see mach64_regs.h) --
     UInt32 regRead (UInt32 off) const;
@@ -83,6 +85,7 @@ public:
     UInt32   engineStatus(void);
     IOReturn setSurface(Mach64GLUserClient *c,
                         UInt32 a, UInt32 b, UInt32 cc, UInt32 d);
+    IOReturn waitFlip(void);   // block until a pending page flip has retired (vblank loaded)
 };
 
 #endif /* MACH64_ACCELERATOR_H */

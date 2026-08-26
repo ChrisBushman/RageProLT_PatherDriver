@@ -231,6 +231,17 @@ void mach64_flip(gld_context *ctx, uint32_t off)
     IOConnectMethodScalarIScalarO(ctx->connect, kMach64Sel_set_surface, 1, 0, val);
 }
 
+/* Block until the pending page flip has retired (loaded at vblank) so the buffer it
+ * freed is safe to reuse.  mach64_flip no longer waits -- it just writes CRTC_OFF_PITCH
+ * and records the flip pending; this wait is called at the START of the next frame,
+ * AFTER GLEngine has already dispatched that frame's geometry, so the ~vblank wait
+ * overlaps that dispatch instead of stalling inside the flip. */
+void mach64_wait_flip(gld_context *ctx)
+{
+    if (!ctx->connect) return;
+    IOConnectMethodScalarIScalarO(ctx->connect, kMach64Sel_wait_flip, 0, 0);
+}
+
 /* ---- screen-to-screen (VRAM->VRAM) blit via the 2D GUI engine --------
  * Copy a w x h pixel box: source box at (sx,sy) in src_off -> dest box at
  * (dx,dy) in dst_off, both byte offsets in VRAM, pitch in 32-bit pixels.  Recipe

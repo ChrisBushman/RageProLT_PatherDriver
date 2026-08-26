@@ -144,6 +144,7 @@ void mach64_blit_surface(gld_context *ctx, uint32_t src_off, uint32_t dst_off,
 void mach64_set_texheap(uint32_t base, uint32_t end);
 void mach64_present(gld_context *ctx);   /* double-buffer back->front swap */
 void mach64_flip(gld_context *ctx, uint32_t off);   /* page-flip CRTC scanout to `off` */
+void mach64_wait_flip(gld_context *ctx);            /* block until the pending flip retired */
 void mach64_sync_depth_from_gli(gld_context *ctx);
 uint32_t mach64_gli_u32(gld_context *ctx, uint32_t off);   /* read a gli field */
 void mach64_set_scissor(gld_context *ctx, int x, int y, int w, int h);

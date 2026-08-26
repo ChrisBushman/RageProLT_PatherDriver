@@ -123,9 +123,13 @@ int gldUpdateDispatch(gld_context *ctx, void *table, uint32_t flags)
              * this frame to the hidden buffer (render_off), flip the CRTC scanout to
              * it (loads at vblank -- tear-free, zero-copy), then swap roles and clear
              * the newly-hidden buffer for the next frame.  Alternates front<->back. */
-            mach64_flush_batch(ctx);              /* submit prev frame: clear+geometry, 1 DMA */
-            mach64_flip(ctx, p->render_off);      /* scanout -> render_off (waits for the
-                                                   * scanline wrap so the buffer is free) */
+            /* DEFERRED-WAIT present: wait for the PREVIOUS frame's flip to retire HERE --
+             * at the frame boundary, after GLEngine has already dispatched this frame's
+             * geometry -- so the ~vblank wait overlaps that dispatch instead of stalling
+             * inside the flip.  Then render_off (freed by that flip) is safe to draw. */
+            mach64_wait_flip(ctx);                /* wait prev flip (overlapped w/ dispatch) */
+            mach64_flush_batch(ctx);              /* this frame: clear+geometry, 1 DMA -> render_off */
+            mach64_flip(ctx, p->render_off);      /* write CRTC, record pending (no wait) */
             p->render_off = (p->render_off == p->front_off) ? p->back_off
                                                             : p->front_off;
             mach64_set_render_target(ctx, p->render_off, p->fb_pitch);

@@ -25,7 +25,7 @@ bool Mach64GLUserClient::start(IOService *provider)
     /* The 17-selector table (indices/counts verified from the Rage128 kext). */
     IOExternalMethod tbl[kMach64Sel_COUNT] = {
         M(set_surface,        kIOUCScalarIScalarO, 1, 0),               // 0: page-flip (CRTC_OFF_PITCH)
-        /* set_swap_rect */   M(set_surface,       kIOUCScalarIStructI, 4, 0), // 1 (stub->reuse)
+        M(wait_flip,          kIOUCScalarIScalarO, 0, 0),               // 1: deferred flip wait
         /* set_swap_interval*/M(set_surface,       kIOUCScalarIStructI, 2, 0), // 2
         M(get_config,         kIOUCScalarIScalarO, 0, 3),               // 3
         M(get_status,         kIOUCScalarIScalarO, 0, 1),               // 4
@@ -133,6 +133,7 @@ IOReturn Mach64GLUserClient::wait_for_stamp(UInt32 stamp)
 IOReturn Mach64GLUserClient::finish(void)                     { return fProvider->waitForIdle(); }
 IOReturn Mach64GLUserClient::get_status(UInt32 *s)            { *s = fProvider->engineStatus(); return kIOReturnSuccess; }
 IOReturn Mach64GLUserClient::set_surface(UInt32 a,UInt32 b,UInt32 c,UInt32 d){ return fProvider->setSurface(this,a,b,c,d); }
+IOReturn Mach64GLUserClient::wait_flip(void){ return fProvider->waitFlip(); }
 IOReturn Mach64GLUserClient::delete_vertex_buffer(UInt32 id)  { return fProvider->freeCommandBuffer(this,id); }
 IOReturn Mach64GLUserClient::clientClose(void)               { terminate(); return kIOReturnSuccess; }
 bool Mach64GLUserClient::initWithTask(task_t t, void *sid, UInt32 type)

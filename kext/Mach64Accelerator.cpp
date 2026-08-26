@@ -96,6 +96,8 @@ bool Mach64Accelerator::start(IOService *provider)
     fLock    = IOLockAlloc();
     if (!fLock) return false;
     fCompletedStamp = 0;
+    fFlipPending    = 0;
+    fFlipScanline   = 0;
     fCmdBufSize     = 0x10000;   /* must match the fCmdBuf allocation above */
 
     fStamp   = 0;
@@ -295,16 +297,31 @@ IOReturn Mach64Accelerator::setSurface(Mach64GLUserClient *c,
         if (nw != hd) regWrite(MACH64_HW_DEBUG, nw);
     }
     regWrite(MACH64_CRTC_OFF_PITCH, a);   /* loads at the next vblank (HW double-buffered) */
-    /* Wait for that vblank load (scanline counter wraps max->0) so the previously-shown
-     * buffer is free before the caller reuses it as the next render target. */
+    /* DEFERRED WAIT: do NOT block for the vblank load here.  Record the flip as pending
+     * and the current scanline; the caller (driver) does its next-frame work (GLEngine
+     * geometry dispatch, batch build) and then calls waitFlip() right before it reuses
+     * the just-freed buffer -- so the vblank wait overlaps that work instead of being
+     * pure dead time in the flip. */
+    fFlipScanline = ((UInt32)regRead(MACH64_CRTC_VLINE_CRNT_VLINE) >> 16) & 0x7ff;
+    fFlipPending  = 1;
+    return kIOReturnSuccess;
+}
+
+/* Block until a pending page flip has retired (loaded at vblank), detected by the
+ * scanline counter wrapping (max -> 0) since the flip write.  No-op if none pending.
+ * Called by the driver just before it reuses the previously-shown buffer. */
+IOReturn Mach64Accelerator::waitFlip(void)
+{
+    if (!fFlipPending) return kIOReturnSuccess;
     {
-        UInt32 prev = ((UInt32)regRead(MACH64_CRTC_VLINE_CRNT_VLINE) >> 16) & 0x7ff;
+        UInt32 prev = fFlipScanline;
         for (int i = 0; i < 200000; i++) {
             UInt32 cur = ((UInt32)regRead(MACH64_CRTC_VLINE_CRNT_VLINE) >> 16) & 0x7ff;
-            if (cur < prev) break;
+            if (cur < prev) break;   /* wrapped -> vblank passed, flip loaded */
             prev = cur;
             IODelay(5);
         }
     }
+    fFlipPending = 0;
     return kIOReturnSuccess;
 }
