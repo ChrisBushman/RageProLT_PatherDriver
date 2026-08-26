@@ -44,9 +44,14 @@ void mach64_read_vertex(const void *vp, m64_vertex *o, float fb_h)
     float x = *(const float *)(v + GVOFF_X);
     float y = *(const float *)(v + GVOFF_Y);
     float w = *(const float *)(v + GVOFF_W);
-    /* Depth: the screen-Z slot (+0x08) is 0 (GLEngine's depth range is degenerate
-     * for our surface), so derive it from the NDC z at +0x18: [-1,1] -> [0,1]. */
-    float ndcz  = *(const float *)(v + 0x18);
+    /* Depth for the Z buffer.  The screen-Z slot (+0x08) is 0 (GLEngine's window depth range
+     * is degenerate for our surface), so derive it from +0x18.  +0x18 is CLIP-space z
+     * (pre-perspective-divide); the true NDC z is clip_z / w = clip_z * (1/w), and +0x0c
+     * holds 1/w.  (This used to treat +0x18 as NDC z directly -- correct for 2D/ortho where
+     * w=1, but in perspective it left z well outside [-1,1] so depth clamped to the far plane
+     * across much of the scene -> everything at max Z -> Z-fighting that flickered once a
+     * textured cube rotated.)  window z = ndc_z*0.5 + 0.5 (default depth range). */
+    float ndcz  = *(const float *)(v + 0x18) * w;   /* w == 1/w_clip (from +0x0c) */
     float depth = ndcz * 0.5f + 0.5f;
     uint32_t argb = (chan(*(const float *)(v + 0x3c)) << 24)   /* vertex colour alpha */
                   | (chan(*(const float *)(v + GVOFF_R)) << 16)
@@ -98,8 +103,8 @@ void mach64_read_vertex(const void *vp, m64_vertex *o, float fb_h)
 static void pack_at(const void *vp, float gx, float gy, float fb_h, m64_vertex *o)
 {
     const unsigned char *v = (const unsigned char *)vp;
-    float depth = *(const float *)(v + 0x18) * 0.5f + 0.5f;   /* NDC z -> [0,1] */
-    float w     = *(const float *)(v + GVOFF_W);
+    float w     = *(const float *)(v + GVOFF_W);              /* 1/w_clip */
+    float depth = *(const float *)(v + 0x18) * w * 0.5f + 0.5f; /* clip_z*(1/w) -> NDC -> [0,1] */
     uint32_t argb = (chan(*(const float *)(v + GVOFF_R)) << 16)
                   | (chan(*(const float *)(v + GVOFF_G)) <<  8)
                   |  chan(*(const float *)(v + GVOFF_B));
