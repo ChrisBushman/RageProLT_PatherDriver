@@ -114,6 +114,79 @@ region of 0x9xxxxxxx pointers.  This is a multi-session RE; the mechanism (type-
 back-buffer attach calling a GLEngine-populated registry[5] surface fn) is solid, but
 the registry's source hasn't been located yet.
 
+## DECISIVE (2026-08-25): full reference disasm -- it's a GLI FLAG, not the dispatch table
+Disassembled the ENTIRE reference ATIRage128GLDriver swap/DB path (capstone PPC,
+scratchpad disppc.py/macho.py/sel.py).  Key corrections + findings:
+
+- **gldFlushBuffer @0x4644 is a NO-OP (`blr`).**  nm was off-by-4: 0x4644=gldFlushBuffer
+  (blr), 0x4648=gldCreateContext.  The reference does **NO present work at the GLD swap
+  hook**.  It neither page-flips nor blits nor calls a "swap" kext selector -- there is
+  NO CRTC/display-base register write, NO blit, NO (pitch<<22)|off encoding anywhere in
+  __text (scanned all immediates).  **Presentation is delegated to the kernel surface
+  manager / WindowServer (IOFramebuffer side), not the GLD.**  gldFlush/gldFinish only
+  SUBMIT the command DMA buffer (IOConnectMapMemory memtype 1 remap = kick+refresh);
+  gldFinish additionally calls kext selector 8 (wait-idle).
+- **The DB dispatch gate is a FLAG in the GLEngine gli, NOT a dispatch slot.**  slot 0x60
+  stays a `blr` no-op.  On a type-0x36 attach, sub_a524(ctx,&caps,r5=0) does:
+  `*(*(ctx+0x14)) |= 2`  (set bit1 of word0 of the object at ctx+0x14 = **a7/r7** from
+  gldCreateContext), plus `ctx+0x1e4 = 1`, and the 0x36 path REQUIRES caps bit 0x20
+  (ctx+0x2c) CLEAR.  GLEngine reads that gli flag to decide the context has a bound
+  back-buffer surface -> dispatches primitives normally instead of routing to slot 0x60.
+  (The GLEngine-side check is in the stripped framework, but the driver-side state to
+  reproduce is now pinned: caps-0x20-clear + *(a7)|=2 + ctx+0x1e4=1.)
+- **CORRECTION to the earlier note:** the registry[5] surface-fn `bctrl` is in the
+  0x50/0x5a (window/fullscreen) path, NOT the 0x36 back-buffer path.  0x36 drives kext
+  selectors directly.
+- **Kext user-client selector map** (from r4 at every io_connect_method site):
+  0=configure surface into pipe (structI), 3=buffer info (3 scalars), 4=front+back
+  handles (status bit0 + 2 handles -> ctx+0x94/0x98), 5=surface geometry {id,id,base,
+  pitch -> ctx+0x1f0/0x1f4}, 6=renderer info, **7=allocate/register back-buffer surface**
+  (in: renderer-id byte, caps&0x803f), 8=finish/wait-idle, 9/a/b=texture, 0xf=fence.
+  NO swap/flip/present selector exists.  Front/back buffers are KEXT-allocated (selector
+  7), not userspace -- offset/pitch come back via selector 5.
+
+### Implemented experiment (2026-08-25): set the gli flag on type-0x36 attach
+gldCreateContext now stores a7 at ctx+0x14; gldAttachDrawable type-0x36 sets
+`*(a7)|=2`, ctx+0x1e4=1, clears caps 0x20 (all logged `[DB-gate]`).  We still render to
+our OWN back buffer + present via our blit/page-flip (our minimal kext has no kernel
+surface manager, so unlike the reference WE must present).  TEST: tools/dbgate.sh
+(build -DGLD_DBUF, mach64_dbgate draws an RGB triangle on a real AGL_DOUBLEBUFFER
+context).  PASS = triangle renders (GLEngine dispatched primitives); FAIL = black
+(still slot 0x60).  If it works, the register-guide CRTC_OFF_PITCH page-flip (0x414,
+HW-double-buffered at vblank, encoding = DST_OFF_PITCH) replaces the present blit.
+
+## BREAKTHROUGH (2026-08-25/26): DB dispatch routing CRACKED
+Setting the gli flag (`*(a7)|=2` on the type-0x36 attach, above) WORKS: GLEngine now
+dispatches a real AGL_DOUBLEBUFFER context's geometry to our primitive slots (Picture
+43: a clean RGB triangle on a DB context; verified geometry correct, 81 render_triangles
+dispatched).  The historic "routes to slot 0x60" blocker is SOLVED.  gldFlushBuffer/
+gldFlush/gldFinish are NEVER called for a fullscreen DB context (confirmed: all 0) --
+GLEngine only re-invokes gldUpdateDispatch per frame (the frame boundary), so the
+present cycle is driven from gldUpdateDispatch (flush batch -> present -> clear back).
+
+### Remaining: present-side accumulation, ISOLATED to the back/blit path
+A DB swap-chain animation (tools/mach64_dbanim, -DGLD_DBUF) renders but ACCUMULATES ~4
+frames with a diagonal offset.  Ruled out with evidence: geometry (tri coords are a
+clean horizontal sweep), the clear (a green-fill diagnostic gave a uniform green bg ->
+clear+present work), batching (1 tri/frame), fencing (mach64_submit waits for idle),
+the kext cmd buffer (single synchronous buffer, no re-exec), and DST_WIDTH_HEIGHT field
+order (matches the reference `(h<<16)|w`).  DECISIVE isolation (render-direct-to-FRONT
+diagnostic, Picture 50/51): rendering the DB context straight to the front buffer (no
+back, no blit) is CLEAN -- no accumulation, only tearing/pulsing from unsynced scanout.
+So the accumulation is a HW interaction in the **back-buffer render + blit-present**
+path (mach64_present -> mach64_blit_surface, looped), not the clear/geometry.  The blit
+matches the DRI reference and works in isolation (blittest, Picture 22), so it's a
+loop/address-specific quirk not crackable from userspace reasoning.
+
+### FIX PLAN: page-flip via CRTC_OFF_PITCH (register-guide-derived, sidesteps the blit)
+The LT Pro CRTC offset is HW-double-buffered (loads at vblank; RRG BLOCK_DBL_BUF).  So
+replace the blit-present with a page flip: render to the back buffer, then write
+CRTC_OFF_PITCH = (pitch/8<<22)|(back>>3) to switch scanout to it at vblank, and swap
+front/back roles (alternate the render target).  This kills BOTH the accumulation (no
+blit) and the tearing (vblank load).  Needs a kext write path for CRTC_OFF_PITCH --
+**repurpose the stub selector 0 (set_surface, currently a no-op) to regWrite(
+MACH64_CRTC_OFF_PITCH, arg)**.  Requires a kext rebuild.
+
 ## Fallback that works today
 Force dbuf for ALL (single-buffer) contexts — no DB pixel format, no 0x60: the
 render-to-back + present-on-glFinish path is proven (Picture 24).  Delivers the

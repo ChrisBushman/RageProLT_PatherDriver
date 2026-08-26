@@ -103,6 +103,37 @@ int gldUpdateDispatch(gld_context *ctx, void *table, uint32_t flags)
     gld_log("  slot[0x28]=%p slot[0x48]=%p installed at table+off\n",
             (void *)mach64_render_triangles, (void *)mach64_render_triangles);
 
+    /* DOUBLE-BUFFER PRESENT.  A DB context gets NO per-frame flush/finish/swap call
+     * from GLEngine -- gldFlush/gldFinish/gldFlushBuffer never fire (the reference
+     * relies on the kernel/WindowServer to present; our minimal kext can't).  What
+     * GLEngine DOES do is re-invoke gldUpdateDispatch once per frame, so drive the
+     * present cycle here: submit the just-finished frame's batched triangles to the
+     * back buffer, blit back->front, and arm a back-clear for the next frame.  The
+     * batch holds the previous frame's geometry (gldUpdateDispatch is the frame
+     * boundary), so this presents with one frame of latency but keeps the swap chain
+     * running with no app-side glFinish.  Guard: no-op until a DB drawable is bound. */
+    {   mach64_priv *p = MACH64_PRIV(ctx);
+        if (p && p->dbuf && p->back_off) {
+            /* gldUpdateDispatch fires at FRAME END (after this frame's render slots),
+             * so finalize the frame right here with NO latency: render the batched
+             * triangles to the back, present, then clear the back for the next frame.
+             * We own the clear explicitly (frame_new=0) rather than deferring it to the
+             * next draw -- the deferred path was leaving the back uncleared -> residue. */
+            mach64_flush_batch(ctx);   /* this frame's triangles -> back buffer */
+            mach64_present(ctx);       /* blit back -> front (scanned out)       */
+            mach64_clear_color(ctx);   /* clear back for the NEXT frame          */
+            if (p->z_off) mach64_clear_zbuffer(ctx);
+            p->frame_new = 0;
+            {   static int dbp = 0;
+                if (dbp < 4) { dbp++;
+                    gld_log("  [DBpresent] tgt=0x%x back=0x%x front=0x%x pitch=%u "
+                            "(flush+present+clear)\n", p->target_off, p->back_off,
+                            p->front_off, p->fb_pitch);
+                }
+            }
+        }
+    }
+
     /* MUST return 0: GLEngine compares this return (r3) to a cached flag to
      * decide whether to keep our hardware dispatch or reconfigure to software
      * (GLEngine 0x46d4).  A void return left garbage in r3 -> not-equal ->

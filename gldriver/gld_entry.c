@@ -92,6 +92,29 @@ int gldAttachDrawable(gld_context *ctx, int type, void *drawable, uint32_t flags
         *(uint32_t *)(c + 0x1f0) = width;
         *(uint32_t *)(c + 0x1f4) = height;
 
+        /* DOUBLE-BUFFER DISPATCH GATE (reference RE, ATIRage128GLDriver gldAttach-
+         * Drawable type-0x36 path -> sub_a524(ctx,&caps,r5=0)).  The reference does
+         * NOT route DB geometry through a special dispatch slot -- slot 0x60 is a
+         * no-op.  Instead it sets a FLAG in the GLEngine object at *(ctx+0x14) (= a7
+         * from gldCreateContext): word0 |= 2.  GLEngine reads that flag to decide the
+         * context has a bound back-buffer surface and dispatches primitives normally
+         * instead of falling back to slot 0x60.  It also sets ctx+0x1e4=1 and requires
+         * caps bit 0x20 (ctx+0x2c) CLEAR.  Our DB context attaches as type 0x36 but
+         * never set this -> GLEngine routed it to 0x60 -> black.  Set it now. */
+        if (type == 0x36) {
+            uint32_t a7p = *(uint32_t *)(c + 0x14);
+            *(uint32_t *)(c + 0x2c) &= ~0x20u;      /* caps 0x20 clear (0x36 gate) */
+            *(uint32_t *)(c + 0x1e4) = 1;
+            if (a7p > 0x10000 && a7p < 0x40000000) {
+                uint32_t w0 = *(uint32_t *)(uintptr_t)a7p;
+                *(uint32_t *)(uintptr_t)a7p = w0 | 2u;
+                gld_log("  [DB-gate] a7=0x%x word0 0x%x -> 0x%x, ctx+0x2c=0x%x ctx+0x1e4=1\n",
+                        a7p, w0, w0 | 2u, *(uint32_t *)(c + 0x2c));
+            } else {
+                gld_log("  [DB-gate] a7=0x%x NOT a pointer -- flag NOT set\n", a7p);
+            }
+        }
+
         mach64_set_render_target(ctx, base_bytes, fb_pitch_px);
 
         {   mach64_priv *pv = MACH64_PRIV(ctx);
@@ -268,9 +291,16 @@ int gldFlushBuffer(gld_context *ctx, void *drawable)
     gld_log("gldFlushBuffer(ctx=%p drawable=%p) cbpp(ctx+0x5f)=%u target=0x%x pitch=0x%x\n",
             (void*)ctx, drawable, (unsigned)c[0x5f],
             *(uint32_t *)(c + 0x94), *(uint32_t *)(c + 0x98));
-    if (MACH64_PRIV(ctx)->dbuf) mach64_present(ctx);   /* swap: back -> front */
-    MACH64_PRIV(ctx)->frame_new = 1; /* next frame: clear Z */
-    return gldFinish(ctx);
+    /* FINISH FIRST, then present.  gldFinish flushes the triangle batch, submits the
+     * command buffer and waits for idle -> the back buffer is fully rendered.  Only
+     * then is it safe to blit back->front.  (Presenting first blits an un-rendered
+     * back buffer, so a swap without a preceding glFinish showed black -- the
+     * animation swap-chain bug.  A single glFinish-before-swap test hid it.) */
+    {   int r = gldFinish(ctx);
+        if (MACH64_PRIV(ctx)->dbuf) mach64_present(ctx);   /* swap: back -> front */
+        MACH64_PRIV(ctx)->frame_new = 1;                   /* next frame: clear Z + back */
+        return r;
+    }
 }
 
 /* ---- feature stubs: present so GLEngine's lookups are non-NULL; only called
