@@ -90,6 +90,14 @@
 #define MACH64_DP_SRC_HOST          0x00000200u  /* FRGD_SRC_HOST | MONO_SRC_ONE   */
 #define MACH64_DP_MIX_DS            0x00070003u  /* BKGD_MIX_D | FRGD_MIX_S (blit) */
 #define MACH64_DP_SRC_BLIT          0x00000300u  /* BKGD_SRC_BKGD_CLR|FRGD_SRC_BLIT|MONO_SRC_ONE */
+/* GL_POLYGON_STIPPLE: the 8x8 monochrome pattern (PAT_REG0/1) gates the 3D scaler.
+ * DP_SRC = MONO_SRC_PATTERN(1<<16) | FRGD_SRC_3D(5<<8) | BKGD_SRC_3D(5<<0); with
+ * DP_MIX = FRGD_MIX_S | BKGD_MIX_D the triangle draws where the pattern bit is set and
+ * leaves the framebuffer where it is clear. */
+#define MACH64_PAT_REG0             0x0680
+#define MACH64_PAT_REG1             0x0684
+#define MACH64_DP_SRC_STIPPLE       0x00010505u  /* MONO_SRC_PATTERN|FRGD_SRC_3D|BKGD_SRC_3D */
+#define MACH64_DP_MIX_STIPPLE       0x00070003u  /* FRGD_MIX_S | BKGD_MIX_D (keep dest off-bits) */
 
 /* ---- GUI-engine blit SOURCE regs (screen-to-screen copy; offsets + recipe from
  * the DRI reference drm_mach64_{drv.h,state.c} -- same 0x05xx scheme as DST). --- */

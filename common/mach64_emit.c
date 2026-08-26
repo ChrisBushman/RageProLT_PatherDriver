@@ -84,6 +84,12 @@ void m64_emit_state(m64_cmdbuf *cb, const m64_state *st)
     m64_reg(cb, MACH64_CLR_CMP_CNTL,   st->clr_cmp_cntl);
     m64_reg(cb, MACH64_DP_MIX,         st->dp_mix);
     m64_reg(cb, MACH64_DP_SRC,         st->dp_src);
+    /* GL_POLYGON_STIPPLE: the 8x8 pattern that DP_SRC's MONO_SRC_PATTERN samples.  Only
+     * emitted when armed (dp_src/dp_mix already carry the stipple datapath in that case). */
+    if (st->stipple) {
+        m64_reg(cb, MACH64_PAT_REG0, st->pat_reg0);
+        m64_reg(cb, MACH64_PAT_REG1, st->pat_reg1);
+    }
     /* GL_FOG blend colour.  DP_FOG_CLR aliases DP_FRGD_CLR (0x6c4, the 2D-fill
      * foreground), so emit it ONLY when fog is armed -- a plain 3D draw leaves it
      * alone, and the 2D engine re-sets it for its own fills. */

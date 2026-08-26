@@ -572,6 +572,37 @@ int mach64_bind_texture(gld_context *ctx)
         if (st->dp_mix != dm) { st->dp_mix = dm; p->dirty |= MACH64_DIRTY_STATE; }
     }
 
+    /* GL_POLYGON_STIPPLE (offsets recovered via GLD_FOGSCAN 2026-08-26): enable =
+     * gli+0x66ec bit24; the 32x32 pattern is at gli+0x665c, one 32-bit row per word.
+     * The mach64 pattern is only 8x8 (PAT_REG0/1), so extract the top-left 8x8 tile --
+     * exact for 8x8-periodic stipples (halftone/screen-door), approximate for arbitrary
+     * 32x32.  Datapath: DP_SRC = MONO_SRC_PATTERN|FRGD_SRC_3D, DP_MIX = FRGD_MIX_S|
+     * BKGD_MIX_D -> the triangle draws where the pattern bit is set and leaves the
+     * framebuffer where it is clear.  Mutually exclusive with a logic op (shared DP_SRC/
+     * DP_MIX); logic op wins. */
+    #define GLI_POLY_STIPPLE_EN  0x66ecu
+    #define GLI_POLY_STIPPLE_PAT 0x665cu
+    if (!lop_on && (mach64_gli_u32(ctx, GLI_POLY_STIPPLE_EN) & 0x01000000u)) {
+        uint32_t r[8], k, p0, p1;
+        for (k = 0; k < 8; k++)      /* leftmost 8 px (top byte, MSB-first) of rows 0-7 */
+            r[k] = (mach64_gli_u32(ctx, GLI_POLY_STIPPLE_PAT + k * 4u) >> 24) & 0xffu;
+        p0 = r[0] | (r[1] << 8) | (r[2] << 16) | (r[3] << 24);
+        p1 = r[4] | (r[5] << 8) | (r[6] << 16) | (r[7] << 24);
+        if (!st->stipple || st->pat_reg0 != p0 || st->pat_reg1 != p1) {
+            st->stipple  = 1;
+            st->pat_reg0 = p0; st->pat_reg1 = p1;
+            st->dp_src   = MACH64_DP_SRC_STIPPLE;
+            st->dp_mix   = MACH64_DP_MIX_STIPPLE;
+            p->dirty |= MACH64_DIRTY_STATE;
+        }
+    } else if (st->stipple) {
+        st->stipple = 0;
+        st->dp_src  = MACH64_DP_SRC_3D;   /* dp_mix already restored by the block above */
+        p->dirty |= MACH64_DIRTY_STATE;
+    }
+    #undef GLI_POLY_STIPPLE_EN
+    #undef GLI_POLY_STIPPLE_PAT
+
     /* GL_FOG: decide once per draw.  Sets mach64_fog_on so mach64_read_vertex packs
      * the fog factor into the vertex alpha, and forces a state re-emit while fogging
      * so DP_FOG_CLR (which aliases the 2D DP_FRGD_CLR a clear/fill may have trampled)

@@ -61,6 +61,9 @@ typedef struct {
     uint32_t alpha_tst_cntl;  /* ALPHA_TST_CNTL (0x550): GL_ALPHA_TEST      */
     uint32_t dp_fog_clr;      /* DP_FOG_CLR (0x6c4, aliases DP_FRGD_CLR): GL_FOG
                                * blend target when ALPHA_FOG_EN=FOG (0=don't emit) */
+    uint32_t stipple;         /* 1 => GL_POLYGON_STIPPLE: emit PAT_REG0/1 below       */
+    uint32_t pat_reg0;        /* 8x8 pattern rows 0-3 (PAT_REG0 0x680)                */
+    uint32_t pat_reg1;        /* 8x8 pattern rows 4-7 (PAT_REG1 0x684)                */
     /* ---- texturing: emitted only when `textured` is set ---------------
      * When textured, scale_3d_cntl is overridden with FCN_TEXTURE (tex_scale_3d)
      * and the three texture registers are emitted; otherwise the untextured
