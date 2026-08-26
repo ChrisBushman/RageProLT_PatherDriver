@@ -119,18 +119,20 @@ int gldUpdateDispatch(gld_context *ctx, void *table, uint32_t flags)
              * triangles to the back, present, then clear the back for the next frame.
              * We own the clear explicitly (frame_new=0) rather than deferring it to the
              * next draw -- the deferred path was leaving the back uncleared -> residue. */
-            mach64_flush_batch(ctx);   /* this frame's triangles -> back buffer */
-            mach64_present(ctx);       /* blit back -> front (scanned out)       */
-            mach64_clear_color(ctx);   /* clear back for the NEXT frame          */
+            /* PAGE-FLIP present (register-guide-derived, replaces the blit): render
+             * this frame to the hidden buffer (render_off), flip the CRTC scanout to
+             * it (loads at vblank -- tear-free, zero-copy), then swap roles and clear
+             * the newly-hidden buffer for the next frame.  Alternates front<->back. */
+            mach64_flush_batch(ctx);              /* this frame -> render_off (verified
+                                                   * to always match the flip target) */
+            mach64_flip(ctx, p->render_off);      /* scanout -> render_off (waits for the
+                                                   * scanline wrap so the buffer is free) */
+            p->render_off = (p->render_off == p->front_off) ? p->back_off
+                                                            : p->front_off;
+            mach64_set_render_target(ctx, p->render_off, p->fb_pitch);
+            mach64_clear_color(ctx);              /* clear the new hidden buffer */
             if (p->z_off) mach64_clear_zbuffer(ctx);
             p->frame_new = 0;
-            {   static int dbp = 0;
-                if (dbp < 4) { dbp++;
-                    gld_log("  [DBpresent] tgt=0x%x back=0x%x front=0x%x pitch=%u "
-                            "(flush+present+clear)\n", p->target_off, p->back_off,
-                            p->front_off, p->fb_pitch);
-                }
-            }
         }
     }
 

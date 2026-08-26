@@ -159,13 +159,28 @@ void mach64_fill_rect(gld_context *ctx, uint32_t off, uint32_t x, uint32_t y,
 }
 
 /* Present a double-buffered frame: copy the whole back buffer to the front
- * (scanout) surface with the GUI-engine blit.  No-op when single-buffered. */
+ * (scanout) surface with the GUI-engine blit.  No-op when single-buffered.
+ * (Superseded by mach64_flip for DB presents -- kept for the fill/blit test path.) */
 void mach64_present(gld_context *ctx)
 {
     mach64_priv *p = MACH64_PRIV(ctx);
     if (!p->dbuf || !p->back_off || !p->front_off) return;
     mach64_blit_surface(ctx, p->back_off, p->front_off, 0, 0, 0, 0,
                         p->fb_w, p->fb_h, p->fb_pitch);
+}
+
+/* Page-flip: switch the CRTC scanout base to the colour buffer at byte offset `off`.
+ * The mach64 CRTC offset is hardware double-buffered (loads at vblank), so this is a
+ * tear-free swap with NO copy -- unlike mach64_present's blit.  Goes through the kext
+ * (selector 0, repurposed to regWrite CRTC_OFF_PITCH); encoding matches DST_OFF_PITCH:
+ * (pitch/8 << 22) | (off >> 3). */
+void mach64_flip(gld_context *ctx, uint32_t off)
+{
+    mach64_priv *p = MACH64_PRIV(ctx);
+    uint32_t val;
+    if (!ctx->connect || !p->fb_pitch || !off) return;
+    val = ((p->fb_pitch / 8u) << 22) | (off >> 3);
+    IOConnectMethodScalarIScalarO(ctx->connect, kMach64Sel_set_surface, 1, 0, val);
 }
 
 /* ---- screen-to-screen (VRAM->VRAM) blit via the 2D GUI engine --------

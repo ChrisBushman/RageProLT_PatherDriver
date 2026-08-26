@@ -42,8 +42,14 @@ int gldAttachDrawable(gld_context *ctx, int type, void *drawable, uint32_t flags
     if (!ctx) return 0x271e;
     if ((type == 0x50 || type == 0x5a || type == 0x36) && !drawable)
         return 0x2715;
-    /* detach */
-    if (type == 0 || !drawable) return 0;
+    /* detach: restore the CRTC scanout to the front (original desktop) buffer, else a
+     * page-flipped DB context leaves the display scanning out of our back buffer and
+     * the desktop stays invisible after the app exits. */
+    if (type == 0 || !drawable) {
+        mach64_priv *pv = MACH64_PRIV(ctx);
+        if (pv && pv->dbuf && pv->front_off) mach64_flip(ctx, pv->front_off);
+        return 0;
+    }
 
     {
         const uint32_t *d = (const uint32_t *)drawable;
@@ -135,6 +141,7 @@ int gldAttachDrawable(gld_context *ctx, int type, void *drawable, uint32_t flags
                 z_off = back + surf;
                 pv->front_off = base_bytes;
                 pv->back_off  = back;
+                pv->render_off = back;   /* page-flip: front is displayed, render into back */
                 pv->fb_w = width; pv->fb_h = height; pv->fb_pitch = fb_pitch_px;
                 mach64_set_texheap(z_off + zsize, 0x800000u);
                 mach64_set_render_target(ctx, back, fb_pitch_px);   /* draw to back */

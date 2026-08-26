@@ -178,14 +178,27 @@ path (mach64_present -> mach64_blit_surface, looped), not the clear/geometry.  T
 matches the DRI reference and works in isolation (blittest, Picture 22), so it's a
 loop/address-specific quirk not crackable from userspace reasoning.
 
-### FIX PLAN: page-flip via CRTC_OFF_PITCH (register-guide-derived, sidesteps the blit)
-The LT Pro CRTC offset is HW-double-buffered (loads at vblank; RRG BLOCK_DBL_BUF).  So
-replace the blit-present with a page flip: render to the back buffer, then write
-CRTC_OFF_PITCH = (pitch/8<<22)|(back>>3) to switch scanout to it at vblank, and swap
-front/back roles (alternate the render target).  This kills BOTH the accumulation (no
-blit) and the tearing (vblank load).  Needs a kext write path for CRTC_OFF_PITCH --
-**repurpose the stub selector 0 (set_surface, currently a no-op) to regWrite(
-MACH64_CRTC_OFF_PITCH, arg)**.  Requires a kext rebuild.
+### FIX: page-flip via CRTC_OFF_PITCH — DONE, WORKING (2026-08-26)
+Replaced the blit-present with a hardware page flip and it WORKS (no accumulation, no
+flashing; tools/dbflip.sh, mach64_dbanim).  Implementation:
+- **Kext**: stub selector 0 (set_surface) repurposed -> `regWrite(CRTC_OFF_PITCH, arg)`;
+  the flip is made SYNCHRONOUS by then polling CRTC_VLINE_CRNT_VLINE (0x410, [26:16])
+  until the scanline WRAPS -- so the just-shown buffer is fully free before the driver
+  reuses it as the next render target.  (This wait is what killed the flashing.)
+- **Driver**: two colour buffers (front 0x1000, back 0x301000); `render_off` = the
+  hidden one.  Per frame (gld_dispatch gUD): flush geometry -> render_off, mach64_flip
+  to render_off, swap render_off, set render target, clear.  gldAttachDrawable inits
+  render_off=back and on detach flips scanout back to front (restores the desktop).
+- **Verified** (DBflip instrumentation): geometry ALWAYS renders to the same buffer we
+  flip to (all MATCH, non-empty batches) -- the alternation is correct; the earlier
+  "flashing" was flip-vs-scanout TIMING, resolved by the synchronous wait-for-wrap flip.
+- Encoding: CRTC_OFF_PITCH = (pitch/8<<22)|(off>>3), same as DST_OFF_PITCH.
+- Known nuance: the CRTC offset appears to latch immediately (not vblank-double-buffered)
+  on this board, so fast motion can still show minor tearing.  A fully tear-free flip
+  would write CRTC_OFF_PITCH strictly within the vblank window (measure the max scanline,
+  write when scanline >= ~98% of it) OR set HW_DEBUG.DBL_BUFFER_EN (bit unknown; needs
+  the RRG HW_DEBUG page image, reg 0x1F).  A first vblank-window attempt mis-timed and
+  flashed; the wait-for-wrap flip is the stable baseline.
 
 ## Fallback that works today
 Force dbuf for ALL (single-buffer) contexts — no DB pixel format, no 0x60: the

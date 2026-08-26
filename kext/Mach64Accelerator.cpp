@@ -281,6 +281,28 @@ UInt32 Mach64Accelerator::engineStatus(void)
 IOReturn Mach64Accelerator::setSurface(Mach64GLUserClient *c,
                                        UInt32 a, UInt32 b, UInt32 cc, UInt32 d)
 {
-    (void)c; (void)a; (void)b; (void)cc; (void)d;
+    (void)c; (void)b; (void)cc; (void)d;
+    /* PAGE FLIP (selector 0, repurposed from the set_surface stub).  `a` is the new
+     * CRTC_OFF_PITCH value ((pitch/8<<22)|(offset>>3), same encoding as DST_OFF_PITCH).
+     * The CRTC offset on this board latches ~immediately, so the flip needs BOTH: write
+     * at the top of a frame (so the switch applies top-down, not mid-scan -> less
+     * tearing) AND a post-write settle of one full frame (so the previously-shown buffer
+     * stays free long enough for the caller to reuse it -> no flashing / band-trailing).
+     * Detect frame boundaries by the scanline counter (CRTC_VLINE_CRNT_VLINE [26:16])
+     * WRAPPING (max -> 0). */
+#define M64_VLN() (((UInt32)regRead(MACH64_CRTC_VLINE_CRNT_VLINE) >> 16) & 0x7ff)
+    {
+        UInt32 prev;
+        int i;
+        /* (1) wait for the top of a fresh frame */
+        prev = M64_VLN();
+        for (i = 0; i < 200000; i++) { UInt32 c = M64_VLN(); if (c < prev) break; prev = c; IODelay(5); }
+        /* (2) flip at the top */
+        regWrite(MACH64_CRTC_OFF_PITCH, a);
+        /* (3) settle one full frame: let the new base scan out and keep the old buffer free */
+        prev = M64_VLN();
+        for (i = 0; i < 200000; i++) { UInt32 c = M64_VLN(); if (c < prev) break; prev = c; IODelay(5); }
+    }
+#undef M64_VLN
     return kIOReturnSuccess;
 }

@@ -24,7 +24,7 @@ bool Mach64GLUserClient::start(IOService *provider)
 
     /* The 17-selector table (indices/counts verified from the Rage128 kext). */
     IOExternalMethod tbl[kMach64Sel_COUNT] = {
-        M(set_surface,        kIOUCScalarIStructI, 4, 0),               // 0
+        M(set_surface,        kIOUCScalarIScalarO, 1, 0),               // 0: page-flip (CRTC_OFF_PITCH)
         /* set_swap_rect */   M(set_surface,       kIOUCScalarIStructI, 4, 0), // 1 (stub->reuse)
         /* set_swap_interval*/M(set_surface,       kIOUCScalarIStructI, 2, 0), // 2
         M(get_config,         kIOUCScalarIScalarO, 0, 3),               // 3

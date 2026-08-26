@@ -26,6 +26,7 @@
 #define MACH64_ALPHA_TST_CNTL   0x0550  /* alpha test + dst blend         */
 #define MACH64_DST_OFF_PITCH    0x0500  /* render target base+pitch       */
 #define MACH64_CRTC_OFF_PITCH   0x0414  /* live scanout base+pitch: block(0x400)+MM 0x14 */
+#define MACH64_CRTC_VLINE_CRNT_VLINE 0x0410 /* [26:16] = current scanline (vblank sync) */
 #define MACH64_SCALE_3D_CNTL    0x05fc  /* blend/fog/tex-func/dither      */
 #define MACH64_TEX_0_OFF        0x05c0  /* primary texture base           */
 #define MACH64_SECONDARY_TEX_OFF 0x0778
