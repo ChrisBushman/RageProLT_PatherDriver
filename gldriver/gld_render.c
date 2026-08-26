@@ -75,6 +75,9 @@ void mach64_clear_zbuffer(gld_context *ctx)
     uint32_t zoff = p->z_off;
     uint32_t w32  = p->z_pitch / 2;                 /* 16-bit px -> 32-bit px */
     uint32_t h    = *(const uint32_t *)((const char *)ctx + 0x1f4);  /* height */
+    /* Skip the Z clear (and its whole DMA submit) when depth testing is off -- there is
+     * no depth buffer in use to clear, so it is pure per-frame overhead. */
+    if (!(p->hw.z_cntl & MACH64_Z_EN)) return;
     if (!zoff || !w32 || !h) return;
     mach64_flush_batch(ctx);   /* order: pending triangles before the Z clear */
     m64_cb_init(&cb, p->scratch, sizeof(p->scratch) / sizeof(p->scratch[0]));
@@ -124,6 +127,51 @@ void mach64_clear_color(gld_context *ctx)
         col = (clampc(rf) << 16) | (clampc(gf) << 8) | clampc(bf);
     }
     mach64_fill_rect(ctx, p->target_off, 0, 0, w, h, p->target_pitch, col);
+}
+
+/* Emit the colour clear (a full-render-target 2D fill) directly INTO the persistent
+ * triangle batch instead of doing its own DMA submit.  Each mach64_submit quiesces and
+ * waits the engine, so folding the per-frame clear into the batch means a frame's
+ * clear + geometry go out as ONE submit -- a big win for the page-flip present loop.
+ * The trailing triangles re-emit full 3D state (p->dirty set), so the 2D->3D transition
+ * inside the single command stream is handled. */
+void mach64_batch_clear_color(gld_context *ctx)
+{
+    mach64_priv *p = MACH64_PRIV(ctx);
+    uint32_t gli = mach64_gli(ctx);
+    uint32_t w = *(const uint32_t *)((const char *)ctx + 0x1f0);
+    uint32_t h = *(const uint32_t *)((const char *)ctx + 0x1f4);
+    uint32_t off = p->target_off, op = (p->target_pitch / 8) << 22;
+    uint32_t col = 0;
+    if (!off || !w || !h) return;
+    if (gli) {
+        float rf, gf, bf;
+        uint32_t rb = mach64_gli_u32(ctx, GLI_CLEAR_COLOR + 0);
+        uint32_t gb = mach64_gli_u32(ctx, GLI_CLEAR_COLOR + 4);
+        uint32_t bb = mach64_gli_u32(ctx, GLI_CLEAR_COLOR + 8);
+        __builtin_memcpy(&rf, &rb, 4);
+        __builtin_memcpy(&gf, &gb, 4);
+        __builtin_memcpy(&bf, &bb, 4);
+        col = (clampc(rf) << 16) | (clampc(gf) << 8) | clampc(bf);
+    }
+    if (!p->batch.buf)
+        m64_cb_init(&p->batch, p->batchbuf,
+                    sizeof(p->batchbuf) / sizeof(p->batchbuf[0]));
+    m64_reg(&p->batch, MACH64_Z_CNTL,           0);
+    m64_reg(&p->batch, MACH64_SCALE_3D_CNTL,    0);
+    m64_reg(&p->batch, MACH64_GUI_TRAJ_CNTL,    (1u<<0) | (1u<<1));
+    m64_reg(&p->batch, MACH64_DP_PIX_WIDTH,     0x60060666u);
+    m64_reg(&p->batch, MACH64_DP_FRGD_CLR,      col);
+    m64_reg(&p->batch, MACH64_DP_WRITE_MASK,    0xffffffffu);
+    m64_reg(&p->batch, MACH64_DP_MIX,           (3u<<0) | (7u<<16));
+    m64_reg(&p->batch, MACH64_DP_SRC,           (1u<<0) | (1u<<8));
+    m64_reg(&p->batch, MACH64_SC_LEFT_RIGHT,    (0x1fffu<<16) | 0);
+    m64_reg(&p->batch, MACH64_SC_TOP_BOTTOM,    (0x1fffu<<16) | 0);
+    m64_reg(&p->batch, MACH64_CLR_CMP_CNTL,     0);
+    m64_reg(&p->batch, MACH64_DST_OFF_PITCH,    op | (off >> 3));
+    m64_reg(&p->batch, MACH64_DST_X_Y,          0);
+    m64_reg(&p->batch, MACH64_DST_WIDTH_HEIGHT, (h << 16) | w);
+    p->dirty |= MACH64_DIRTY_STATE;
 }
 
 /* ---- solid-colour rectangle fill via the 2D GUI engine --------------

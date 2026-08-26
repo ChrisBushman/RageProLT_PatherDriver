@@ -123,15 +123,18 @@ int gldUpdateDispatch(gld_context *ctx, void *table, uint32_t flags)
              * this frame to the hidden buffer (render_off), flip the CRTC scanout to
              * it (loads at vblank -- tear-free, zero-copy), then swap roles and clear
              * the newly-hidden buffer for the next frame.  Alternates front<->back. */
-            mach64_flush_batch(ctx);              /* this frame -> render_off (verified
-                                                   * to always match the flip target) */
+            mach64_flush_batch(ctx);              /* submit prev frame: clear+geometry, 1 DMA */
             mach64_flip(ctx, p->render_off);      /* scanout -> render_off (waits for the
                                                    * scanline wrap so the buffer is free) */
             p->render_off = (p->render_off == p->front_off) ? p->back_off
                                                             : p->front_off;
             mach64_set_render_target(ctx, p->render_off, p->fb_pitch);
-            mach64_clear_color(ctx);              /* clear the new hidden buffer */
+            /* PERF: fold the new frame's clears into the batch so clear + geometry go out
+             * as ONE submit.  Z clear self-gates on Z_EN (its own submit only when depth
+             * is on); the colour clear is emitted straight into the batch, ahead of this
+             * frame's triangles. */
             if (p->z_off) mach64_clear_zbuffer(ctx);
+            mach64_batch_clear_color(ctx);        /* clear folded into the triangle batch */
             p->frame_new = 0;
         }
     }

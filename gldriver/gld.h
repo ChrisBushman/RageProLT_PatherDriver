@@ -135,6 +135,7 @@ void mach64_set_zbuffer(gld_context *ctx, uint32_t off, uint32_t pitch_px);
 void mach64_clear_zbuffer(gld_context *ctx);
 void mach64_flush_batch(gld_context *ctx);   /* submit accumulated triangles */
 void mach64_clear_color(gld_context *ctx);
+void mach64_batch_clear_color(gld_context *ctx);  /* clear folded into the triangle batch */
 void mach64_fill_rect(gld_context *ctx, uint32_t off, uint32_t x, uint32_t y,
                       uint32_t w, uint32_t h, uint32_t pitch_px, uint32_t color);
 void mach64_blit_surface(gld_context *ctx, uint32_t src_off, uint32_t dst_off,
