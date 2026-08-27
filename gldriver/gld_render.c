@@ -458,7 +458,54 @@ static void ctl_dump(const char *w, gld_context *ctx, uint32_t a2, uint32_t a3,
     (void)i;
 }
 int mach64_ctl00(gld_context *c,uint32_t a,uint32_t b,uint32_t d,uint32_t e,uint32_t f,uint32_t g){ctl_dump("table[0x00]",c,a,b,d,e,f,g);return 0;}
-int mach64_ctl08(gld_context *c,uint32_t a,uint32_t b,uint32_t d,uint32_t e,uint32_t f,uint32_t g){ctl_dump("table[0x08]",c,a,b,d,e,f,g);return 0;}
+
+/* table[0x08] = GLEngine's per-renderer glReadPixels READBACK hook.  glReadPixels validation
+ * (GLEngine+0x2dc4c, verified via tools/mach64_rpdisp) tail-calls [gc+0x78b0] = this, as
+ * (rb_ctx, x, y, w, h, format, type, pixels).  It was a no-op stub (7-arg ctl shape that also
+ * dropped `pixels` in r10) -> glReadPixels silently did nothing, glGetError==0, px untouched.
+ * STEP 1: real 8-arg signature + log the args (confirm the mechanism).  STEP 2 (TODO): read our
+ * back-buffer VRAM (g_gld_readback_ctx render_off) at (x,y,w,h), Y-flip, convert to format/type,
+ * write `pixels`. */
+gld_context *g_gld_readback_ctx = 0;
+int mach64_ctl08(void *rb_ctx, int x, int y, int w, int h,
+                 unsigned format, unsigned type, void *pixels)
+{
+    /* GLEngine passes OUR gld_context as rb_ctx (confirmed: rb==g_gld_readback_ctx). */
+    gld_context *gc = rb_ctx ? (gld_context *)rb_ctx : g_gld_readback_ctx;
+    mach64_priv *p = gc ? MACH64_PRIV(gc) : 0;
+    uint32_t height = gc ? *(uint32_t *)((unsigned char *)gc + 0x1f4) : 0;   /* drawable height (gldAttachDrawable) */
+    uint32_t toff  = p ? p->target_off   : 0;
+    uint32_t tpitch= p ? p->target_pitch : 0;    /* pixels */
+    gld_log(">>> READBACK x=%d y=%d w=%d h=%d fmt=0x%x type=0x%x px=%p  target_off=0x%x pitch=%u H=%u vram=%p\n",
+            x, y, w, h, format, type, pixels, toff, tpitch, height, gc ? (void *)gc->regs : 0);
+    if (!p || !gc->regs || !toff || !tpitch || !height) return 0;   /* can't locate the buffer */
+    if (format != 0x1908u /*GL_RGBA*/ || type != 0x1401u /*GL_UNSIGNED_BYTE*/) return 0;  /* RGBA8 only for now */
+
+    mach64_flush_batch(gc);   /* submit any residual geometry; the app's glFinish already fenced */
+
+    /* Read our render target from the whole-VRAM CPU map (gc->regs).  Framebuffer is ARGB8888
+     * (dp_pix_width 0x60060666), stored little-endian -> bytes [B,G,R,A].  glReadPixels uses a
+     * bottom-left origin, so flip Y against the drawable height. */
+    {   const volatile unsigned char *vram = (const volatile unsigned char *)gc->regs;
+        unsigned char *out = (unsigned char *)pixels;
+        uint32_t pitch_b = tpitch * 4u;
+        int row, col;
+        for (row = 0; row < h; row++) {
+            int fbrow = (int)height - 1 - (y + row);
+            if (fbrow < 0) fbrow = 0;
+            for (col = 0; col < w; col++) {
+                const volatile unsigned char *s =
+                    vram + toff + (uint32_t)fbrow * pitch_b + (uint32_t)(x + col) * 4u;
+                *out++ = s[2];   /* R */
+                *out++ = s[1];   /* G */
+                *out++ = s[0];   /* B */
+                *out++ = s[3];   /* A */
+            }
+        }
+    }
+    gld_log("     READBACK filled %dx%d from target_off=0x%x pitch=%u H=%u\n", w, h, toff, tpitch, height);
+    return 0;
+}
 int mach64_ctl0c(gld_context *c,uint32_t a,uint32_t b,uint32_t d,uint32_t e,uint32_t f,uint32_t g){ctl_dump("table[0x0c]",c,a,b,d,e,f,g);return 0;}
 int mach64_ctl10(gld_context *c,uint32_t a,uint32_t b,uint32_t d,uint32_t e,uint32_t f,uint32_t g){ctl_dump("table[0x10]",c,a,b,d,e,f,g);return 0;}
 int mach64_ctl14(gld_context *c,uint32_t a,uint32_t b,uint32_t d,uint32_t e,uint32_t f,uint32_t g){ctl_dump("table[0x14]",c,a,b,d,e,f,g);return 0;}

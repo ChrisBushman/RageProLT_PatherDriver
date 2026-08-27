@@ -3,7 +3,8 @@
 # pixel and a quad pixel, prints them + the gld* entry points that fired.  Run on the Lombard:
 #   sudo sh tools/readpixels.sh
 DIR=`cd \`dirname "$0"\` && pwd`; ROOT=`cd "$DIR/.." && pwd`; B=Mach64Accelerator.kext
-( cd "$ROOT/gldriver" && make clean >/dev/null 2>&1; make bundle ) || exit 1
+( cd "$ROOT/gldriver" && make clean >/dev/null 2>&1; \
+  make CFLAGS="-O2 -Wall -std=gnu99 -I.. -DGLD_DBUF" bundle ) || exit 1
 GLB="$ROOT/gldriver/ATIRageProGLDriver.bundle"
 DST=/System/Library/Extensions/ATIRageProGLDriver.bundle
 rm -rf "$DST"; cp -R "$GLB" "$DST"; chown -R root:wheel "$DST"

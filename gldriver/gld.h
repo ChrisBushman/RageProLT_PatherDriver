@@ -227,7 +227,11 @@ void mach64_dispatch_complete (gld_context *, const void *, uint32_t);
 void mach64_dispatch_render_ctl(gld_context *, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t);
 int  mach64_flush(gld_context *, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t);
 int  mach64_ctl00(gld_context *, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t);
-int  mach64_ctl08(gld_context *, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t);
+/* table[0x08] is GLEngine's per-renderer glReadPixels READBACK hook (gc+0x78b0): called
+ * (rb_ctx, x, y, w, h, format, type, pixels).  NOT the ctl-stub shape. */
+int  mach64_ctl08(void *rb_ctx, int x, int y, int w, int h,
+                  unsigned format, unsigned type, void *pixels);
+extern gld_context *g_gld_readback_ctx;   /* current context for the readback hook (set in gldInitDispatch) */
 int  mach64_ctl0c(gld_context *, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t);
 int  mach64_ctl10(gld_context *, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t);
 int  mach64_ctl14(gld_context *, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t);

@@ -363,6 +363,9 @@ void gldInitDispatch(gld_context *ctx, void *table, void *outinfo)
      * GLEngine calls to render.  table[0x04] is THE flush entry.  Store the table
      * ptr in ctx+0x1c (reference: stw r4, 0x1c(ctx)) and install our flush. */
     *(void **)((unsigned char *)ctx + 0x1c)  = table;
+    /* table[0x08] = GLEngine's glReadPixels readback hook; it's called with GLEngine's rb_ctx, not
+     * our gld_context, so stash ours for mach64_ctl08 to read the back-buffer VRAM. */
+    g_gld_readback_ctx = ctx;
     *(void **)((unsigned char *)table + 0x00) = (void *)mach64_ctl00;
     *(void **)((unsigned char *)table + 0x04) = (void *)mach64_flush;
     *(void **)((unsigned char *)table + 0x08) = (void *)mach64_ctl08;
