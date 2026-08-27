@@ -618,7 +618,49 @@ int mach64_ctl08(void *rb_ctx, int x, int y, int w, int h,
     return 0;
 }
 int mach64_ctl0c(gld_context *c,uint32_t a,uint32_t b,uint32_t d,uint32_t e,uint32_t f,uint32_t g){ctl_dump("table[0x0c]",c,a,b,d,e,f,g);return 0;}
-int mach64_ctl10(gld_context *c,uint32_t a,uint32_t b,uint32_t d,uint32_t e,uint32_t f,uint32_t g){ctl_dump("table[0x10]",c,a,b,d,e,f,g);return 0;}
+/* glCopyPixels(GL_COLOR).  GLEngine's glCopyPixels color path (impl GLEngine+0xcb5c) tail-calls this
+ * renderer hook (dispatch table[0x10] = gc+0x78b8) AFTER viewport-transforming the raster position.
+ * Reversed args (mach64_pxdisp + GLEngine disasm):
+ *   a = float*{dst_x,dst_y,dst_z}  destination window coords (the current raster position)
+ *   b = src_x, d = src_y           source lower-left, window coords (GL bottom-left origin)
+ *   e = width, f = height          copy extent (pixels)
+ *   g = copy type                  (this hook is only reached for the colour copy)
+ * We do the framebuffer->framebuffer copy with the 2D blit engine, Y-flipping to top-left VRAM.
+ * Read and draw buffers are both the current render target (target_off) -- for a DB context that's
+ * the back buffer, matching GL's default GL_BACK read+draw.  First cut: no overlapping-rect handling
+ * (blit runs L->R T->B) and hard clip if the rect leaves the surface. */
+int mach64_ctl10(gld_context *c, uint32_t a, uint32_t b, uint32_t d,
+                 uint32_t e, uint32_t f, uint32_t g)
+{
+    mach64_priv *p = c ? MACH64_PRIV(c) : 0;
+    const float *rp = (const float *)(uintptr_t)a;
+    int sx = (int)b, sy = (int)d, w = (int)e, h = (int)f;
+    int dx, dy, svy, dvy, H, W;
+    (void)g;
+    if (!p || !p->target_off || !p->target_pitch || !rp || w <= 0 || h <= 0) {
+        ctl_dump("table[0x10]", c, a, b, d, e, f, g);   /* unhandled shape -> log, no-op */
+        return 0;
+    }
+    /* Drawable dims come from the context (ctx+0x1f0/0x1f4), NOT p->fb_h -- fb_h is only set for
+     * double-buffered attaches, so it's 0 for a single-buffered context (same source readback and
+     * mach64_clear_color use). */
+    W = (int)*(uint32_t *)((unsigned char *)c + 0x1f0);
+    H = (int)*(uint32_t *)((unsigned char *)c + 0x1f4);
+    if (W <= 0 || H <= 0) { ctl_dump("table[0x10]", c, a, b, d, e, f, g); return 0; }
+    dx = (int)(rp[0] + 0.5f);
+    dy = (int)(rp[1] + 0.5f);
+    svy = H - sy - h;                 /* GL bottom-left block -> VRAM top-left row */
+    dvy = H - dy - h;
+    if (sx < 0 || dx < 0 || svy < 0 || dvy < 0 ||
+        sx + w > W || dx + w > W || svy + h > H || dvy + h > H)
+        return 0;                     /* out of bounds -> skip (first-cut clipping) */
+    gld_log("glCopyPixels: (%d,%d) %dx%d -> (%d,%d) [W=%d H=%d]\n", sx, sy, w, h, dx, dy, W, H);
+    mach64_flush_batch(c);            /* pending geometry before the copy */
+    mach64_blit_surface(c, p->target_off, p->target_off,
+                        (uint32_t)sx, (uint32_t)svy, (uint32_t)dx, (uint32_t)dvy,
+                        (uint32_t)w, (uint32_t)h, p->target_pitch);
+    return 0;
+}
 int mach64_ctl14(gld_context *c,uint32_t a,uint32_t b,uint32_t d,uint32_t e,uint32_t f,uint32_t g){ctl_dump("table[0x14]",c,a,b,d,e,f,g);return 0;}
 
 /* table[0x04] = THE flush entry.  GLEngine's render flow calls this to dispatch
