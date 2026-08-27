@@ -479,16 +479,23 @@ int mach64_ctl08(void *rb_ctx, int x, int y, int w, int h,
     gld_log(">>> READBACK x=%d y=%d w=%d h=%d fmt=0x%x type=0x%x px=%p  target_off=0x%x pitch=%u H=%u vram=%p\n",
             x, y, w, h, format, type, pixels, toff, tpitch, height, gc ? (void *)gc->regs : 0);
     if (!p || !gc->regs || !toff || !tpitch || !height) return 0;   /* can't locate the buffer */
-    if (type != 0x1401u /*GL_UNSIGNED_BYTE*/) return 0;             /* only ubyte types for now */
-    /* Component byte order per format.  Our framebuffer is X8R8G8B8 (no real dst alpha), so a
-     * missing-alpha buffer reads back alpha = 1.0 (opaque) per the GL spec. */
-    {   int is_bgr, has_a;
+    /* Decode (format, type).  Our framebuffer is X8R8G8B8 (no real dst alpha) -> a missing-alpha
+     * buffer reads back alpha = 1.0 (opaque) per the GL spec.  For the packed INT_8_8_8_8[_REV]
+     * types we build a native uint32 by BIT position and store it natively -- so the layout is
+     * correct on this BIG-ENDIAN PPC (NOT the same byte order an x86 host would produce). */
+    {   int is_bgr, has_a, pk;   /* pk: 0 = ubyte bytes, 1 = INT_8_8_8_8, 2 = INT_8_8_8_8_REV */
         switch (format) {
             case 0x1908u: is_bgr = 0; has_a = 1; break;   /* GL_RGBA */
             case 0x80E1u: is_bgr = 1; has_a = 1; break;   /* GL_BGRA */
             case 0x1907u: is_bgr = 0; has_a = 0; break;   /* GL_RGB  */
             case 0x80E0u: is_bgr = 1; has_a = 0; break;   /* GL_BGR  */
             default: return 0;                            /* unsupported format */
+        }
+        switch (type) {
+            case 0x1401u: pk = 0; break;                         /* GL_UNSIGNED_BYTE */
+            case 0x8035u: pk = 1; if (!has_a) return 0; break;   /* GL_UNSIGNED_INT_8_8_8_8 (RGBA/BGRA) */
+            case 0x8367u: pk = 2; if (!has_a) return 0; break;   /* GL_UNSIGNED_INT_8_8_8_8_REV */
+            default: return 0;                                   /* unsupported type */
         }
         mach64_flush_batch(gc);   /* submit any residual geometry; the app's glFinish already fenced */
 
@@ -498,7 +505,7 @@ int mach64_ctl08(void *rb_ctx, int x, int y, int w, int h,
         {   const volatile unsigned char *vram = (const volatile unsigned char *)gc->regs;
             unsigned char *base = (unsigned char *)pixels;
             uint32_t pitch_b = tpitch * 4u;
-            int bpp_out = has_a ? 4 : 3;
+            int bpp_out = (pk || has_a) ? 4 : 3;
             int row_stride = ((w * bpp_out + 3) / 4) * 4;
             int row, col;
             for (row = 0; row < h; row++) {
@@ -509,10 +516,22 @@ int mach64_ctl08(void *rb_ctx, int x, int y, int w, int h,
                 for (col = 0; col < w; col++) {
                     const volatile unsigned char *s =
                         vram + toff + (uint32_t)fbrow * pitch_b + (uint32_t)(x + col) * 4u;
-                    unsigned char R = s[2], G = s[1], B = s[0];
-                    if (is_bgr) { *o++ = B; *o++ = G; *o++ = R; }
-                    else        { *o++ = R; *o++ = G; *o++ = B; }
-                    if (has_a)  *o++ = 0xFF;   /* X8 framebuffer -> opaque */
+                    unsigned R = s[2], G = s[1], B = s[0], A = 0xFFu;   /* X8 -> opaque */
+                    if (pk == 0) {
+                        if (is_bgr) { *o++ = (unsigned char)B; *o++ = (unsigned char)G; *o++ = (unsigned char)R; }
+                        else        { *o++ = (unsigned char)R; *o++ = (unsigned char)G; *o++ = (unsigned char)B; }
+                        if (has_a)  *o++ = (unsigned char)A;
+                    } else {
+                        /* components in FORMAT order (first..last); 8_8_8_8 puts the first in the
+                         * MSB, _REV puts it in the LSB. */
+                        unsigned c0, c1, c2, c3;
+                        if (is_bgr) { c0 = B; c1 = G; c2 = R; c3 = A; }
+                        else        { c0 = R; c1 = G; c2 = B; c3 = A; }
+                        *(uint32_t *)o = (pk == 1)
+                            ? ((c0 << 24) | (c1 << 16) | (c2 << 8) | c3)
+                            : ( c0        | (c1 << 8)  | (c2 << 16) | (c3 << 24));
+                        o += 4;
+                    }
                 }
             }
         }

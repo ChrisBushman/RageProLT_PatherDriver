@@ -19,6 +19,23 @@
 #ifndef GL_BGR
 #define GL_BGR  0x80E0
 #endif
+#ifndef GL_UNSIGNED_INT_8_8_8_8
+#define GL_UNSIGNED_INT_8_8_8_8     0x8035
+#endif
+#ifndef GL_UNSIGNED_INT_8_8_8_8_REV
+#define GL_UNSIGNED_INT_8_8_8_8_REV 0x8367
+#endif
+
+/* Read one pixel as a packed uint32 and print the value.  At clear (R,G,B,A = 40,80,BF,FF hex):
+ *   BGRA + INT_8_8_8_8_REV -> 0xFF4080BF (ARGB, the fast native form)
+ *   RGBA + INT_8_8_8_8     -> 0x4080BFFF
+ *   RGBA + INT_8_8_8_8_REV -> 0xFFBF8040    BGRA + INT_8_8_8_8 -> 0xBF8040FF */
+static void rd_packed(int x, int y, unsigned fmt, unsigned type, const char *name)
+{
+    GLuint v = 0x99999999u;
+    glReadPixels(x, y, 1, 1, fmt, type, &v);
+    printf("READPIX %-16s (%d,%d) = 0x%08x\n", name, x, y, (unsigned)v);
+}
 
 static void rd(int x, int y, const char *what)
 {
@@ -97,6 +114,11 @@ int main(void)
     rd_fmt(80, 80, GL_BGRA, "BGRA");   /* expect 191 128  64 255 */
     rd_fmt(80, 80, GL_RGB,  "RGB");    /* expect  64 128 191   9 (px[3] untouched) */
     rd_fmt(80, 80, GL_BGR,  "BGR");    /* expect 191 128  64   9 */
+    /* packed int types at clear (0x40,0x80,0xBF, A=0xFF) */
+    rd_packed(80, 80, GL_BGRA, GL_UNSIGNED_INT_8_8_8_8_REV, "BGRA/8888REV"); /* 0xFF4080BF */
+    rd_packed(80, 80, GL_RGBA, GL_UNSIGNED_INT_8_8_8_8,     "RGBA/8888");    /* 0x4080BFFF */
+    rd_packed(80, 80, GL_RGBA, GL_UNSIGNED_INT_8_8_8_8_REV, "RGBA/8888REV"); /* 0xFFBF8040 */
+    rd_packed(80, 80, GL_BGRA, GL_UNSIGNED_INT_8_8_8_8,     "BGRA/8888");    /* 0xBF8040FF */
     /* 64x64 straddling the quad's left edge (screen x~=358): expect left cols clear, right Q,
      * sharp edge at output col ~16 (i.e. screen x 358 -> block col 32, sampled i+=2). */
     rd_block(326, 350, 64, 64);
