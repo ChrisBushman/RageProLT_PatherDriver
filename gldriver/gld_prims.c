@@ -100,7 +100,8 @@ void mach64_read_vertex(const void *vp, m64_vertex *o, float fb_h)
 /* Pack an m64_vertex at gli-screen (gx,gy), taking colour/depth/w from vp.
  * Used to expand points/lines into quads (the mach64 setup engine only does
  * triangles), same y-flip + colour fold as mach64_read_vertex. */
-static void pack_at(const void *vp, float gx, float gy, float fb_h, m64_vertex *o)
+static void pack_at(const void *vp, float gx, float gy, float fb_h, m64_vertex *o,
+                    int tex_w, int tex_h)
 {
     const unsigned char *v = (const unsigned char *)vp;
     float w     = *(const float *)(v + GVOFF_W);              /* 1/w_clip */
@@ -116,6 +117,14 @@ static void pack_at(const void *vp, float gx, float gy, float fb_h, m64_vertex *
      * endpoint (the scaler interpolates the texture along the line). */
     {   float sw = *(const float *)(v + 0x80), tw = *(const float *)(v + 0x84);
         float rs = (w != 0.0f) ? sw / w : sw, rt = (w != 0.0f) ? tw / w : tw;
+        /* Half-texel inset for a texcoord in [0,1] (same fix emit_tri does for triangles):
+         * remap so the edge samples texel CENTRES [0.5/w..(w-0.5)/w] instead of the boundary
+         * -- kills the mach64 REPEAT wrap-around line at s/t=0 (the last column bleeding onto
+         * the first pixel).  Skipped for tiling coords (>1) so tiling stays exact. */
+        if (tex_w > 0 && rs >= -0.001f && rs <= 1.001f && rt >= -0.001f && rt <= 1.001f) {
+            rs = rs * (float)(tex_w - 1) / (float)tex_w + 0.5f / (float)tex_w;
+            rt = rt * (float)(tex_h - 1) / (float)tex_h + 0.5f / (float)tex_h;
+        }
         __builtin_memcpy(&o->s, &rs, 4); __builtin_memcpy(&o->t, &rt, 4);
     }
 }
@@ -135,13 +144,15 @@ static float gli_size(gld_context *ctx, uint32_t off)
  * s is the half-extent (GL point size is the diameter). */
 static void draw_point(gld_context *ctx, const void *vp, float fb_h, float s)
 {
+    mach64_priv *p = MACH64_PRIV(ctx);
     const unsigned char *v = (const unsigned char *)vp;
     float x = *(const float *)(v + GVOFF_X), y = *(const float *)(v + GVOFF_Y);
+    int tw = (p->hw.textured && p->tex_w > 0 && p->tex_h > 0) ? p->tex_w : 0, th = p->tex_h;
     m64_vertex a, b, c, d;
-    pack_at(vp, x - s, y - s, fb_h, &a);
-    pack_at(vp, x + s, y - s, fb_h, &b);
-    pack_at(vp, x - s, y + s, fb_h, &c);
-    pack_at(vp, x + s, y + s, fb_h, &d);
+    pack_at(vp, x - s, y - s, fb_h, &a, tw, th);
+    pack_at(vp, x + s, y - s, fb_h, &b, tw, th);
+    pack_at(vp, x - s, y + s, fb_h, &c, tw, th);
+    pack_at(vp, x + s, y + s, fb_h, &d, tw, th);
     mach64_draw_triangle(ctx, &a, &b, &c);
     mach64_draw_triangle(ctx, &d, &c, &b);
 }
@@ -155,15 +166,17 @@ static void draw_line(gld_context *ctx, const void *v0, const void *v1,
     float y0 = *(const float *)((const unsigned char *)v0 + GVOFF_Y);
     float x1 = *(const float *)((const unsigned char *)v1 + GVOFF_X);
     float y1 = *(const float *)((const unsigned char *)v1 + GVOFF_Y);
+    mach64_priv *p = MACH64_PRIV(ctx);
     float adx = x1 - x0, ady = y1 - y0, ix, iy;
+    int tw = (p->hw.textured && p->tex_w > 0 && p->tex_h > 0) ? p->tex_w : 0, th = p->tex_h;
     m64_vertex A, B, C, D;
     if (adx < 0) adx = -adx;
     if (ady < 0) ady = -ady;
     if (adx > ady) { ix = 0.f; iy = wdt; } else { ix = wdt; iy = 0.f; }
-    pack_at(v0, x0 - ix, y0 - iy, fb_h, &A);
-    pack_at(v1, x1 - ix, y1 - iy, fb_h, &B);
-    pack_at(v0, x0 + ix, y0 + iy, fb_h, &C);
-    pack_at(v1, x1 + ix, y1 + iy, fb_h, &D);
+    pack_at(v0, x0 - ix, y0 - iy, fb_h, &A, tw, th);
+    pack_at(v1, x1 - ix, y1 - iy, fb_h, &B, tw, th);
+    pack_at(v0, x0 + ix, y0 + iy, fb_h, &C, tw, th);
+    pack_at(v1, x1 + ix, y1 + iy, fb_h, &D, tw, th);
     mach64_draw_triangle(ctx, &A, &B, &C);
     mach64_draw_triangle(ctx, &D, &C, &B);
 }
