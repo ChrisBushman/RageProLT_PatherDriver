@@ -108,7 +108,16 @@ static void pack_at(const void *vp, float gx, float gy, float fb_h, m64_vertex *
     uint32_t argb = (chan(*(const float *)(v + GVOFF_R)) << 16)
                   | (chan(*(const float *)(v + GVOFF_G)) <<  8)
                   |  chan(*(const float *)(v + GVOFF_B));
-    mach64_pack_vertex(o, gx, fb_h - gy, depth, w, argb);
+    mach64_pack_vertex(o, gx, fb_h - gy, depth, w, argb);   /* zeros o->s/o->t */
+    /* Per-vertex texcoords, so a TEXTURED point/line samples the vertex's texcoord rather
+     * than texel (0,0).  GLEngine stores S/w,T/w at +0x80/+0x84 and 1/w at +0x0c (= w here),
+     * so un-premultiply to raw S,T -- same as mach64_read_vertex.  draw_point passes the same
+     * vertex for all 4 quad corners (uniform texcoord across the point); draw_line passes each
+     * endpoint (the scaler interpolates the texture along the line). */
+    {   float sw = *(const float *)(v + 0x80), tw = *(const float *)(v + 0x84);
+        float rs = (w != 0.0f) ? sw / w : sw, rt = (w != 0.0f) ? tw / w : tw;
+        __builtin_memcpy(&o->s, &rs, 4); __builtin_memcpy(&o->t, &rt, 4);
+    }
 }
 
 /* Read a gli float field (glPointSize@0x6630 / glLineWidth@0x6394), defaulting
@@ -328,10 +337,9 @@ void mach64_render_quad_strip(gld_context *ctx, const void *v, uint32_t n)
  * GLD_DISPATCH_PROBE run.  Each path calls mach64_bind_texture so it honours the
  * CURRENT GL texture state instead of inheriting whatever the last triangle draw
  * programmed (an untextured point stream after a textured quad would otherwise
- * sample stale texture bits).  Note: draw_point/draw_line carry no per-vertex
- * texcoords (s/t = 0), so a *textured* point/line samples texel (0,0) uniformly
- * rather than interpolating -- acceptable for the common untextured/colour case;
- * per-vertex-texcoord expansion is a TODO if a textured-line app needs it. -- */
+ * sample stale texture bits).  pack_at now carries per-vertex texcoords, so a
+ * TEXTURED point samples its vertex's texel (uniform across the point) and a
+ * TEXTURED line interpolates the texture along its length. -- */
 #define FB_H(ctx) ((float)*(const uint32_t *)((const unsigned char *)(ctx) + 0x1f4))
 
 /* gli offsets recovered by diffing point-size/line-width configs (tools/
