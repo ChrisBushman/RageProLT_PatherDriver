@@ -737,14 +737,21 @@ void mach64_dispatch_render_ctl(gld_context *ctx, uint32_t a4, uint32_t a5,
                 mach64_batch_clear_color(ctx);
                 p->frame_new = 0;
             } else {
-                mach64_wait_flip(ctx);
+                /* FULLSCREEN present via a 2D BLIT (back -> front scanout), NOT a CRTC
+                 * page-flip.  Writing CRTC_OFF_PITCH races Apple's framebuffer driver
+                 * (no shared lock between the two) -> the intermittent fullscreen HARD-LOCK.
+                 * A blit never touches the CRTC, so it is race-free -- and it is exactly how
+                 * Apple's own surface present works (ATIR3Surface::build_swap = a clipped 2D
+                 * blit executed by PIO, confirmed by RE; docs/re-notes/apple-glcontext-
+                 * protocol.md).  Same pattern as the windowed branch above (always render into
+                 * `back`, blit it to the live front at (0,0), NO buffer swap, NO CRTC touch);
+                 * once per frame at slot 0x60, so no multi-blit accumulation.  Tears against
+                 * the unsynced scan (a follow-on can gate the blit on vblank), but never locks. */
                 mach64_flush_batch(ctx);
-                mach64_flip(ctx, p->render_off);
-                p->render_off = (p->render_off == p->front_off) ? p->back_off
-                                                                : p->front_off;
-                mach64_set_render_target(ctx, p->render_off, p->fb_pitch);
-                if (p->z_off) mach64_clear_zbuffer(ctx);   /* own submit: overlaps vblank dead time */
-                mach64_batch_clear_color(ctx);             /* folded into next frame's batch */
+                mach64_blit_surface(ctx, p->back_off, p->front_off, 0, 0, 0, 0,
+                                    p->fb_w, p->fb_h, p->fb_pitch);
+                if (p->z_off) mach64_clear_zbuffer(ctx);
+                mach64_batch_clear_color(ctx);
                 p->frame_new = 0;
             }
 #ifdef GLD_PERF

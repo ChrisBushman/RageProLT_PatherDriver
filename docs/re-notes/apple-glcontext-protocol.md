@@ -79,6 +79,87 @@ protocol + selector/index alignment + Apple's 5 memory regions, NOT a foreign pa
 geometry via `IOATIRProAccelerator::find_surface_for_id(id)` @4bd0 + shape_surface / alloc_
 surface_buffer.
 
+### DECISIVE (2026-08-27): present is a PIO 2D BLIT, engine-INDEPENDENT -- works despite the stub
+Full static trace of the present path (ragepro.asm).  Corrects the earlier "start_engine stub =
+Path B dead end" conclusion: **that stub is a red herring for PRESENT.**
+- **`ATIRagePro::submit_buffer(uint* buf, m, m)` @12730 is a real PIO register-write drain**, NOT a
+  DMA/engine op: reads the MMIO base from `accel+0x550`, loops `stwbrx val -> MMIO[reg]` over
+  `{reg,val}` pairs, FIFO-throttled against status regs 0x310/0x338 via `_thread_block`.  No DMA,
+  no `start_engine`.
+- **`start_engine` @13210 (`li r3,1; blr`) has ZERO callers** (xref scan) -- the engine is driven
+  entirely by PIO register writes through submit_buffer, so the stub is never on any path.
+- **`ATIR3Surface::build_swap` @150f8 generates a clipped 2D-BLIT command stream** (`{reg,val}`
+  pairs, `stwu ...,0x4(r8)`): mach64 GUI/blit regs 0x100/0x10c/0x118 (DST_OFF_PITCH/DST_X_Y/
+  DST_WIDTH_HEIGHT), 0x180 (SRC_OFF_PITCH), 0x1dc/0x1e0 (DP_SRC/DP_MIX), 0x1f0/0x1f4, with a
+  per-clip-rect loop (`bdnz 156dc`, r6 walks an 8-byte IOAccelBounds rect list).  So the "swap" is
+  a back->front 2D blit clipped to the surface rects -- NOT a CRTC page-flip.  The ONLY CRTC_OFF_PITCH
+  (0x414) write in the whole kext is in `IOATIRProAccelerator::start` (init), never in present.
+- **Userspace trigger chain:** `surface_flush` (surface sel 10) @b498 -> `flush_surface` @c4dc ->
+  (virtual) submit_swap_buffer -> build_swap + submit_buffer.  `submit_flip_buffer` @15c00 also ends
+  in `submit_buffer` (+ conditional `map_transfer_to_GART`), same engine-independent PIO path.
+
+**Consequence (the whole point):** Apple's proper present is a PIO 2D blit -- the SAME mechanism as
+our working windowed present -- and it is race-free by construction (scanout base never moves; Apple
+blits into the front buffer it owns).  It runs WITHOUT the stubbed engine.  So the hybrid is viable:
+render with OUR engine into the surface's back buffer, then trigger Apple's `surface_flush` to present.
+### LIVE-CONFIRMED (2026-08-27): surface_flush presents to the real scanout, engine-independent
+`tools/mach64_flushtest.c` drove the validated handshake then fired surface_flush.  Result (HW):
+```
+set_id_mode(0x13,0x24) -> 0        set_shape(256x256) -> 0
+set_surface(0x13,0) -> 0 BOUND     get_surface_size -> [100 100 100 100]  (256x256)
+surface_flush(1,0) -> 0  *** PRESENT PATH RAN ***     surface_flush(0,0) -> 0
+```
+No panic, all KERN_SUCCESS -- AND a 256x256 square appeared at screen (0,0) (the surface rect).
+So surface_flush BLITS the surface backing onto the LIVE framebuffer with NO start_engine, NO CRTC
+write, NO DMA -- exactly the race-free PIO 2D-blit present the static trace predicted.  The square is
+garbage only because we never wrote the backing (uninitialized memory blitted to screen) -- which is
+itself the proof it reaches the real scanout.
+
+### STEP 1 DONE (2026-08-27): OUR pixels reach the scanout via Apple's present
+The surface pixels are NOT in clientMemoryForType (that maps swap-buffer headers only) -- CPU access
+is `surface_write_lock` (surface sel 14, methodDescs flags=2 = ScalarIStructureO, 0 scalar-in, var
+struct-out) -> returns an IOAccelSurfaceData; sel 15 = surface_write_unlock (ScalarIScalarO 0/0).
+LIVE (tools/mach64_writetest.c): write_lock -> 0, IOAccelSurfaceData = {+00 address=0x2309000 (a
+DIRECTLY-WRITABLE userspace pointer), +10 pitch=0x400(1024), +14 w=0x100, +18 h=0x100, +1c bpp=4,
++48 idx=0x13}.  memset the mapping to red, unlock, surface_flush(1,0) -> 0 -> a SOLID RED 256x256
+square at screen (0,0).  So the model is simple: write_lock maps the surface backing into userspace,
+we write, unlock, flush blits it to scanout.  Confirmed OUR content presents via Apple, race-free.
+
+### STEP 2a DONE (2026-08-27): full-screen present covers the whole scanout
+tools/mach64_fspresent.c shaped a 1024x768 surface, wrote R|G|B|White bands, flushed.  LIVE: all 0,
+write_lock address=0x02480000 pitch=4096(1024x4) w=1024 h=768 bpp=4 -> the pattern filled the WHOLE
+screen, bands straight (no pitch skew), race-free.  So Apple's blit present works full-screen with
+correct geometry.  *** KEY REALISATION: Apple's present is a 2D BLIT, not a CRTC flip -- so the
+fullscreen LOCK (our CRTC_OFF_PITCH write racing Apple's framebuffer driver) is fixed by presenting
+via a BLIT, which NEVER touches the CRTC.  Two ways to do that blit: (X) Apple's surface_flush (proven
+here, but the driver integration runs OUR kext + Apple's accelerator = two accelerators, the
+atlantis-probe coexistence-lock risk, + a per-frame VRAM->backing copy); (Y) OUR kext does the blit
+itself (single accelerator, no coexistence, VRAM->VRAM hw blit -- we already have mach64_blit_surface
+for windowed; build_swap @150f8 is the exact reference blit sequence).  Fork recorded for the user.
+
+### RESOLVED (2026-08-27): Approach Y implemented + HW-VALIDATED -- fullscreen lock FIXED
+User chose (Y).  Change: gld_render.c mach64_dispatch_render_ctl fullscreen branch now presents via a
+2D BLIT (mach64_blit_surface back->front at (0,0), full dims), IDENTICAL to the proven windowed branch
+-- render into `back`, blit to the live scanout front, NO buffer swap, NO CRTC_OFF_PITCH write; once
+per frame at slot 0x60 (so no multi-blit accumulation -- the old "pulsing" was the pre-slot-0x60
+multiple-present-per-frame bug, long fixed).  gld_entry.c detach no longer flips the CRTC (never moved
+-> desktop intact on exit).  mach64_flip/mach64_wait_flip now unused (kept, harmless).  HW-VALIDATED:
+dbanim (fullscreen DB animation) AND atlantis (the app that intermittently hard-locked before) both
+present cleanly with NO lock, desktop restores on exit.  The fullscreen page-flip hard-lock is GONE
+by construction (we never touch the CRTC).  Tears against the unsynced scan (acceptable; a vblank-gated
+blit is a cheap follow-on).  NET of the whole Apple-present investigation: the RE didn't end in "call
+Apple's present" -- it revealed present should be a BLIT, and we do that blit ourselves (single
+accelerator, no coexistence).  build_swap remains the reference if we want to match Apple's exact
+clip/scale/vblank behaviour later.
+
+(historical NEXT, superseded by the fork above): (a) shape a FULL-SCREEN surface (blit rect == whole scanout) + known pattern
+-> flush, to validate fullscreen present covers the display; (b) bridge our engine output into the
+surface -- either render into VRAM then copy to the write_lock backing (system-mem backing; a per-
+frame CPU copy, negligible at our ~3fps), OR find a shapeBits that gives a VRAM backing so our engine
+renders straight into it; (c) SERIALIZE render(our DMA) -> flush(Apple PIO blit) with an engine-idle
+between, so the two accelerators never drive the engine concurrently (the old atlantis-probe lockup
+was CONCURRENT use).  The CRTC is never touched -> the fullscreen page-flip race is gone.
+
 ## clientMemoryForType regions + MANDATORY setup sequence (learned the hard way)
 clientMemoryForType(type 0..4) region map for the GL context:
 - type 0 -> accel+0xa8  (shared accelerator region, registers-ish)

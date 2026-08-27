@@ -178,6 +178,14 @@ path (mach64_present -> mach64_blit_surface, looped), not the clear/geometry.  T
 matches the DRI reference and works in isolation (blittest, Picture 22), so it's a
 loop/address-specific quirk not crackable from userspace reasoning.
 
+### SUPERSEDED (2026-08-27): CRTC page-flip replaced by a 2D BLIT for fullscreen
+The CRTC_OFF_PITCH page-flip below (tear-free, zero-copy) had an intermittent FULLSCREEN HARD-LOCK:
+writing the CRTC scanout register races Apple's framebuffer driver (no shared lock).  FIX: fullscreen
+now presents via a 2D blit (back->front), same as the windowed branch -- NO CRTC write, so race-free.
+HW-validated on dbanim + atlantis (the app that locked).  See apple-glcontext-protocol.md
+"RESOLVED 2026-08-27".  The page-flip notes below are kept for history (mach64_flip/wait_flip remain
+in the tree, now unused).
+
 ### FIX: page-flip via CRTC_OFF_PITCH — DONE, WORKING (2026-08-26)
 Replaced the blit-present with a hardware page flip and it WORKS (no accumulation, no
 flashing; tools/dbflip.sh, mach64_dbanim).  Implementation:

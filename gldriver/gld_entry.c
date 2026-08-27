@@ -52,14 +52,12 @@ int gldAttachDrawable(gld_context *ctx, int type, void *drawable, uint32_t flags
     if (!ctx) return 0x271e;
     if ((type == 0x50 || type == 0x5a || type == 0x36) && !drawable)
         return 0x2715;
-    /* detach: restore the CRTC scanout to the front (original desktop) buffer, else a
-     * page-flipped DB context leaves the display scanning out of our back buffer and
-     * the desktop stays invisible after the app exits. */
-    if (type == 0 || !drawable) {
-        mach64_priv *pv = MACH64_PRIV(ctx);
-        if (pv && pv->dbuf && pv->front_off) mach64_flip(ctx, pv->front_off);
+    /* detach: nothing to restore.  Present is now a back->front BLIT (no CRTC page-flip),
+     * so the CRTC never leaves the desktop front buffer -- the desktop is intact when the
+     * app exits.  (Previously the flip-present moved the CRTC to our back buffer, which had
+     * to be flipped back here.) */
+    if (type == 0 || !drawable)
         return 0;
-    }
 
     {
         const uint32_t *d = (const uint32_t *)drawable;
