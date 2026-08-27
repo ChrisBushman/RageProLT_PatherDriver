@@ -617,7 +617,75 @@ int mach64_ctl08(void *rb_ctx, int x, int y, int w, int h,
             w, h, format, toff, tpitch, height);
     return 0;
 }
-int mach64_ctl0c(gld_context *c,uint32_t a,uint32_t b,uint32_t d,uint32_t e,uint32_t f,uint32_t g){ctl_dump("table[0x0c]",c,a,b,d,e,f,g);return 0;}
+/* glDrawPixels.  GLEngine's glDrawPixels impl (GLEngine+0xe688) validates format/type then tail-calls
+ * this renderer hook (dispatch table[0x0c] = gc+0x78b4) with the RAW client pixels -- no pre-convert:
+ *   a = float*{dst_x,dst_y,dst_z}  destination window coords (the raster position)
+ *   b = width, d = height          image dims (pixels)
+ *   e = format (0x1908 RGBA / 0x80E1 BGRA / 0x1907 RGB / 0x80E0 BGR)
+ *   f = type   (0x1401 GL_UNSIGNED_BYTE -- first cut)
+ *   g = pixels (client CPU pointer to the source image)
+ * We convert each client pixel to native ARGB8888 (inverse of the glReadPixels/mach64_ctl08 path) and
+ * write it to the render target via the whole-VRAM CPU map (c->regs), Y-flipping GL's bottom-left
+ * origin (image row 0 = bottom = raster y).  First cut: GL_UNSIGNED_BYTE only, default UNPACK
+ * alignment (4), pixel-zoom 1, no UNPACK row-length/skip/swap (TODO: read gc UNPACK state like the
+ * PACK state readback uses). */
+int mach64_ctl0c(gld_context *c, uint32_t a, uint32_t b, uint32_t d,
+                 uint32_t e, uint32_t f, uint32_t g)
+{
+    mach64_priv *p = c ? MACH64_PRIV(c) : 0;
+    const float *rp = (const float *)(uintptr_t)a;
+    const unsigned char *src = (const unsigned char *)(uintptr_t)g;
+    int w = (int)b, h = (int)d;
+    unsigned format = e, type = f;
+    int is_bgr, has_a, bpp_in, dx, dy, W, H, row, col, align, rowstride;
+    volatile unsigned char *vram;
+    uint32_t pitch_b;
+
+    if (!p || !p->target_off || !p->target_pitch || !rp || !src || w <= 0 || h <= 0) {
+        ctl_dump("table[0x0c]", c, a, b, d, e, f, g); return 0;
+    }
+    if (type != 0x1401u) { ctl_dump("table[0x0c]", c, a, b, d, e, f, g); return 0; }  /* UBYTE first cut */
+    switch (format) {
+        case 0x1908u: is_bgr = 0; has_a = 1; break;   /* GL_RGBA */
+        case 0x80E1u: is_bgr = 1; has_a = 1; break;   /* GL_BGRA */
+        case 0x1907u: is_bgr = 0; has_a = 0; break;   /* GL_RGB  */
+        case 0x80E0u: is_bgr = 1; has_a = 0; break;   /* GL_BGR  */
+        default: ctl_dump("table[0x0c]", c, a, b, d, e, f, g); return 0;
+    }
+    vram = (volatile unsigned char *)c->regs;
+    if (!vram) return 0;
+    W = (int)*(uint32_t *)((unsigned char *)c + 0x1f0);
+    H = (int)*(uint32_t *)((unsigned char *)c + 0x1f4);
+    if (W <= 0 || H <= 0) return 0;
+    bpp_in  = has_a ? 4 : 3;
+    dx = (int)(rp[0] + 0.5f);
+    dy = (int)(rp[1] + 0.5f);
+    pitch_b = p->target_pitch * 4u;
+    align = 4;                            /* default GL_UNPACK_ALIGNMENT */
+    rowstride = (bpp_in >= align) ? (w * bpp_in)
+                                  : (align * ((w * bpp_in + align - 1) / align));
+    gld_log("glDrawPixels: %dx%d fmt=0x%x type=0x%x -> (%d,%d) [W=%d H=%d]\n",
+            w, h, format, type, dx, dy, W, H);
+    mach64_flush_batch(c);                /* pending geometry before the upload */
+    for (row = 0; row < h; row++) {
+        int fbrow = H - 1 - (dy + row);   /* image row 0 = bottom = raster y -> VRAM row */
+        const unsigned char *srow = src + row * rowstride;
+        if (fbrow < 0 || fbrow >= H) continue;
+        for (col = 0; col < w; col++) {
+            int gx = dx + col;
+            const unsigned char *s = srow + col * bpp_in;
+            volatile unsigned char *o;
+            unsigned char R, G, B, A;
+            if (gx < 0 || gx >= W) continue;
+            if (is_bgr) { B = s[0]; G = s[1]; R = s[2]; }
+            else        { R = s[0]; G = s[1]; B = s[2]; }
+            A = has_a ? s[3] : 0xFFu;
+            o = vram + p->target_off + (uint32_t)fbrow * pitch_b + (uint32_t)gx * 4u;
+            o[0] = B; o[1] = G; o[2] = R; o[3] = A;   /* native LE ARGB8888 */
+        }
+    }
+    return 0;
+}
 /* glCopyPixels(GL_COLOR).  GLEngine's glCopyPixels color path (impl GLEngine+0xcb5c) tail-calls this
  * renderer hook (dispatch table[0x10] = gc+0x78b8) AFTER viewport-transforming the raster position.
  * Reversed args (mach64_pxdisp + GLEngine disasm):

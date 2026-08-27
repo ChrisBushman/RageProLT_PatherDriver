@@ -77,6 +77,23 @@ GLEngine path, not ctl10) and read/draw-buffer selection are TODO.
 (Tooling gotcha for future probes: tools that run under sudo leave root-owned binaries; a later
 non-sudo rebuild silently fails and an old binary runs.  copypixels.sh now force-rm's them first.)
 
+## glDrawPixels(RGBA/BGRA/RGB/BGR, GL_UNSIGNED_BYTE) — IMPLEMENTED + HW-VERIFIED (2026-08-27)
+glDrawPixels -> GLEngine+0xe688 (dispatch ctx+0x114); after format/type validation the valid path
+TAIL-CALLS gc+0x78b4 = our dispatch table[0x0c] = mach64_ctl0c with (raster_dst{x,y,z}, width, height,
+format, type, pixels) -- the RAW client pixels (no GLEngine pre-convert), so ctl0c does the conversion.
+ctl0c was a ctl_dump stub.  IMPLEMENTED (gld_render.c mach64_ctl0c): convert each client pixel to
+native ARGB8888 (inverse of the readback/mach64_ctl08 path -- native LE bytes [B,G,R,A]) and write to
+the render target via the whole-VRAM CPU map (c->regs), Y-flipped (image row 0 = bottom = raster y).
+HW-VERIFIED (tools/mach64_drawpixels): a 64x64 image (left RED / right GREEN / bottom-8-rows BLUE)
+uploaded at raster (300,300) reads back pixel-accurate with correct X and Y orientation.
+FIRST CUT limits (TODO): GL_UNSIGNED_BYTE only (add packed INT_8_8_8_8 etc. like readback); default
+UNPACK alignment=4 only (add gc UNPACK row-length/skip/swap state, offsets TBD -- separate from the
+PACK offsets readback uses); pixel-zoom 1 only.
+OBSERVED (separate, minor, NOT a glDrawPixels bug): a frame that does only glClear + glDrawPixels (no
+geometry) shows an UNCLEARED (black) background -- our clear is lazy, fired on the first triangle
+(frame_new -> mach64_clear_color in mach64_draw_triangle).  A geometry-less frame never triggers it.
+Fix later: honour glClear even without a following triangle.
+
 ## Next step (needs one HW run)
 Run tools/pxdisp.sh -> mach64_pxdisp reads [ctx+0x114]/[ctx+0xd4]/[ctx+0x1c] live + dladdr -> the
 GLEngine impl offsets OUR renderer actually uses, and dumps the gc+0x78xx table.  Then disassemble
