@@ -467,6 +467,7 @@ int mach64_ctl00(gld_context *c,uint32_t a,uint32_t b,uint32_t d,uint32_t e,uint
  * back-buffer VRAM (g_gld_readback_ctx render_off) at (x,y,w,h), Y-flip, convert to format/type,
  * write `pixels`. */
 gld_context *g_gld_readback_ctx = 0;
+unsigned char *g_gld_gc = 0;   /* GLEngine's gc (dispatch table - 0x78a8); holds GL_PACK_* state */
 int mach64_ctl08(void *rb_ctx, int x, int y, int w, int h,
                  unsigned format, unsigned type, void *pixels)
 {
@@ -500,14 +501,31 @@ int mach64_ctl08(void *rb_ctx, int x, int y, int w, int h,
         mach64_flush_batch(gc);   /* submit any residual geometry; the app's glFinish already fenced */
 
         /* Read our render target from the whole-VRAM CPU map (gc->regs).  ARGB8888 stored LE ->
-         * bytes [B,G,R,A].  glReadPixels origin is bottom-left (flip Y vs drawable height H); rows
-         * packed to GL_PACK_ALIGNMENT=4 (the default). */
+         * bytes [B,G,R,A].  glReadPixels origin is bottom-left (flip Y vs drawable height H).
+         * Honour GL_PACK_* state from GLEngine's gc (default-safe fallback): ALIGNMENT@0x63d8,
+         * ROW_LENGTH@0x63c4, SKIP_PIXELS@0x63d0, SKIP_ROWS@0x63cc, SWAP_BYTES@0x63dc (byte). */
         {   const volatile unsigned char *vram = (const volatile unsigned char *)gc->regs;
             unsigned char *base = (unsigned char *)pixels;
             uint32_t pitch_b = tpitch * 4u;
             int bpp_out = (pk || has_a) ? 4 : 3;
-            int row_stride = ((w * bpp_out + 3) / 4) * 4;
-            int row, col;
+            int elem = pk ? 4 : 1;                                   /* element size (bytes) */
+            int p_align = 4, p_rowlen = 0, p_skippix = 0, p_skiprows = 0, p_swap = 0;
+            int l, row_stride, row, col;
+            if (g_gld_gc) {
+                int a = *(int *)(g_gld_gc + 0x63d8);
+                if (a == 1 || a == 2 || a == 4 || a == 8) p_align = a;
+                p_rowlen   = *(int *)(g_gld_gc + 0x63c4);
+                p_skippix  = *(int *)(g_gld_gc + 0x63d0);
+                p_skiprows = *(int *)(g_gld_gc + 0x63cc);
+                p_swap     = g_gld_gc[0x63dc] ? 1 : 0;
+                if (p_rowlen   < 0) p_rowlen   = 0;
+                if (p_skippix  < 0) p_skippix  = 0;
+                if (p_skiprows < 0) p_skiprows = 0;
+            }
+            l = p_rowlen > 0 ? p_rowlen : w;
+            row_stride = (elem >= p_align) ? (l * bpp_out)
+                                           : (p_align * ((l * bpp_out + p_align - 1) / p_align));
+            base += p_skiprows * row_stride + p_skippix * bpp_out;
             for (row = 0; row < h; row++) {
                 int fbrow = (int)height - 1 - (y + row);
                 unsigned char *o;
@@ -523,13 +541,14 @@ int mach64_ctl08(void *rb_ctx, int x, int y, int w, int h,
                         if (has_a)  *o++ = (unsigned char)A;
                     } else {
                         /* components in FORMAT order (first..last); 8_8_8_8 puts the first in the
-                         * MSB, _REV puts it in the LSB. */
-                        unsigned c0, c1, c2, c3;
+                         * MSB, _REV in the LSB.  GL_PACK_SWAP_BYTES reverses the 4 element bytes. */
+                        unsigned c0, c1, c2, c3, v;
                         if (is_bgr) { c0 = B; c1 = G; c2 = R; c3 = A; }
                         else        { c0 = R; c1 = G; c2 = B; c3 = A; }
-                        *(uint32_t *)o = (pk == 1)
-                            ? ((c0 << 24) | (c1 << 16) | (c2 << 8) | c3)
-                            : ( c0        | (c1 << 8)  | (c2 << 16) | (c3 << 24));
+                        v = (pk == 1) ? ((c0 << 24) | (c1 << 16) | (c2 << 8) | c3)
+                                      : ( c0        | (c1 << 8)  | (c2 << 16) | (c3 << 24));
+                        if (p_swap) v = (v >> 24) | ((v >> 8) & 0xff00u) | ((v << 8) & 0xff0000u) | (v << 24);
+                        *(uint32_t *)o = v;
                         o += 4;
                     }
                 }

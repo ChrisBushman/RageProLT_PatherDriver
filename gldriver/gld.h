@@ -232,6 +232,7 @@ int  mach64_ctl00(gld_context *, uint32_t, uint32_t, uint32_t, uint32_t, uint32_
 int  mach64_ctl08(void *rb_ctx, int x, int y, int w, int h,
                   unsigned format, unsigned type, void *pixels);
 extern gld_context *g_gld_readback_ctx;   /* current context for the readback hook (set in gldInitDispatch) */
+extern unsigned char *g_gld_gc;           /* GLEngine's gc (= dispatch table - 0x78a8); holds GL_PACK_* state */
 int  mach64_ctl0c(gld_context *, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t);
 int  mach64_ctl10(gld_context *, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t);
 int  mach64_ctl14(gld_context *, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t);

@@ -37,6 +37,37 @@ static void rd_packed(int x, int y, unsigned fmt, unsigned type, const char *nam
     printf("READPIX %-16s (%d,%d) = 0x%08x\n", name, x, y, (unsigned)v);
 }
 
+/* Verify non-default GL_PACK_* state at a clear pixel (R,G,B = 64,128,191). */
+static void rd_pack_test(int x, int y)
+{
+    static GLubyte buf[8192];
+    int i;
+    /* (1) ROW_LENGTH=10, SKIP_PIXELS=2, SKIP_ROWS=1, align=1: RGBA 4x3.
+     *     row_stride = 10*4 = 40; start = 1*40 + 2*4 = 48.  buf[0..47]=sentinel, buf[48]=R. */
+    for (i = 0; i < 8192; i++) buf[i] = 0xAA;
+    glPixelStorei(GL_PACK_ALIGNMENT, 1);
+    glPixelStorei(GL_PACK_ROW_LENGTH, 10);
+    glPixelStorei(GL_PACK_SKIP_PIXELS, 2);
+    glPixelStorei(GL_PACK_SKIP_ROWS, 1);
+    glReadPixels(x, y, 4, 3, GL_RGBA, GL_UNSIGNED_BYTE, buf);
+    glPixelStorei(GL_PACK_ROW_LENGTH, 0);
+    glPixelStorei(GL_PACK_SKIP_PIXELS, 0);
+    glPixelStorei(GL_PACK_SKIP_ROWS, 0);
+    { int n=0; for (i=0;i<48;i++) if (buf[i]==0xAA) n++;
+      printf("PACK rowlen/skip: buf[48..51]=%d %d %d %d (expect 64 128 191 255); "
+             "row1@88=%d %d %d; skip-region sentinel=%d/48\n",
+             buf[48],buf[49],buf[50],buf[51], buf[88],buf[89],buf[90], n); }
+
+    /* (2) ALIGNMENT=1, RGB 5x2: row_stride = 15 (tight).  buf[15]=R of row1 (would be padding=170
+     *     at align=4). */
+    for (i = 0; i < 8192; i++) buf[i] = 0xAA;
+    glPixelStorei(GL_PACK_ALIGNMENT, 1);
+    glReadPixels(x, y, 5, 2, GL_RGB, GL_UNSIGNED_BYTE, buf);
+    glPixelStorei(GL_PACK_ALIGNMENT, 4);
+    printf("PACK align=1 RGB 5x2: row1@15=%d %d %d (expect 64 128 191; align-ignored would be 170 170 170)\n",
+           buf[15],buf[16],buf[17]);
+}
+
 static void rd(int x, int y, const char *what)
 {
     GLubyte px[4] = { 1,2,3,4 };
@@ -119,6 +150,7 @@ int main(void)
     rd_packed(80, 80, GL_RGBA, GL_UNSIGNED_INT_8_8_8_8,     "RGBA/8888");    /* 0x4080BFFF */
     rd_packed(80, 80, GL_RGBA, GL_UNSIGNED_INT_8_8_8_8_REV, "RGBA/8888REV"); /* 0xFFBF8040 */
     rd_packed(80, 80, GL_BGRA, GL_UNSIGNED_INT_8_8_8_8,     "BGRA/8888");    /* 0xBF8040FF */
+    rd_pack_test(80, 80);   /* non-default GL_PACK_* state */
     /* 64x64 straddling the quad's left edge (screen x~=358): expect left cols clear, right Q,
      * sharp edge at output col ~16 (i.e. screen x 358 -> block col 32, sampled i+=2). */
     rd_block(326, 350, 64, 64);
