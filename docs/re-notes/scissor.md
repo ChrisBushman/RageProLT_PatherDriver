@@ -63,6 +63,16 @@ CRTC_OFF_PITCH pitch, height from CRTC_V_TOTAL_DISP (V_DISP[26:16]+1) -- via the
 get_surface_size (now returns height in *hi).  The descriptor dims are used only as the
 windowed fallback.  This is a general robustness fix, not point/line-specific.
 
+## Related: FACE CULLING is also host-side (no driver code) -- HW-verified (Picture 101)
+GL_CULL_FACE / glCullFace / glFrontFace are handled entirely by GLEngine's software geometry
+pipeline, same as clipping: it drops the culled triangles BEFORE dispatch.  Proven with two
+triangles (a CCW front + a CW back): cull-off dispatched render_triangles(n=6) = both; cull
+GL_BACK dispatched render_triangles(n=3) = only the front one (the back triangle never reached
+us).  So the driver needs NO cull code -- our setup engine drawing both windings is moot
+because GLEngine only sends the surviving faces.  Cull state IS mirrored in the gli (enable =
+gli+0x66ec bit8 / +0x66f0 bit8, via cullscan) but it's informational -- unused.  Tools:
+mach64_culltest + cullscan.sh/culltest.sh.
+
 ## Caveats / follow-ups
 - mach64_render_elt_tris carries no half-texel inset (emit_tri's texture path), so a
   *textured* clipped polygon samples raw texcoords -- fine for the common untextured case.
