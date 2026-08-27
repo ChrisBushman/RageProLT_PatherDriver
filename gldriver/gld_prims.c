@@ -44,6 +44,19 @@ void mach64_read_vertex(const void *vp, m64_vertex *o, float fb_h)
     float x = *(const float *)(v + GVOFF_X);
     float y = *(const float *)(v + GVOFF_Y);
     float w = *(const float *)(v + GVOFF_W);
+#ifdef GLD_WINSCAN
+    /* DIAGNOSTIC: track the window-space bounding box of the geometry GLEngine hands
+     * us.  If x/y span ~[0..1024]x[0..768] the T&L transform is correct (any tiny render
+     * is ours); if they cluster near the center in a tiny range, GLEngine's viewport
+     * transform was fed a bad drawable size (garbage descriptor). */
+    {   static float xmn=1e9f,xmx=-1e9f,ymn=1e9f,ymx=-1e9f,wmn=1e9f,wmx=-1e9f; static unsigned nn=0;
+        if(x<xmn)xmn=x; if(x>xmx)xmx=x; if(y<ymn)ymn=y; if(y>ymx)ymx=y;
+        if(w<wmn)wmn=w; if(w>wmx)wmx=w;
+        if((++nn & 0x7ff)==0)
+            gld_log("WINSCAN n=%u x[%.1f..%.1f] y[%.1f..%.1f] w(1/wc)[%.4f..%.4f] fb_h=%.0f\n",
+                    nn,xmn,xmx,ymn,ymx,wmn,wmx,fb_h);
+    }
+#endif
     /* Depth for the Z buffer.  The screen-Z slot (+0x08) is 0 (GLEngine's window depth range
      * is degenerate for our surface), so derive it from +0x18.  +0x18 is CLIP-space z
      * (pre-perspective-divide); the true NDC z is clip_z / w = clip_z * (1/w), and +0x0c
@@ -198,6 +211,9 @@ static void emit_tri(gld_context *ctx, const void *base,
     mach64_priv *p = MACH64_PRIV(ctx);
     m64_vertex v0, v1, v2;
     float fb_h = (float)*(const uint32_t *)((const unsigned char *)ctx + 0x1f4);
+#ifdef GLD_PERF
+    unsigned long _et0 = perf_now_us();   /* time OUR per-triangle CPU: read_vertex + emit + inline flush */
+#endif
     mach64_read_vertex(VTX(base, a), &v0, fb_h);
     mach64_read_vertex(VTX(base, b), &v1, fb_h);
     mach64_read_vertex(VTX(base, c), &v2, fb_h);
@@ -218,6 +234,9 @@ static void emit_tri(gld_context *ctx, const void *base,
         }
     }
     mach64_draw_triangle(ctx, &v0, &v1, &v2);
+#ifdef GLD_PERF
+    g_perf_dispatch_us += perf_now_us() - _et0;
+#endif
 }
 
 /* Reject an absurd vertex count: the STRIP/FAN/QUAD dispatch slots are mis-mapped

@@ -109,6 +109,15 @@ typedef struct {
     uint32_t   render_off;         /* page-flip: the currently-HIDDEN buffer we render into */
     uint32_t   fb_w, fb_h;         /* surface dimensions (swap blit extent) */
     uint32_t   fb_pitch;           /* surface pitch in 32-bit pixels        */
+    /* ---- WINDOWED coexistence probe (env MACH64_WIN_RECT="x,y,w,h") ------
+     * win_mode=1 => render the w x h scene into the top-left of the back buffer and BLIT it to
+     * the LIVE front buffer at (win_x,win_y) on present (no CRTC page-flip), so the desktop
+     * stays visible and the WindowServer keeps compositing -- the test for engine coexistence. */
+    uint32_t   win_mode;           /* 1 => windowed blit present into the live desktop */
+    uint32_t   win_x, win_y;       /* window content origin in screen pixels (top-left) */
+    /* ---- Path B port (GLD_APPLE_PROBE): live connections to Apple's ATIRagePro kext ---- */
+    unsigned int apple_cn;         /* io_connect_t to Apple's type-1 GL user client (0=none) */
+    unsigned int apple_surf_cn;    /* io_connect_t to Apple's type-2 IOAccelSurface client (0=none) */
     /* ---- texture state (first cut: one bound 2D texture) -------------- */
     void      *tex_obj;            /* bound/uploaded texobj (t[0x30]=state) */
     uint32_t   tex_off;            /* texel VRAM byte offset (0 = none up)  */
@@ -120,7 +129,9 @@ typedef struct {
      * (each kick quiesces/activates/waits the bus-master ring).  Flushed at
      * gldFlush/Finish/FlushBuffer, before any fill/blit/clear/upload, and when full. */
     m64_cmdbuf batch;              /* persistent cmd buffer over batchbuf    */
-    uint32_t   batchbuf[4096];     /* host-order batch staging               */
+    uint32_t   batchbuf[32768];    /* host-order batch staging (128KB, matches the kext
+                                    * fCmdBuf so a big batch DMA-kicks once via descriptor
+                                    * chaining instead of ~80 sub-4KB kicks/frame) */
 } mach64_priv;
 
 static __inline__ mach64_priv *MACH64_PRIV(gld_context *c)
@@ -183,6 +194,21 @@ void mach64_read_vertex(const void *v, m64_vertex *out, float fb_h); /* gli->hw 
  * interpolates it and the fog pipe blends the fragment against DP_FOG_CLR by it. */
 extern int mach64_fog_on;
 extern int mach64_flat_on;   /* glShadeModel(GL_FLAT): replicate the provoking vertex colour */
+#ifdef GLD_PERF
+extern unsigned long g_perf_dispatch_us;   /* gld_prims.c accumulates emit_tri time here */
+unsigned long perf_now_us(void);
+#endif
+/* Resolve a windowed drawable's surface-ID -> on-screen content bounds via CGS (gld_cgs.c).
+ * Returns 1 + fills x/y/w/h (screen px) on success, 0 if unresolved (caller falls back). */
+int mach64_cgs_resolve_bounds(uint32_t surface_id, int *x, int *y, int *w, int *h);
+
+#ifdef GLD_APPLE_PROBE
+unsigned int mach64_apple_glctx_open(void);   /* open Apple's type-1 GL client, return connection */
+unsigned int mach64_apple_make_surface(uint32_t surface_id, uint32_t mode,
+                                       uint32_t w, uint32_t h); /* type-0 + set_id_mode + set_shape */
+void mach64_apple_bind_surface(unsigned int cn, uint32_t surface_id,
+                               uint32_t x, uint32_t y, uint32_t w, uint32_t h);
+#endif
 void mach64_render_points     (gld_context *, const void *, uint32_t);
 void mach64_render_lines      (gld_context *, const void *, uint32_t);
 void mach64_render_line_strip (gld_context *, const void *, uint32_t);

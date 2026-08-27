@@ -103,49 +103,10 @@ int gldUpdateDispatch(gld_context *ctx, void *table, uint32_t flags)
     gld_log("  slot[0x28]=%p slot[0x48]=%p installed at table+off\n",
             (void *)mach64_render_triangles, (void *)mach64_render_triangles);
 
-    /* DOUBLE-BUFFER PRESENT.  A DB context gets NO per-frame flush/finish/swap call
-     * from GLEngine -- gldFlush/gldFinish/gldFlushBuffer never fire (the reference
-     * relies on the kernel/WindowServer to present; our minimal kext can't).  What
-     * GLEngine DOES do is re-invoke gldUpdateDispatch once per frame, so drive the
-     * present cycle here: submit the just-finished frame's batched triangles to the
-     * back buffer, blit back->front, and arm a back-clear for the next frame.  The
-     * batch holds the previous frame's geometry (gldUpdateDispatch is the frame
-     * boundary), so this presents with one frame of latency but keeps the swap chain
-     * running with no app-side glFinish.  Guard: no-op until a DB drawable is bound. */
-    {   mach64_priv *p = MACH64_PRIV(ctx);
-        if (p && p->dbuf && p->back_off) {
-            /* gldUpdateDispatch fires at FRAME END (after this frame's render slots),
-             * so finalize the frame right here with NO latency: render the batched
-             * triangles to the back, present, then clear the back for the next frame.
-             * We own the clear explicitly (frame_new=0) rather than deferring it to the
-             * next draw -- the deferred path was leaving the back uncleared -> residue. */
-            /* PAGE-FLIP present (register-guide-derived, replaces the blit): render
-             * this frame to the hidden buffer (render_off), flip the CRTC scanout to
-             * it (loads at vblank -- tear-free, zero-copy), then swap roles and clear
-             * the newly-hidden buffer for the next frame.  Alternates front<->back. */
-            /* DEFERRED-WAIT present: wait for the PREVIOUS frame's flip to retire HERE --
-             * at the frame boundary, after GLEngine has already dispatched this frame's
-             * geometry -- so the ~vblank wait overlaps that dispatch instead of stalling
-             * inside the flip.  Then render_off (freed by that flip) is safe to draw. */
-            mach64_wait_flip(ctx);                /* wait prev flip (overlapped w/ dispatch) */
-            mach64_flush_batch(ctx);              /* this frame: clear+geometry, 1 DMA -> render_off */
-            mach64_flip(ctx, p->render_off);      /* write CRTC, record pending (no wait) */
-            p->render_off = (p->render_off == p->front_off) ? p->back_off
-                                                            : p->front_off;
-            mach64_set_render_target(ctx, p->render_off, p->fb_pitch);
-            /* PERF: fold the new frame's clears into the batch so clear + geometry go out
-             * as ONE submit.  Z clear self-gates on Z_EN (its own submit only when depth
-             * is on); the colour clear is emitted straight into the batch, ahead of this
-             * frame's triangles. */
-            /* Keep the Z clear as its OWN submit (not folded into the batch): it overlaps
-             * the pending page-flip / vblank dead time and is effectively free there --
-             * folding it into the geometry submit serialised it into the critical path and
-             * measured ~7ms/frame SLOWER (HW-timed).  So the separate submit wins. */
-            if (p->z_off) mach64_clear_zbuffer(ctx);
-            mach64_batch_clear_color(ctx);        /* clear folded into the triangle batch */
-            p->frame_new = 0;
-        }
-    }
+    /* DOUBLE-BUFFER PRESENT lives in mach64_dispatch_render_ctl (slot 0x60), NOT here.
+     * gldUpdateDispatch fires per state-change (~29-48x/frame in a real app), so presenting
+     * here page-flipped + waited vblank dozens of times a frame -- atlantis crawled at <1fps.
+     * Slot 0x60 is GLEngine's once-per-frame swap hook; the present cycle runs there now. */
 
     /* MUST return 0: GLEngine compares this return (r3) to a cached flag to
      * decide whether to keep our hardware dispatch or reconfigure to software

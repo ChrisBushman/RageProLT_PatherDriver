@@ -18,16 +18,26 @@
 #include <stdarg.h>
 #include <stdlib.h>
 
-/* ---- diagnostic log ------------------------------------------------- */
+/* ---- diagnostic log -------------------------------------------------
+ * Open the log ONCE and keep the FILE* -- writes are stdio-buffered and flushed on the app's
+ * exit().  The previous fopen("a")+vfprintf+fclose PER CALL cost ~1ms each on the Lombard's
+ * IDE disk; at the ~300 log lines/frame a real app (atlantis) produces that alone capped it
+ * at ~2fps (the rendering was never the bottleneck).  Set MACH64_GLD_NOLOG=1 to compile-free
+ * disable logging entirely (skips even the vfprintf formatting) for pure perf runs. */
 void gld_log(const char *fmt, ...)
 {
+    static FILE *f = NULL;
+    static int  tried = 0;
     va_list ap;
-    FILE *f = fopen("/tmp/mach64gld.log", "a");
+    if (!tried) {
+        tried = 1;
+        if (!getenv("MACH64_GLD_NOLOG"))
+            f = fopen("/tmp/mach64gld.log", "w");
+    }
     if (!f) return;
     va_start(ap, fmt);
     vfprintf(f, fmt, ap);
     va_end(ap);
-    fclose(f);
 }
 
 /* ---- gldAttachDrawable: bind the app's drawable as the render target -
@@ -65,8 +75,12 @@ int gldAttachDrawable(gld_context *ctx, int type, void *drawable, uint32_t flags
          * CRTC HARDWARE (pitch = width, V_DISP+1 = height), NOT the drawable descriptor:
          * GLEngine's fullscreen descriptor has been observed pointing at reused heap (d[2]
          * = ASCII "path", d[1] a growing garbage value) which would leave ctx+0x1f4 junk
-         * and render everything offscreen.  The CRTC is the authoritative fullscreen size. */
-        if ((type == 0x36 || type == 0x5a) && ctx->connect) {
+         * and render everything offscreen.  The CRTC is the authoritative fullscreen size.
+         * type 0x50 is included: a GLUT game-mode (fullscreen) app attaches its drawable
+         * as 0x50 with a bogus descriptor size (atlantis: d[1]=441 d[2]=258), so it too
+         * takes the live CRTC scanout base + dims.  (Real WINDOWED 0x50 support -- parsing
+         * the descriptor for a sub-rect base/pitch -- is a separate, later task.) */
+        if ((type == 0x36 || type == 0x50 || type == 0x5a) && ctx->connect) {
             uint32_t crtc = 0, base = 0, pitch = 0, hi = 0;
             IOConnectMethodScalarIScalarO(ctx->connect, kMach64Sel_get_surface_size,
                                           0, 4, &crtc, &base, &pitch, &hi);
@@ -80,6 +94,12 @@ int gldAttachDrawable(gld_context *ctx, int type, void *drawable, uint32_t flags
 
         gld_log("  drawable[0..2] = 0x%x 0x%x 0x%x  -> surface %ux%u target base=0x%x\n",
                 d[0], d[1], d[2], width, height, base_bytes);
+        /* WINDOWED-MODE PROBE: dump the raw drawable descriptor so we can reverse the window
+         * geometry (offset/pitch/bounds) for windowed support.  A windowed context attaches as
+         * type 0x50 with a distinctively-sized test window, so we can spot its width/height/x/y
+         * in these words.  16 words = 64 bytes; Apple's CGS surface descriptor is larger. */
+        gld_log("  descdump[0..15] = %08x %08x %08x %08x %08x %08x %08x %08x %08x %08x %08x %08x %08x %08x %08x %08x\n",
+                d[0],d[1],d[2],d[3],d[4],d[5],d[6],d[7],d[8],d[9],d[10],d[11],d[12],d[13],d[14],d[15]);
 
         /* Populate the ctx surface fields GLEngine reads to consider the drawable
          * renderable -- WITHOUT these it culls all geometry (no dispatch).
@@ -111,11 +131,15 @@ int gldAttachDrawable(gld_context *ctx, int type, void *drawable, uint32_t flags
          * from gldCreateContext): word0 |= 2.  GLEngine reads that flag to decide the
          * context has a bound back-buffer surface and dispatches primitives normally
          * instead of falling back to slot 0x60.  It also sets ctx+0x1e4=1 and requires
-         * caps bit 0x20 (ctx+0x2c) CLEAR.  Our DB context attaches as type 0x36 but
-         * never set this -> GLEngine routed it to 0x60 -> black.  Set it now. */
-        if (type == 0x36) {
+         * caps bit 0x20 (ctx+0x2c) CLEAR.
+         * The gate is a property of the DOUBLE-BUFFERED CONTEXT, not the drawable
+         * type: gate on pv->dbuf (armed by the DB pixel format in gldCreateContext),
+         * not type==0x36.  A real GLUT app (atlantis) attaches its DB drawable as
+         * type 0x50 -- with the old type==0x36 gate that path was skipped, so
+         * GLEngine fell back to slot 0x60 and every frame rendered blank. */
+        if (MACH64_PRIV(ctx)->dbuf) {
             uint32_t a7p = *(uint32_t *)(c + 0x14);
-            *(uint32_t *)(c + 0x2c) &= ~0x20u;      /* caps 0x20 clear (0x36 gate) */
+            *(uint32_t *)(c + 0x2c) &= ~0x20u;      /* caps 0x20 clear (DB dispatch gate) */
             *(uint32_t *)(c + 0x1e4) = 1;
             if (a7p > 0x10000 && a7p < 0x40000000) {
                 uint32_t w0 = *(uint32_t *)(uintptr_t)a7p;
@@ -160,8 +184,60 @@ int gldAttachDrawable(gld_context *ctx, int type, void *drawable, uint32_t flags
              * NDC z in mach64_read_vertex; Z_CNTL follows the app's GL depth state,
              * synced per-draw in mach64_flush / render_tri_strip -- not forced here. */
             mach64_set_zbuffer(ctx, z_off, fb_pitch_px);
+
+            /* WINDOWED coexistence probe: env MACH64_WIN_RECT="x,y,w,h" (screen pixels).  Keep
+             * the front/back/pitch from the dbuf block (screen-sized), but override the RENDER
+             * dims to the window w x h and mark win_mode.  render_ctl then renders w x h into the
+             * back buffer's top-left and BLITs it to the live front at (x,y) -- no CRTC page-flip,
+             * so the desktop stays visible and the WindowServer keeps compositing.  That is the
+             * engine-coexistence test: our bus-master blit + geometry DMA run concurrently with
+             * the live WS.  (Geometry is bounded by the w x h viewport the app sets.) */
+            {   int wx = 0, wy = 0, ww = 0, wh = 0, got = 0;
+                /* Resolve the windowed content bounds: CGS surface-ID -> window bounds FIRST (the
+                 * real, automatic path); env MACH64_WIN_RECT is the manual fallback. */
+                if (pv->dbuf && mach64_cgs_resolve_bounds(d[0], &wx, &wy, &ww, &wh))
+                    got = 1;
+                if (!got) {
+                    const char *wr = getenv("MACH64_WIN_RECT");
+                    if (pv->dbuf && wr && sscanf(wr, "%d,%d,%d,%d", &wx, &wy, &ww, &wh) == 4)
+                        got = 1;
+                }
+                /* Activate windowed blit only for a real SUB-screen / offset window (a fullscreen
+                 * drawable -- full-width at the origin -- keeps the CRTC page-flip path). */
+                if (got && ww > 0 && wh > 0 && ww <= (int)fb_pitch_px && wh <= 2048 &&
+                    (ww < (int)fb_pitch_px || wx > 0 || wy > 0)) {
+                    pv->win_mode = 1; pv->win_x = (uint32_t)wx; pv->win_y = (uint32_t)wy;
+                    pv->fb_w = (uint32_t)ww; pv->fb_h = (uint32_t)wh;
+                    *(uint32_t *)(c + 0x1f0) = (uint32_t)ww;
+                    *(uint32_t *)(c + 0x1f4) = (uint32_t)wh;
+                    gld_log("  [win] WINDOWED %dx%d at (%d,%d): render->back, blit to LIVE front\n",
+                            ww, wh, wx, wy);
+                }
+            }
         }
         MACH64_PRIV(ctx)->frame_new = 1;   /* clear Z (+ back) before the first frame */
+#ifdef GLD_APPLE_PROBE
+        /* Path B Phase 2: the drawable descriptor's word[0] is the CGS surface ID (e.g. 0x8013).
+         * Test whether Apple's kext resolves it + binds -- the pivotal port question.  Uses the
+         * window bounds if windowed, else the fullscreen dims.  No region mapping (safe). */
+        {   mach64_priv *pv2 = MACH64_PRIV(ctx);
+            uint32_t sx = pv2->win_mode ? pv2->win_x : 0;
+            uint32_t sy = pv2->win_mode ? pv2->win_y : 0;
+            uint32_t sw = pv2->win_mode ? pv2->fb_w  : width;
+            uint32_t sh = pv2->win_mode ? pv2->fb_h  : height;
+            /* Path B (VALIDATED sequence, tools/mach64_surfscan.c): register + shape the surface on
+             * Apple's accelerator, then the GL set_surface binds it.  mode 0x24 = 8888 | windowed
+             * (windowed path stores idx unchanged at surf+0x98, accepts the CGS-sized handle);
+             * make_surface now also set_shapes with the window dims to allocate the backing that
+             * set_surface's bind requires. */
+            pv2->apple_surf_cn = mach64_apple_make_surface(d[0], 0x24u, sw, sh);
+            /* NOTE: IOConnectAddClient (connectClient) PANICS here -- it does release/retain via
+             * virtual calls on ctx+0x88 (the IOATIRProShared object), which is NULL on our bare
+             * connections.  The share group needs an IOATIRProShared created first (reverse the
+             * setup OFFLINE before trying again).  Reverted -- do NOT re-add without that. */
+            mach64_apple_bind_surface(pv2->apple_cn, d[0], sx, sy, sw, sh);
+        }
+#endif
 
         /* EXPERIMENT (root-cause validation): GLEngine leaves its drawable
          * descriptor gli[0x789c] ALL-ZEROS for our HW surface (surface-binding

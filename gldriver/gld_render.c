@@ -21,6 +21,18 @@
 #include "../common/mach64_abi.h"
 #include "../common/mach64_regs.h"
 
+#ifdef GLD_PERF
+/* Frame-time profiler: split each frame into GPU/DMA time (blocked in mach64_submit waiting
+ * for the engine) vs wait-flip (vblank) vs the remainder (CPU building triangles).  Prints to
+ * the app's stderr (survives MACH64_GLD_NOLOG) once every 15 frames from render_ctl. */
+#include <sys/time.h>
+#include <stdio.h>
+unsigned long g_perf_submit_us = 0, g_perf_wait_us = 0, g_perf_copy_us = 0,
+              g_perf_dispatch_us = 0, g_perf_present_us = 0;
+unsigned long perf_now_us(void)   /* non-static: gld_prims.c times emit_tri into g_perf_dispatch_us */
+{ struct timeval t; gettimeofday(&t, 0); return (unsigned long)t.tv_sec * 1000000UL + t.tv_usec; }
+#endif
+
 /* ---- geometry: post-T&L float vertex -> hardware m64_vertex ----------
  * GLEngine gives window-space x,y (pixels, top-left origin), z, w, and a packed
  * colour.  The setup engine wants x,y as *4 fixed point (2 sub-pixel bits) and
@@ -54,12 +66,25 @@ uint32_t mach64_submit(gld_context *ctx, m64_cmdbuf *cb)
     if (cb->overflow)              /* stream didn't fit -> drop, don't submit */
         return p->last_stamp;
 
+#ifdef GLD_PERF
+    { unsigned long a = perf_now_us();
+      bytes = m64_cb_write_le(cb, ctx->fb);   /* uncached type-4 buffer: the suspect copy */
+      g_perf_copy_us += perf_now_us() - a; }
+#else
     bytes = m64_cb_write_le(cb, ctx->fb);   /* ctx->fb = type-4 command buffer */
+#endif
 
     /* new_vertex_buffer(size) -> kext rotateCommandBuffer builds the descriptor,
      * quiesces, activates bus-mastering, kicks, waits for idle, restores. */
+#ifdef GLD_PERF
+    { unsigned long a = perf_now_us();
+      IOConnectMethodScalarIScalarO(ctx->connect, kMach64Sel_new_vertex_buffer,
+                                    1, 1, (int)bytes, &bufferID);
+      g_perf_submit_us += perf_now_us() - a; }
+#else
     IOConnectMethodScalarIScalarO(ctx->connect, kMach64Sel_new_vertex_buffer,
                                   1, 1, (int)bytes, &bufferID);
+#endif
     p->last_stamp = bufferID;
     return bufferID;
 }
@@ -239,7 +264,13 @@ void mach64_flip(gld_context *ctx, uint32_t off)
 void mach64_wait_flip(gld_context *ctx)
 {
     if (!ctx->connect) return;
+#ifdef GLD_PERF
+    { unsigned long a = perf_now_us();
+      IOConnectMethodScalarIScalarO(ctx->connect, kMach64Sel_wait_flip, 0, 0);
+      g_perf_wait_us += perf_now_us() - a; }
+#else
     IOConnectMethodScalarIScalarO(ctx->connect, kMach64Sel_wait_flip, 0, 0);
+#endif
 }
 
 /* ---- screen-to-screen (VRAM->VRAM) blit via the 2D GUI engine --------
@@ -329,14 +360,14 @@ int mach64_draw_triangle(gld_context *ctx, const m64_vertex *v0,
                     sizeof(p->batchbuf) / sizeof(p->batchbuf[0]));
 
     /* Flush before this triangle if the state block (~96 dwords when dirty) + the
-     * triangle (~64 dwords) might not fit.  HARD CAP: the bus-master descriptor's
-     * byte-count field is 12-bit -- a submit larger than 4095 bytes (~1023 dwords) is
-     * TRUNCATED by the DMA to (bytes & 0xfff) and only its first ~1KB executes (HW-proven:
-     * a 5936-byte batch drew just its first ~8 points).  So bound each batch well under
-     * 4096 bytes; larger geometry splits across multiple submits (mach64_flush_batch
-     * re-marks state dirty so each fresh batch re-emits the render state). */
+     * triangle (~64 dwords) might not fit.  The 12-bit bus-master byte-count limit no longer
+     * caps the BATCH: the kext now CHAINS the submit across multiple <=4092-byte descriptors
+     * (submitCommandBuffer), so a batch can fill the whole command buffer and still DMA-kick
+     * ONCE.  Bound the batch by the smaller of the command buffer (fb_size/4) and the batch
+     * staging (batchbuf), leaving headroom for the terminator + a final state+triangle.
+     * (Was capped at 960 dwords -> ~80 kicks/frame -> ~3fps, almost all submit overhead.) */
     limit = ctx->fb_size / 4;
-    if (limit > 960) limit = 960;      /* 960 dwords = 3840 bytes < 4096 DMA limit */
+    if (limit > 32000) limit = 32000;  /* <= batchbuf[32768], with headroom */
     if (limit < 256) limit = 256;
     need = ((p->dirty & MACH64_DIRTY_STATE) ? 96u : 0u) + 64u;
     if (p->batch.n + need > limit - 8)
@@ -509,20 +540,73 @@ void mach64_dispatch_complete(gld_context *ctx, const void *v, uint32_t n)
     gld_log("mach64_dispatch_complete(0x4c) v=%p n=%u\n", v, n);
     (void)ctx;
 }
-/* Dispatch slot 0x60 = the SOLE render entry GLEngine uses for a DOUBLE-BUFFERED
- * context (the per-primitive slots 0x18-0x3c and control slots 0x00-0x14 never
- * fire for DB -- verified).  RE status (tools/mach64_dbufanim, -DGLD_DBUF):
- *   r4 = a state buffer (const across frames though the geometry moves -> NOT the
- *        vertex data; no heap pointer inside it),
- *   r5 = a small count (4,6,8 seen),  r6 = 0xa8,  r7 = 0xc03,
- *   r8 = a GLEngine FUNCTION pointer (PPC code: mflr/mtlr/blr) -- a callback.
- * So the transformed geometry is reached via the r8 callback / an internal buffer,
- * not the args -- recovering it needs GLEngine disassembly.  Until then a DB
- * context renders nothing; DB advertising stays gated OFF (see gld_pixelformat). */
+/* Dispatch slot 0x60 = GLEngine's per-frame render-control / BUFFER-SWAP hook.
+ * aglSwapBuffers routes here once per frame (args are a fixed control block -- identical
+ * every call, NOT geometry: the transformed geometry now reaches our per-primitive slots
+ * via the DB-gate in gldAttachDrawable).  The reference driver no-ops this slot and relies
+ * on the WindowServer to page-flip; our minimal kext can't, so we drive the DOUBLE-BUFFER
+ * present cycle HERE -- exactly once per frame.
+ * (This present USED to run in gldUpdateDispatch on the assumption that gUD was the frame
+ * boundary.  True for our single-state test tools -- gUD fired ~1x/frame -- but a real app
+ * like atlantis re-installs the dispatch table per state change, ~29-48x/frame, so we
+ * page-flipped + waited vblank dozens of times per frame and the demo crawled at <1fps.
+ * Slot 0x60 is the real once-per-frame signal.) */
 void mach64_dispatch_render_ctl(gld_context *ctx, uint32_t a4, uint32_t a5,
                                 uint32_t a6, uint32_t a7, uint32_t a8)
 {
-    gld_log("render_ctl(0x60) r4=0x%x r5=0x%x r6=0x%x r7=0x%x r8=0x%x (DB render -- TODO)\n",
-            a4, a5, a6, a7, a8);
-    (void)ctx;
+    (void)a4; (void)a5; (void)a6; (void)a7; (void)a8;
+    {   mach64_priv *p = MACH64_PRIV(ctx);
+        if (p && p->dbuf && p->back_off) {
+#ifdef GLD_PERF
+            unsigned long _pres0 = perf_now_us();
+#endif
+            /* DEFERRED-WAIT page-flip present (see the retired gldUpdateDispatch comment):
+             * wait the previous frame's flip here (overlapped with GLEngine's dispatch of
+             * this frame), submit this frame's clear+geometry to render_off, flip the CRTC
+             * to it (loads at vblank, tear-free, zero-copy), swap roles, then clear the
+             * newly-hidden buffer for the next frame. */
+            if (p->win_mode) {
+                /* WINDOWED present (coexistence probe): flush the w x h scene to the back
+                 * buffer, then BLIT it into the LIVE front at (win_x,win_y).  No page-flip --
+                 * the desktop stays visible and the WindowServer keeps compositing while our
+                 * bus-master blit + geometry DMA run.  We always render into `back`, never swap. */
+                mach64_flush_batch(ctx);
+                mach64_blit_surface(ctx, p->back_off, p->front_off,
+                                    0, 0, p->win_x, p->win_y, p->fb_w, p->fb_h, p->fb_pitch);
+                if (p->z_off) mach64_clear_zbuffer(ctx);
+                mach64_batch_clear_color(ctx);
+                p->frame_new = 0;
+            } else {
+                mach64_wait_flip(ctx);
+                mach64_flush_batch(ctx);
+                mach64_flip(ctx, p->render_off);
+                p->render_off = (p->render_off == p->front_off) ? p->back_off
+                                                                : p->front_off;
+                mach64_set_render_target(ctx, p->render_off, p->fb_pitch);
+                if (p->z_off) mach64_clear_zbuffer(ctx);   /* own submit: overlaps vblank dead time */
+                mach64_batch_clear_color(ctx);             /* folded into next frame's batch */
+                p->frame_new = 0;
+            }
+#ifdef GLD_PERF
+            {   static unsigned long last = 0; static int fr = 0;
+                unsigned long now = perf_now_us();
+                g_perf_present_us += now - _pres0;   /* our present cycle (flip+clears+waitflip) */
+                if (last) {
+                    unsigned long wall = now - last;
+                    unsigned long ours = g_perf_dispatch_us + g_perf_present_us;   /* all OUR driver code */
+                    unsigned long gle  = wall > ours ? wall - ours : 0;            /* the rest = GLEngine T&L */
+                    if ((++fr % 5) == 0)
+                        fprintf(stderr,
+                            "PERF wall=%lu OUR[emit=%lu present=%lu] GLengine(T&L)=%lu us [GL %lu%%] (copy=%lu submit=%lu wait=%lu)\n",
+                            wall, g_perf_dispatch_us, g_perf_present_us, gle,
+                            wall ? (gle * 100UL / wall) : 0,
+                            g_perf_copy_us, g_perf_submit_us, g_perf_wait_us);
+                }
+                last = now;
+                g_perf_dispatch_us = 0; g_perf_present_us = 0;
+                g_perf_submit_us = 0; g_perf_wait_us = 0; g_perf_copy_us = 0;
+            }
+#endif
+        }
+    }
 }

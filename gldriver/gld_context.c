@@ -65,6 +65,9 @@ int gldCreateContext(gld_context **outp, void *pixfmt, void *shared,
     if (!ctx) return 0x2720;
 
     gld_log("gldCreateContext(pixfmt=%p)\n", pixfmt);
+#ifdef GLD_APPLE_PROBE
+    unsigned int apple_cn = mach64_apple_glctx_open();   /* Path B: open Apple's GL client, keep it */
+#endif
     io_service_t svc = mach64_match_service(0);
     if (IOServiceOpen(svc, mach_task_self(), MACH64_GL_CONNECT_TYPE,
                       &ctx->connect) != KERN_SUCCESS) {
@@ -98,6 +101,9 @@ int gldCreateContext(gld_context **outp, void *pixfmt, void *shared,
     ctx->backend = calloc(1, sizeof(mach64_priv));
     if (!ctx->backend) { IOServiceClose(ctx->connect); free(ctx); return 0x2720; }
     mach64_init_state((mach64_priv *)ctx->backend);
+#ifdef GLD_APPLE_PROBE
+    ((mach64_priv *)ctx->backend)->apple_cn = apple_cn;   /* carry Apple's GL connection to attach */
+#endif
 
     /* Consume the chosen pixel format (from gldChoosePixelFormat): record the
      * colour/buffer caps.  GLEngine reads ctx+0x2c to decide it can hardware-
@@ -164,6 +170,12 @@ int gldCreateContext(gld_context **outp, void *pixfmt, void *shared,
 int gldDestroyContext(gld_context *ctx)
 {
     if (!ctx) return 0;
+#ifdef GLD_APPLE_PROBE
+    if (ctx->backend && MACH64_PRIV(ctx)->apple_cn)
+        IOServiceClose((io_connect_t)MACH64_PRIV(ctx)->apple_cn);
+    if (ctx->backend && MACH64_PRIV(ctx)->apple_surf_cn)
+        IOServiceClose((io_connect_t)MACH64_PRIV(ctx)->apple_surf_cn);
+#endif
     if (ctx->backend) { free(ctx->backend); ctx->backend = 0; }
     /* TODO: IOConnectUnmapMemory the four regions before closing. */
     if (ctx->connect) IOServiceClose(ctx->connect);

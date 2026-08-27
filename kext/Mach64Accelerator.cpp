@@ -64,7 +64,10 @@ bool Mach64Accelerator::start(IOService *provider)
      * clientMemoryForType) so no PPC cache flush is needed. */
     IOOptionBits dmaOpts = kIOMemoryPhysicallyContiguous |
                            kIOMemoryKernelUserShared | kIODirectionOutIn;
-    fCmdBuf = IOBufferMemoryDescriptor::withOptions(dmaOpts, 0x10000, PAGE_SIZE);
+    /* 128KB (was 64KB): with descriptor chaining a whole batch is submitted in one kick, so a
+     * bigger buffer = fewer kicks/frame.  Physically contiguous (dmaOpts) so chained
+     * descriptors can address the whole span. */
+    fCmdBuf = IOBufferMemoryDescriptor::withOptions(dmaOpts, 0x20000, PAGE_SIZE);
     /* ring MUST be 16KB-aligned: BM_GUI_TABLE|CIRCULAR_BUF_SIZE_16KB treats it
      * as a 16KB circular buffer and masks the base to 16KB. */
     fRing   = IOBufferMemoryDescriptor::withOptions(dmaOpts, 0x4000, 0x4000);
@@ -98,7 +101,8 @@ bool Mach64Accelerator::start(IOService *provider)
     fCompletedStamp = 0;
     fFlipPending    = 0;
     fFlipScanline   = 0;
-    fCmdBufSize     = 0x10000;   /* must match the fCmdBuf allocation above */
+    fOrigCrtc       = 0;   /* captured at the first page flip, restored in stop() */
+    fCmdBufSize     = 0x20000;   /* must match the fCmdBuf allocation above */
 
     fStamp   = 0;
     /* Real values come from reading CONFIG_CHIP_ID / memory config; the plugin
@@ -126,6 +130,14 @@ bool Mach64Accelerator::start(IOService *provider)
 
 void Mach64Accelerator::stop(IOService *provider)
 {
+    /* Put the desktop's scanout register back before we go away, so `kextunload` returns the
+     * display to the WindowServer's framebuffer instead of leaving the CRTC on our render
+     * buffer (the frozen-frame-on-exit bug).  fRegBase is still mapped here (free() releases
+     * it later). */
+    if (fOrigCrtc && fRegBase) {
+        regWrite(MACH64_CRTC_OFF_PITCH, fOrigCrtc);
+        fOrigCrtc = 0;
+    }
     super::stop(provider);
 }
 
@@ -187,10 +199,32 @@ bool Mach64Accelerator::waitIdle(void) const
  * already end in a SRC_CNTL=0 terminator, appended by the GL plugin). */
 IOReturn Mach64Accelerator::submitCommandBuffer(UInt32 byteCount)
 {
-    ringWrite(0,  MACH64_APERTURE_OFFSET + MACH64_BM_ADDR);
-    ringWrite(4,  (UInt32)fCmdBufBus);
-    ringWrite(8,  byteCount | MACH64_DMA_HOLD_OFFSET | MACH64_DMA_EOL);
-    ringWrite(12, 0);
+    /* CHAIN the command stream across as many ring descriptors as it takes.  The bus-master
+     * byte-count field is 12-bit, so ONE descriptor tops out at 4095 bytes -- a whole frame
+     * is far larger.  The old model did one descriptor (and one full quiesce/kick/wait-idle
+     * cycle) per <=960-dword batch => ~80 kicks/frame => ~3fps, almost all submit overhead.
+     * Every descriptor uses HOLD_OFFSET, i.e. all data is streamed to the single BM_ADDR
+     * command port, so the GUI parser sees ONE continuous dword stream regardless of where
+     * the DMA chunk boundaries fall -- we can split at a fixed 4092-byte stride and give only
+     * the LAST descriptor EOL.  The engine walks descriptors from the ring base until EOL,
+     * so a 128KB buffer becomes ~32 descriptors kicked+waited ONCE.  (fCmdBuf is physically
+     * contiguous, so fCmdBufBus+off is a valid bus address across the whole buffer; the ring
+     * is 16KB = 1024 descriptors, far more than fCmdBufSize/4092 could ever need.) */
+    {
+        const UInt32 CHUNK = 4092;          /* <=4095 and 4-aligned (0x1000 would trunc to 0) */
+        UInt32 off = 0, ring = 0;
+        do {
+            UInt32 n = byteCount - off;
+            if (n > CHUNK) n = CHUNK;
+            ringWrite(ring + 0,  MACH64_APERTURE_OFFSET + MACH64_BM_ADDR);
+            ringWrite(ring + 4,  (UInt32)fCmdBufBus + off);
+            ringWrite(ring + 8,  n | MACH64_DMA_HOLD_OFFSET |
+                                 ((off + n >= byteCount) ? MACH64_DMA_EOL : 0));
+            ringWrite(ring + 12, 0);
+            ring += 16;
+            off  += n;
+        } while (off < byteCount);
+    }
 
     /* No HW lock is shared with ATIRagePro, so an async collision is possible
      * between save and restore -> display glitch/reboot; acceptable headless
@@ -312,6 +346,13 @@ IOReturn Mach64Accelerator::setSurface(Mach64GLUserClient *c,
         UInt32 nw = (hd | MACH64_HW_DEBUG_DBL_BUFFER_EN) & ~MACH64_HW_DEBUG_BLOCK_DBL_BUF;
         if (nw != hd) regWrite(MACH64_HW_DEBUG, nw);
     }
+    /* Save the desktop's scanout register the FIRST time we hijack it, so stop() (kextunload)
+     * can put it back.  Without this, the CRTC is left pointing at our render buffer after the
+     * app exits and NOTHING recovers the desktop -- not even `killall WindowServer`, because
+     * Apple's framebuffer driver caches its own CRTC_OFF_PITCH value and won't rewrite the
+     * register it believes is already correct.  Only a direct HW write (here / in stop) fixes
+     * it.  Read BEFORE this first flip, so it's the genuine pre-hijack desktop value. */
+    if (!fOrigCrtc) fOrigCrtc = regRead(MACH64_CRTC_OFF_PITCH);
     regWrite(MACH64_CRTC_OFF_PITCH, a);   /* loads at the next vblank (HW double-buffered) */
     /* DEFERRED WAIT: do NOT block for the vblank load here.  Record the flip as pending
      * and the current scanline; the caller (driver) does its next-frame work (GLEngine

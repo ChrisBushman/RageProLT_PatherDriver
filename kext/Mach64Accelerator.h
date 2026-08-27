@@ -46,6 +46,7 @@ class Mach64Accelerator : public IOService
     UInt32                    fCmdBufSize;     // bytes in the command buffer
     UInt32                    fFlipPending;    // 1 => a page flip was written, not yet retired
     UInt32                    fFlipScanline;   // scanline at the flip write (vblank-load detect)
+    UInt32                    fOrigCrtc;       // desktop CRTC_OFF_PITCH, saved at first flip, restored in stop()
 
     // ---- register / ring MMIO helpers (little-endian, see mach64_regs.h) --
     UInt32 regRead (UInt32 off) const;
