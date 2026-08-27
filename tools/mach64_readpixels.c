@@ -113,10 +113,20 @@ static void rd_block(int x, int y, int w, int h)
     printf("  block totals: quad=%d clear=%d other/unwritten=%d (of %d)\n", nq, nc, no, w*h);
 }
 
+/* Read the depth buffer at (x,y) as GL_UNSIGNED_SHORT and GL_FLOAT. */
+static void rd_depth(int x, int y, const char *what)
+{
+    GLushort z = 0x9999; GLfloat zf = -1.0f;
+    glReadPixels(x, y, 1, 1, GL_DEPTH_COMPONENT, GL_UNSIGNED_SHORT, &z);
+    glReadPixels(x, y, 1, 1, GL_DEPTH_COMPONENT, GL_FLOAT, &zf);
+    printf("DEPTH %-6s (%d,%d) = ushort %5u  float %.4f  err=0x%x\n",
+           what, x, y, (unsigned)z, zf, (unsigned)glGetError());
+}
+
 int main(void)
 {
     GDHandle dev = GetMainDevice();
-    GLint at[] = { AGL_RGBA, AGL_ACCELERATED, AGL_FULLSCREEN, AGL_NONE };
+    GLint at[] = { AGL_RGBA, AGL_DEPTH_SIZE, 16, AGL_ACCELERATED, AGL_FULLSCREEN, AGL_NONE };
     AGLPixelFormat pf = aglChoosePixelFormat(&dev, 1, at);
     AGLContext ctx;
     GLfloat q[8] = { -0.3f,-0.3f, 0.3f,-0.3f, 0.3f,0.3f, -0.3f,0.3f };
@@ -130,8 +140,11 @@ int main(void)
     glViewport(0, 0, 1024, 768);
     glDisable(GL_TEXTURE_2D);
 
+    glEnable(GL_DEPTH_TEST);
+    glDepthFunc(GL_LEQUAL);
     glClearColor(0.25f, 0.5f, 0.75f, 1.0f);   /* -> ~ (64,128,191) */
-    glClear(GL_COLOR_BUFFER_BIT);
+    glClearDepth(1.0);                         /* far -> Z16 = 65535 */
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
     glColor3f(1, 1, 1);
     glEnableClientState(GL_VERTEX_ARRAY);
     glVertexPointer(2, GL_FLOAT, 0, q);
@@ -151,6 +164,9 @@ int main(void)
     rd_packed(80, 80, GL_RGBA, GL_UNSIGNED_INT_8_8_8_8_REV, "RGBA/8888REV"); /* 0xFFBF8040 */
     rd_packed(80, 80, GL_BGRA, GL_UNSIGNED_INT_8_8_8_8,     "BGRA/8888");    /* 0xBF8040FF */
     rd_pack_test(80, 80);   /* non-default GL_PACK_* state */
+    /* DEPTH readback: clear=far (~1.0/65535); quad z=0 -> window depth 0.5 (~0.5/32767) */
+    rd_depth( 80,  80, "clear");
+    rd_depth(512, 384, "quad");
     /* 64x64 straddling the quad's left edge (screen x~=358): expect left cols clear, right Q,
      * sharp edge at output col ~16 (i.e. screen x 358 -> block col 32, sampled i+=2). */
     rd_block(326, 350, 64, 64);

@@ -1,5 +1,14 @@
 # glReadPixels — IMPLEMENTED + WORKING (2026-08-27)  (was: characterized limitation)
 
+## DEPTH readback (2026-08-27): WORKS
+glReadPixels(GL_DEPTH_COMPONENT, {GL_UNSIGNED_SHORT | GL_UNSIGNED_INT | GL_FLOAT}) reads our 16-bit
+Z buffer (p->z_off/z_pitch, Z16 stored LE) via the same mach64_ctl08 hook.  Depth is LINEAR
+(mach64_pack_vertex: zi = window_depth*65535), so ushort = Z16, float = Z16/65535, uint = Z16<<16|Z16.
+HW-verified: cleared far -> 65535 / 1.0 exactly; a z=0 quad -> 16384 / 0.25 (the driver's actual
+stored window depth, ndcz=-0.5 from GLEngine's projection -- readback faithfully returns the buffer).
+Honours GL_PACK_* like the colour path.  STENCIL: N/A -- no stencil buffer, and GLEngine's validation
+(GLEngine+0x2dc4c, gc+0x789c+0x38) rejects GL_STENCIL_INDEX without one.
+
 ## RESULT: glReadPixels returns correct pixels (2026-08-27)
 Our HW glReadPixels now works.  LIVE (readpixels.sh, -DGLD_DBUF):
 `READPIX clear (80,80) = 64 128 191`, `READPIX quad (512,384) = 255 255 255`, glGetError 0 --

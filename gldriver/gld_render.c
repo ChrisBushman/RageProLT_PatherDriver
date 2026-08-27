@@ -468,6 +468,25 @@ int mach64_ctl00(gld_context *c,uint32_t a,uint32_t b,uint32_t d,uint32_t e,uint
  * write `pixels`. */
 gld_context *g_gld_readback_ctx = 0;
 unsigned char *g_gld_gc = 0;   /* GLEngine's gc (dispatch table - 0x78a8); holds GL_PACK_* state */
+
+/* Read GL_PACK_* state from GLEngine's gc (default-safe).  Offsets reversed from glPixelStorei:
+ * ALIGNMENT@0x63d8, ROW_LENGTH@0x63c4, SKIP_PIXELS@0x63d0, SKIP_ROWS@0x63cc, SWAP_BYTES@0x63dc. */
+static void mach64_pack_state(int *align, int *rowlen, int *skippix, int *skiprows, int *swap)
+{
+    *align = 4; *rowlen = 0; *skippix = 0; *skiprows = 0; *swap = 0;
+    if (g_gld_gc) {
+        int a = *(int *)(g_gld_gc + 0x63d8);
+        if (a == 1 || a == 2 || a == 4 || a == 8) *align = a;
+        *rowlen   = *(int *)(g_gld_gc + 0x63c4);
+        *skippix  = *(int *)(g_gld_gc + 0x63d0);
+        *skiprows = *(int *)(g_gld_gc + 0x63cc);
+        *swap     = g_gld_gc[0x63dc] ? 1 : 0;
+        if (*rowlen   < 0) *rowlen   = 0;
+        if (*skippix  < 0) *skippix  = 0;
+        if (*skiprows < 0) *skiprows = 0;
+    }
+}
+
 int mach64_ctl08(void *rb_ctx, int x, int y, int w, int h,
                  unsigned format, unsigned type, void *pixels)
 {
@@ -479,7 +498,59 @@ int mach64_ctl08(void *rb_ctx, int x, int y, int w, int h,
     uint32_t tpitch= p ? p->target_pitch : 0;    /* pixels */
     gld_log(">>> READBACK x=%d y=%d w=%d h=%d fmt=0x%x type=0x%x px=%p  target_off=0x%x pitch=%u H=%u vram=%p\n",
             x, y, w, h, format, type, pixels, toff, tpitch, height, gc ? (void *)gc->regs : 0);
-    if (!p || !gc->regs || !toff || !tpitch || !height) return 0;   /* can't locate the buffer */
+    if (!p || !gc->regs || !height) return 0;
+
+    /* DEPTH readback: GL_DEPTH_COMPONENT from our 16-bit Z buffer (p->z_off/z_pitch, Z16 stored LE).
+     * GLEngine already rejected this if no depth buffer is bound, but guard anyway. */
+    if (format == 0x1902u) {
+        uint32_t zoff = p ? p->z_off : 0, zpitch = p ? p->z_pitch : 0;   /* zpitch: 16-bit Z pixels */
+        int elem;
+        switch (type) {
+            case 0x1403u: elem = 2; break;   /* GL_UNSIGNED_SHORT */
+            case 0x1405u: elem = 4; break;   /* GL_UNSIGNED_INT   */
+            case 0x1406u: elem = 4; break;   /* GL_FLOAT          */
+            default: return 0;
+        }
+        if (!zoff || !zpitch) return 0;      /* no depth buffer */
+        mach64_flush_batch(gc);
+        {   const volatile unsigned char *vram = (const volatile unsigned char *)gc->regs;
+            unsigned char *base = (unsigned char *)pixels;
+            uint32_t zpitch_b = zpitch * 2u;
+            int p_align, p_rowlen, p_skippix, p_skiprows, p_swap, l, row_stride, row, col;
+            mach64_pack_state(&p_align, &p_rowlen, &p_skippix, &p_skiprows, &p_swap);
+            l = p_rowlen > 0 ? p_rowlen : w;
+            row_stride = (elem >= p_align) ? (l * elem)
+                                           : (p_align * ((l * elem + p_align - 1) / p_align));
+            base += p_skiprows * row_stride + p_skippix * elem;
+            for (row = 0; row < h; row++) {
+                int fbrow = (int)height - 1 - (y + row);
+                unsigned char *o;
+                if (fbrow < 0) fbrow = 0;
+                o = base + row * row_stride;
+                for (col = 0; col < w; col++) {
+                    const volatile unsigned char *s =
+                        vram + zoff + (uint32_t)fbrow * zpitch_b + (uint32_t)(x + col) * 2u;
+                    unsigned z16 = (unsigned)s[0] | ((unsigned)s[1] << 8);   /* Z16 little-endian */
+                    if (type == 0x1403u) {              /* GL_UNSIGNED_SHORT */
+                        uint16_t v = (uint16_t)z16;
+                        if (p_swap) v = (uint16_t)((v >> 8) | (v << 8));
+                        *(uint16_t *)o = v; o += 2;
+                    } else {                            /* GL_UNSIGNED_INT / GL_FLOAT */
+                        union { float f; uint32_t u; } out;
+                        if (type == 0x1405u) out.u = (z16 << 16) | z16;       /* Z16 -> full range */
+                        else                 out.f = (float)z16 / 65535.0f;   /* GL_FLOAT [0,1]    */
+                        if (p_swap) out.u = (out.u>>24)|((out.u>>8)&0xff00u)|((out.u<<8)&0xff0000u)|(out.u<<24);
+                        *(uint32_t *)o = out.u; o += 4;
+                    }
+                }
+            }
+        }
+        gld_log("     READBACK depth %dx%d type=0x%x z_off=0x%x zpitch=%u H=%u\n",
+                w, h, type, zoff, zpitch, height);
+        return 0;
+    }
+
+    if (!toff || !tpitch) return 0;   /* color path needs the color render target */
     /* Decode (format, type).  Our framebuffer is X8R8G8B8 (no real dst alpha) -> a missing-alpha
      * buffer reads back alpha = 1.0 (opaque) per the GL spec.  For the packed INT_8_8_8_8[_REV]
      * types we build a native uint32 by BIT position and store it natively -- so the layout is
@@ -509,19 +580,8 @@ int mach64_ctl08(void *rb_ctx, int x, int y, int w, int h,
             uint32_t pitch_b = tpitch * 4u;
             int bpp_out = (pk || has_a) ? 4 : 3;
             int elem = pk ? 4 : 1;                                   /* element size (bytes) */
-            int p_align = 4, p_rowlen = 0, p_skippix = 0, p_skiprows = 0, p_swap = 0;
-            int l, row_stride, row, col;
-            if (g_gld_gc) {
-                int a = *(int *)(g_gld_gc + 0x63d8);
-                if (a == 1 || a == 2 || a == 4 || a == 8) p_align = a;
-                p_rowlen   = *(int *)(g_gld_gc + 0x63c4);
-                p_skippix  = *(int *)(g_gld_gc + 0x63d0);
-                p_skiprows = *(int *)(g_gld_gc + 0x63cc);
-                p_swap     = g_gld_gc[0x63dc] ? 1 : 0;
-                if (p_rowlen   < 0) p_rowlen   = 0;
-                if (p_skippix  < 0) p_skippix  = 0;
-                if (p_skiprows < 0) p_skiprows = 0;
-            }
+            int p_align, p_rowlen, p_skippix, p_skiprows, p_swap, l, row_stride, row, col;
+            mach64_pack_state(&p_align, &p_rowlen, &p_skippix, &p_skiprows, &p_swap);
             l = p_rowlen > 0 ? p_rowlen : w;
             row_stride = (elem >= p_align) ? (l * bpp_out)
                                            : (p_align * ((l * bpp_out + p_align - 1) / p_align));
