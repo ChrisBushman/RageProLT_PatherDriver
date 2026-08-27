@@ -364,21 +364,28 @@ IOReturn Mach64Accelerator::setSurface(Mach64GLUserClient *c,
     return kIOReturnSuccess;
 }
 
-/* Block until a pending page flip has retired (loaded at vblank), detected by the
- * scanline counter wrapping (max -> 0) since the flip write.  No-op if none pending.
- * Called by the driver just before it reuses the previously-shown buffer. */
+/* Wait for the LEADING EDGE of vertical blank.  The fullscreen present is now a back->front
+ * BLIT (the CRTC page-flip is gone); kicking that blit right after this call runs it during
+ * retrace, and since the 2D engine outruns the scan beam a top-to-bottom blit stays ahead of
+ * the beam -> tear-free.  Reads the active display height from CRTC_V_TOTAL_DISP (V_DISP[26:16]
+ * = last active line) and waits for the scanline to cross from active display into blanking.
+ * Two bounded spins (each < one frame at 2us/iter) so it can never hang (display off / VLINE
+ * stuck just falls through).  (Formerly the page-flip vblank wait.) */
 IOReturn Mach64Accelerator::waitFlip(void)
 {
-    if (!fFlipPending) return kIOReturnSuccess;
-    {
-        UInt32 prev = fFlipScanline;
-        for (int i = 0; i < 200000; i++) {
-            UInt32 cur = ((UInt32)regRead(MACH64_CRTC_VLINE_CRNT_VLINE) >> 16) & 0x7ff;
-            if (cur < prev) break;   /* wrapped -> vblank passed, flip loaded */
-            prev = cur;
-            IODelay(5);
-        }
+    UInt32 active = (((UInt32)regRead(MACH64_CRTC_V_TOTAL_DISP) >> 16) & 0x7ff) + 1;
+    int i;
+    /* make sure we're in active display first, so we catch the NEXT entry into vblank
+     * (not a stale mid-vblank sample) */
+    for (i = 0; i < 20000; i++) {
+        if ((((UInt32)regRead(MACH64_CRTC_VLINE_CRNT_VLINE) >> 16) & 0x7ff) < active) break;
+        IODelay(2);
     }
-    fFlipPending = 0;
+    /* then wait for the scanline to cross into vertical blank */
+    for (i = 0; i < 20000; i++) {
+        if ((((UInt32)regRead(MACH64_CRTC_VLINE_CRNT_VLINE) >> 16) & 0x7ff) >= active) break;
+        IODelay(2);
+    }
+    (void)fFlipPending; (void)fFlipScanline;
     return kIOReturnSuccess;
 }

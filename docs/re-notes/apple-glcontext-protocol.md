@@ -146,8 +146,12 @@ multiple-present-per-frame bug, long fixed).  gld_entry.c detach no longer flips
 -> desktop intact on exit).  mach64_flip/mach64_wait_flip now unused (kept, harmless).  HW-VALIDATED:
 dbanim (fullscreen DB animation) AND atlantis (the app that intermittently hard-locked before) both
 present cleanly with NO lock, desktop restores on exit.  The fullscreen page-flip hard-lock is GONE
-by construction (we never touch the CRTC).  Tears against the unsynced scan (acceptable; a vblank-gated
-blit is a cheap follow-on).  NET of the whole Apple-present investigation: the RE didn't end in "call
+by construction (we never touch the CRTC).  Tears against the unsynced scan -- FIXED by a vblank-gated
+blit (2026-08-27): kext waitFlip repurposed to wait for the vblank leading edge (CRTC_V_TOTAL_DISP
+V_DISP -> wait scanline crosses into blanking), driver calls it right before the fullscreen blit so
+the 2D engine kicks at retrace and outruns the beam.  HW-validated: dbanim animates CLEAN live (the
+"staircase" in screenshots is a capture artifact -- the slow grabber stitches several fast frames).
+NET of the whole Apple-present investigation: the RE didn't end in "call
 Apple's present" -- it revealed present should be a BLIT, and we do that blit ourselves (single
 accelerator, no coexistence).  build_swap remains the reference if we want to match Apple's exact
 clip/scale/vblank behaviour later.

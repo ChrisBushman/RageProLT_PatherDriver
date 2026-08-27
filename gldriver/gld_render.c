@@ -256,11 +256,9 @@ void mach64_flip(gld_context *ctx, uint32_t off)
     IOConnectMethodScalarIScalarO(ctx->connect, kMach64Sel_set_surface, 1, 0, val);
 }
 
-/* Block until the pending page flip has retired (loaded at vblank) so the buffer it
- * freed is safe to reuse.  mach64_flip no longer waits -- it just writes CRTC_OFF_PITCH
- * and records the flip pending; this wait is called at the START of the next frame,
- * AFTER GLEngine has already dispatched that frame's geometry, so the ~vblank wait
- * overlaps that dispatch instead of stalling inside the flip. */
+/* Wait for the vblank leading edge (kext waitFlip, repurposed).  Called right before the
+ * fullscreen present blit so the blit runs during retrace and outruns the scan beam --
+ * tear-free.  (Formerly waited for a CRTC page-flip to retire; the flip is gone.) */
 void mach64_wait_flip(gld_context *ctx)
 {
     if (!ctx->connect) return;
@@ -746,8 +744,10 @@ void mach64_dispatch_render_ctl(gld_context *ctx, uint32_t a4, uint32_t a5,
                  * protocol.md).  Same pattern as the windowed branch above (always render into
                  * `back`, blit it to the live front at (0,0), NO buffer swap, NO CRTC touch);
                  * once per frame at slot 0x60, so no multi-blit accumulation.  Tears against
-                 * the unsynced scan (a follow-on can gate the blit on vblank), but never locks. */
-                mach64_flush_batch(ctx);
+                 * the unsynced scan -- so we gate the blit on the vblank leading edge below,
+                 * where the 2D engine outruns the beam and the present stays tear-free. */
+                mach64_flush_batch(ctx);            /* geometry -> back, engine idle */
+                mach64_wait_flip(ctx);              /* vsync: kick the blit at vblank start */
                 mach64_blit_surface(ctx, p->back_off, p->front_off, 0, 0, 0, 0,
                                     p->fb_w, p->fb_h, p->fb_pitch);
                 if (p->z_off) mach64_clear_zbuffer(ctx);

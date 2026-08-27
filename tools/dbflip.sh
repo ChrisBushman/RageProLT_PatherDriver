@@ -1,15 +1,14 @@
 #!/bin/sh
-# Double-buffer via hardware PAGE-FLIP (CRTC_OFF_PITCH).  Rebuilds BOTH the kext (which
-# now writes CRTC_OFF_PITCH on selector 0) and the GL bundle (-DGLD_DBUF), installs
-# them, and runs the swap-chain animation.  Run on the Lombard under sudo.
+# Fullscreen double-buffer present via VBLANK-SYNCED 2D BLIT (no CRTC page-flip).  Rebuilds BOTH
+# the kext (waitFlip = vblank leading-edge wait) and the GL bundle (-DGLD_DBUF), installs them,
+# and runs the swap-chain animation.  Run on the Lombard under sudo.
 #
-# WATCH: the RGB triangle should sweep SMOOTHLY with NO stacking/residue and NO tearing
-# (the flip loads at vblank).  On exit the desktop should return (detach restores the
-# CRTC to the front buffer).
+# WATCH: the RGB triangle should sweep SMOOTHLY with NO stacking/residue and -- with the vblank
+# sync -- NO tearing (the blit is kicked at vblank start and outruns the beam).  No hard-lock (we
+# never touch the CRTC).  On exit the desktop returns on its own (CRTC never moved).
 #
-# RISK: this writes the live display-base register.  If the flip value were wrong the
-# screen could show garbage until the app's detach restores it; if the app crashed
-# without detaching you may need to switch resolution (or reboot) to restore scanout.
+# NOTE: present is now a back->front blit, so it never writes the live display-base register --
+# the old page-flip garbage/lock risk is gone.
 DIR=`cd \`dirname "$0"\` && pwd`; ROOT=`cd "$DIR/.." && pwd`; B=Mach64Accelerator.kext
 
 echo "=== building kext (page-flip) ==="
