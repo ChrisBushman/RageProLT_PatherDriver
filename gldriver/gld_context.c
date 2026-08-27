@@ -39,6 +39,10 @@ int gldGetRendererInfo(gld_renderer_info *out, uint32_t renderer_mask)
 
     memset(out, 0, sizeof *out);
     out->renderer_id   = MACH64_RENDERER_ID;
+    out->buffer_modes  = 0xd;                /* 0x0c: the reference sets this; we left it 0.
+                                              * Buffer-mode mask GLEngine reads to know which
+                                              * framebuffers exist -- a 0 here may be why
+                                              * glReadPixels no-ops (no readable buffer). */
     out->caps_accel    = 0x8400;             /* accelerated + buffer modes  */
     out->caps_color    = 0x808000;
     out->caps_misc     = 0x1c01;

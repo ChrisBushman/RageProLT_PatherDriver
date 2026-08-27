@@ -31,7 +31,7 @@ bool Mach64GLUserClient::start(IOService *provider)
         M(get_status,         kIOUCScalarIScalarO, 0, 1),               // 4
         M(get_surface_size,   kIOUCScalarIScalarO, 0, 4),               // 5
         /* get_surface_info */M(get_status,        kIOUCScalarIScalarO, 1, 3), // 6
-        /* read_buffer */     M(finish,            kIOUCStructIStructO, 0xffffffff, 0), // 7
+        /* read_buffer */     M(finish,            kIOUCStructIStructO, 0xffffffff, 0), // 7: GLEngine never calls it for glReadPixels (see docs/re-notes/readpixels.md)
         M(finish,             kIOUCScalarIStructI, 0, 0),               // 8
         M(wait_for_stamp,     kIOUCScalarIStructI, 1, 0),               // 9
         /* new_texture */     M(finish,            kIOUCStructIStructO, 0xffffffff, 0xffffffff), //10
