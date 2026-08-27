@@ -55,14 +55,17 @@ void mach64_set_render_target(gld_context *ctx, uint32_t off, uint32_t pitch_px)
     p->dirty |= MACH64_DIRTY_STATE;
 }
 
-/* glShadeModel(GL_SMOOTH|GL_FLAT).  Smooth = interpolate the 3D scaler's
- * per-vertex colour; flat = solid colour from DP_FRGD_CLR (provoking vertex,
- * which the caller must also load into DP_FRGD_CLR). */
+/* glShadeModel(GL_SMOOTH|GL_FLAT).  NOTE: the LIVE path is mach64_bind_texture (reads the
+ * shade model from gli+0x6708 bit0 -> mach64_flat_on) + emit_tri, which does flat shading in
+ * the DRIVER by replicating the provoking (last) vertex's colour onto all three vertices.
+ * The mach64 SETUP_CNTL FLAT_SHADE field (below) was tried and did NOT take effect on HW
+ * (FLAT_SHADE_VERTEX_3 = 0x30 per recollection is uncertain -- the spec bit table wouldn't
+ * extract), so the GL path uses the driver-side replication instead.  This setter is unused. */
 void mach64_set_shade_model(gld_context *ctx, int smooth)
 {
     mach64_priv *p = MACH64_PRIV(ctx);
-    p->hw.dp_src     = smooth ? MACH64_DP_SRC_3D : MACH64_DP_SRC_FLAT;
-    p->hw.setup_cntl = MACH64_SETUP_CNTL_SHADE;   /* 0 for both (see notes) */
+    p->hw.setup_cntl = (p->hw.setup_cntl & ~MACH64_SETUP_CNTL_FLAT_MASK)
+                     | (smooth ? 0u : MACH64_SETUP_CNTL_FLAT_V3);
     p->dirty |= MACH64_DIRTY_STATE;
 }
 

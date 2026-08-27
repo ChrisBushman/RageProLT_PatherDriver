@@ -76,6 +76,10 @@
  * white).  0 is mesa's value.  VERIFIED on hardware -- see 3d-triangle.md. */
 #define MACH64_SETUP_CNTL_SHADE     0x00000000u
 #define MACH64_SETUP_CNTL_SMOOTH    0x00000000u  /* deprecated alias of _SHADE */
+/* SETUP_CNTL FLAT_SHADE field (bits 4-5): 0=off (smooth/gouraud), 3<<4=use vertex 3 (the
+ * GL provoking/last vertex) flat across the triangle.  Ref mach64DDShadeModel. */
+#define MACH64_SETUP_CNTL_FLAT_MASK 0x00000030u
+#define MACH64_SETUP_CNTL_FLAT_V3   0x00000030u  /* FLAT_SHADE_VERTEX_3 (provoking vertex) */
 
 /* DP_SRC colour source: flat (from DP_FRGD_CLR) vs 3D scaler (interpolated) */
 #define MACH64_DP_SRC               0x06d8

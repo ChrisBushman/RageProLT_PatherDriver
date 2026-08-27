@@ -411,6 +411,7 @@ static uint32_t mach64_blend_dst(uint32_t glf)
 #define GLI_FOG_COLOR    0x6358u          /* GL_FOG_COLOR RGBA floats (verified)  */
 
 int mach64_fog_on = 0;                    /* consumed by mach64_read_vertex       */
+int mach64_flat_on = 0;                   /* glShadeModel(GL_FLAT): emit_tri flattens colour */
 
 /* Clamp a 0..1 float colour channel to a 0..255 byte. */
 static uint32_t chan_u8(float f){ int c=(int)(f*255.0f+0.5f); return c<0?0u:(c>255?255u:(uint32_t)c); }
@@ -586,6 +587,13 @@ int mach64_bind_texture(gld_context *ctx)
                     | ((cm        & 0xffu) ? 0xff000000u : 0u);  /* A */
         if (st->dp_write_mask != wm) { st->dp_write_mask = wm; p->dirty |= MACH64_DIRTY_STATE; }
     }
+
+    /* glShadeModel (gli+0x6708 bit0: 1 = GL_SMOOTH, 0 = GL_FLAT -- recovered via GLD_SCISSCAN
+     * 2026-08-26).  Rather than the mach64 SETUP_CNTL FLAT_SHADE field (bit value uncertain in
+     * the spec and didn't take), do flat shading in the driver: emit_tri replicates the
+     * provoking (GL default = LAST) vertex's colour onto all three vertices when mach64_flat_on,
+     * so the 3D scaler interpolates a constant -> flat.  HW-independent, exact for GL_TRIANGLES. */
+    mach64_flat_on = !(mach64_gli_u32(ctx, 0x6708) & 1u);
 
     /* NOTE on GL_SCISSOR_TEST: Apple's GLEngine does T&L *and clipping* in software, so it
      * clips scissored (and frustum-crossing) primitives itself and re-dispatches the clipped

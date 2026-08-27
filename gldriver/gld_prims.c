@@ -179,6 +179,9 @@ static void emit_tri(gld_context *ctx, const void *base,
     mach64_read_vertex(VTX(base, a), &v0, fb_h);
     mach64_read_vertex(VTX(base, b), &v1, fb_h);
     mach64_read_vertex(VTX(base, c), &v2, fb_h);
+    /* glShadeModel(GL_FLAT): flatten to the provoking (GL default = LAST) vertex's colour so
+     * the 3D scaler interpolates a constant.  For GL_TRIANGLES v2 is the provoking vertex. */
+    if (mach64_flat_on) { v0.argb = v2.argb; v1.argb = v2.argb; }
     if (p->hw.textured && p->tex_w > 0 && p->tex_h > 0) {
         float s0=vst(v0.s), s1=vst(v1.s), s2=vst(v2.s);
         float t0=vst(v0.t), t1=vst(v1.t), t2=vst(v2.t);

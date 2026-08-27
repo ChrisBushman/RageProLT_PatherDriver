@@ -182,6 +182,7 @@ void mach64_read_vertex(const void *v, m64_vertex *out, float fb_h); /* gli->hw 
  * factor (gli-vertex +0x4c) instead of the colour alpha (+0x3c) -- the setup engine
  * interpolates it and the fog pipe blends the fragment against DP_FOG_CLR by it. */
 extern int mach64_fog_on;
+extern int mach64_flat_on;   /* glShadeModel(GL_FLAT): replicate the provoking vertex colour */
 void mach64_render_points     (gld_context *, const void *, uint32_t);
 void mach64_render_lines      (gld_context *, const void *, uint32_t);
 void mach64_render_line_strip (gld_context *, const void *, uint32_t);
