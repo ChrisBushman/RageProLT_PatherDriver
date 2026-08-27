@@ -12,6 +12,15 @@
 #ifndef GL_CURRENT_RASTER_POSITION_VALID
 #define GL_CURRENT_RASTER_POSITION_VALID 0x0B08
 #endif
+#ifndef GL_BGRA
+#define GL_BGRA 0x80E1
+#endif
+#ifndef GL_UNSIGNED_INT_8_8_8_8
+#define GL_UNSIGNED_INT_8_8_8_8     0x8035
+#endif
+#ifndef GL_UNSIGNED_INT_8_8_8_8_REV
+#define GL_UNSIGNED_INT_8_8_8_8_REV 0x8367
+#endif
 
 static void rd(int x, int y, const char *what)
 {
@@ -62,7 +71,21 @@ int main(void)
     rd(350, 340, "right(green)");  /* img (50,40): expect   0 255   0 */
     rd(315, 303, "bottom(blue)");  /* img (15, 3): expect   0   0 255 */
     rd(315, 360, "top(red)");      /* img (15,60): expect 255   0   0 */
-    rd(500, 500, "bg");            /* untouched:   expect  64 128 191 */
+
+    /* packed types: BGRA + INT_8_8_8_8_REV is native ARGB (0xAARRGGBB); RGBA + INT_8_8_8_8 is MSB-first */
+    {   static GLuint pimg[32*32];
+        int k;
+        for (k = 0; k < 32*32; k++) pimg[k] = 0xFF00FF00u;   /* ARGB green (A=FF R=00 G=FF B=00) */
+        glRasterPos2i(500, 300);
+        glDrawPixels(32, 32, GL_BGRA, GL_UNSIGNED_INT_8_8_8_8_REV, pimg);
+        for (k = 0; k < 32*32; k++) pimg[k] = 0x0000FFFFu;   /* RGBA 8_8_8_8: R=00 G=00 B=FF A=FF -> blue */
+        glRasterPos2i(600, 300);
+        glDrawPixels(32, 32, GL_RGBA, GL_UNSIGNED_INT_8_8_8_8, pimg);
+        glFinish();
+        rd(515, 315, "BGRA/REV grn"); /* expect   0 255   0 */
+        rd(615, 315, "RGBA/8888 blu");/* expect   0   0 255 */
+    }
+    rd(500, 500, "bg");            /* untouched */
     printf("glGetError = 0x%x\n", (unsigned)glGetError());
     printf("expect: left=255,0,0 right=0,255,0 bottom=0,0,255 top=255,0,0 bg=64,128,191\n");
     fflush(stdout);

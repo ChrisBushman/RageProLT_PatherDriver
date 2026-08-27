@@ -637,33 +637,39 @@ int mach64_ctl0c(gld_context *c, uint32_t a, uint32_t b, uint32_t d,
     const unsigned char *src = (const unsigned char *)(uintptr_t)g;
     int w = (int)b, h = (int)d;
     unsigned format = e, type = f;
-    int is_bgr, has_a, bpp_in, dx, dy, W, H, row, col, align, rowstride;
+    int is_bgr, has_a, pk, bpp_in, elem, dx, dy, W, H, row, col, align, rowstride;
     volatile unsigned char *vram;
     uint32_t pitch_b;
 
     if (!p || !p->target_off || !p->target_pitch || !rp || !src || w <= 0 || h <= 0) {
         ctl_dump("table[0x0c]", c, a, b, d, e, f, g); return 0;
     }
-    if (type != 0x1401u) { ctl_dump("table[0x0c]", c, a, b, d, e, f, g); return 0; }  /* UBYTE first cut */
     switch (format) {
         case 0x1908u: is_bgr = 0; has_a = 1; break;   /* GL_RGBA */
         case 0x80E1u: is_bgr = 1; has_a = 1; break;   /* GL_BGRA */
         case 0x1907u: is_bgr = 0; has_a = 0; break;   /* GL_RGB  */
         case 0x80E0u: is_bgr = 1; has_a = 0; break;   /* GL_BGR  */
-        default: ctl_dump("table[0x0c]", c, a, b, d, e, f, g); return 0;
+        default: ctl_dump("table[0x0c]", c, a, b, d, e, f, g); return 0;   /* unsupported format */
+    }
+    switch (type) {
+        case 0x1401u: pk = 0; break;                                       /* GL_UNSIGNED_BYTE */
+        case 0x8035u: pk = 1; if (!has_a) { ctl_dump("table[0x0c]",c,a,b,d,e,f,g); return 0; } break; /* INT_8_8_8_8 */
+        case 0x8367u: pk = 2; if (!has_a) { ctl_dump("table[0x0c]",c,a,b,d,e,f,g); return 0; } break; /* INT_8_8_8_8_REV */
+        default: ctl_dump("table[0x0c]", c, a, b, d, e, f, g); return 0;   /* unsupported type */
     }
     vram = (volatile unsigned char *)c->regs;
     if (!vram) return 0;
     W = (int)*(uint32_t *)((unsigned char *)c + 0x1f0);
     H = (int)*(uint32_t *)((unsigned char *)c + 0x1f4);
     if (W <= 0 || H <= 0) return 0;
-    bpp_in  = has_a ? 4 : 3;
+    bpp_in = (pk || has_a) ? 4 : 3;       /* client bytes per pixel */
+    elem   = pk ? 4 : 1;                  /* element size (packed word / component), for row alignment */
     dx = (int)(rp[0] + 0.5f);
     dy = (int)(rp[1] + 0.5f);
     pitch_b = p->target_pitch * 4u;
-    align = 4;                            /* default GL_UNPACK_ALIGNMENT */
-    rowstride = (bpp_in >= align) ? (w * bpp_in)
-                                  : (align * ((w * bpp_in + align - 1) / align));
+    align = 4;                            /* default GL_UNPACK_ALIGNMENT (TODO: read gc UNPACK state) */
+    rowstride = (elem >= align) ? (w * bpp_in)
+                                : (align * ((w * bpp_in + align - 1) / align));
     gld_log("glDrawPixels: %dx%d fmt=0x%x type=0x%x -> (%d,%d) [W=%d H=%d]\n",
             w, h, format, type, dx, dy, W, H);
     mach64_flush_batch(c);                /* pending geometry before the upload */
@@ -677,9 +683,21 @@ int mach64_ctl0c(gld_context *c, uint32_t a, uint32_t b, uint32_t d,
             volatile unsigned char *o;
             unsigned char R, G, B, A;
             if (gx < 0 || gx >= W) continue;
-            if (is_bgr) { B = s[0]; G = s[1]; R = s[2]; }
-            else        { R = s[0]; G = s[1]; B = s[2]; }
-            A = has_a ? s[3] : 0xFFu;
+            if (pk == 0) {
+                if (is_bgr) { B = s[0]; G = s[1]; R = s[2]; }
+                else        { R = s[0]; G = s[1]; B = s[2]; }
+                A = has_a ? s[3] : 0xFFu;
+            } else {
+                /* packed uint32 -- inverse of the readback pack: 8_8_8_8 puts the FIRST format
+                 * component in the MSB, _REV in the LSB.  c0..c3 = FORMAT-order components.
+                 * (TODO: GL_UNPACK_SWAP_BYTES would byte-reverse v; default off.) */
+                uint32_t v = *(const uint32_t *)s, c0, c1, c2, c3;
+                if (pk == 1) { c0=(v>>24)&0xffu; c1=(v>>16)&0xffu; c2=(v>>8)&0xffu; c3=v&0xffu; }
+                else         { c0=v&0xffu; c1=(v>>8)&0xffu; c2=(v>>16)&0xffu; c3=(v>>24)&0xffu; }
+                if (is_bgr) { B=(unsigned char)c0; G=(unsigned char)c1; R=(unsigned char)c2; }
+                else        { R=(unsigned char)c0; G=(unsigned char)c1; B=(unsigned char)c2; }
+                A = (unsigned char)c3;
+            }
             o = vram + p->target_off + (uint32_t)fbrow * pitch_b + (uint32_t)gx * 4u;
             o[0] = B; o[1] = G; o[2] = R; o[3] = A;   /* native LE ARGB8888 */
         }

@@ -86,9 +86,14 @@ native ARGB8888 (inverse of the readback/mach64_ctl08 path -- native LE bytes [B
 the render target via the whole-VRAM CPU map (c->regs), Y-flipped (image row 0 = bottom = raster y).
 HW-VERIFIED (tools/mach64_drawpixels): a 64x64 image (left RED / right GREEN / bottom-8-rows BLUE)
 uploaded at raster (300,300) reads back pixel-accurate with correct X and Y orientation.
-FIRST CUT limits (TODO): GL_UNSIGNED_BYTE only (add packed INT_8_8_8_8 etc. like readback); default
-UNPACK alignment=4 only (add gc UNPACK row-length/skip/swap state, offsets TBD -- separate from the
-PACK offsets readback uses); pixel-zoom 1 only.
+PACKED TYPES (2026-08-27): added GL_UNSIGNED_INT_8_8_8_8 (0x8035) + _REV (0x8367) for RGBA/BGRA --
+inverse of the readback pack (read the client uint32, extract FORMAT-order components c0..c3: 8_8_8_8
+first-in-MSB, _REV first-in-LSB).  HW-verified: BGRA+_REV (native ARGB) -> green, RGBA+8_8_8_8 -> blue,
+both pixel-accurate.  So glDrawPixels now matches readback's format/type coverage (RGBA/BGRA/RGB/BGR x
+UBYTE/INT_8_8_8_8/_REV).
+REMAINING limits (TODO): default UNPACK alignment=4 only (add gc UNPACK row-length/skip/swap state,
+offsets TBD -- separate from the PACK offsets readback uses); pixel-zoom 1 only; GL_UNSIGNED_SHORT_5_6_5
+etc. niche.
 OBSERVED (separate, minor, NOT a glDrawPixels bug): a frame that does only glClear + glDrawPixels (no
 geometry) shows an UNCLEARED (black) background -- our clear is lazy, fired on the first triangle
 (frame_new -> mach64_clear_color in mach64_draw_triangle).  A geometry-less frame never triggers it.
