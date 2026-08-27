@@ -479,31 +479,46 @@ int mach64_ctl08(void *rb_ctx, int x, int y, int w, int h,
     gld_log(">>> READBACK x=%d y=%d w=%d h=%d fmt=0x%x type=0x%x px=%p  target_off=0x%x pitch=%u H=%u vram=%p\n",
             x, y, w, h, format, type, pixels, toff, tpitch, height, gc ? (void *)gc->regs : 0);
     if (!p || !gc->regs || !toff || !tpitch || !height) return 0;   /* can't locate the buffer */
-    if (format != 0x1908u /*GL_RGBA*/ || type != 0x1401u /*GL_UNSIGNED_BYTE*/) return 0;  /* RGBA8 only for now */
+    if (type != 0x1401u /*GL_UNSIGNED_BYTE*/) return 0;             /* only ubyte types for now */
+    /* Component byte order per format.  Our framebuffer is X8R8G8B8 (no real dst alpha), so a
+     * missing-alpha buffer reads back alpha = 1.0 (opaque) per the GL spec. */
+    {   int is_bgr, has_a;
+        switch (format) {
+            case 0x1908u: is_bgr = 0; has_a = 1; break;   /* GL_RGBA */
+            case 0x80E1u: is_bgr = 1; has_a = 1; break;   /* GL_BGRA */
+            case 0x1907u: is_bgr = 0; has_a = 0; break;   /* GL_RGB  */
+            case 0x80E0u: is_bgr = 1; has_a = 0; break;   /* GL_BGR  */
+            default: return 0;                            /* unsupported format */
+        }
+        mach64_flush_batch(gc);   /* submit any residual geometry; the app's glFinish already fenced */
 
-    mach64_flush_batch(gc);   /* submit any residual geometry; the app's glFinish already fenced */
-
-    /* Read our render target from the whole-VRAM CPU map (gc->regs).  Framebuffer is ARGB8888
-     * (dp_pix_width 0x60060666), stored little-endian -> bytes [B,G,R,A].  glReadPixels uses a
-     * bottom-left origin, so flip Y against the drawable height. */
-    {   const volatile unsigned char *vram = (const volatile unsigned char *)gc->regs;
-        unsigned char *out = (unsigned char *)pixels;
-        uint32_t pitch_b = tpitch * 4u;
-        int row, col;
-        for (row = 0; row < h; row++) {
-            int fbrow = (int)height - 1 - (y + row);
-            if (fbrow < 0) fbrow = 0;
-            for (col = 0; col < w; col++) {
-                const volatile unsigned char *s =
-                    vram + toff + (uint32_t)fbrow * pitch_b + (uint32_t)(x + col) * 4u;
-                *out++ = s[2];   /* R */
-                *out++ = s[1];   /* G */
-                *out++ = s[0];   /* B */
-                *out++ = s[3];   /* A */
+        /* Read our render target from the whole-VRAM CPU map (gc->regs).  ARGB8888 stored LE ->
+         * bytes [B,G,R,A].  glReadPixels origin is bottom-left (flip Y vs drawable height H); rows
+         * packed to GL_PACK_ALIGNMENT=4 (the default). */
+        {   const volatile unsigned char *vram = (const volatile unsigned char *)gc->regs;
+            unsigned char *base = (unsigned char *)pixels;
+            uint32_t pitch_b = tpitch * 4u;
+            int bpp_out = has_a ? 4 : 3;
+            int row_stride = ((w * bpp_out + 3) / 4) * 4;
+            int row, col;
+            for (row = 0; row < h; row++) {
+                int fbrow = (int)height - 1 - (y + row);
+                unsigned char *o;
+                if (fbrow < 0) fbrow = 0;
+                o = base + row * row_stride;
+                for (col = 0; col < w; col++) {
+                    const volatile unsigned char *s =
+                        vram + toff + (uint32_t)fbrow * pitch_b + (uint32_t)(x + col) * 4u;
+                    unsigned char R = s[2], G = s[1], B = s[0];
+                    if (is_bgr) { *o++ = B; *o++ = G; *o++ = R; }
+                    else        { *o++ = R; *o++ = G; *o++ = B; }
+                    if (has_a)  *o++ = 0xFF;   /* X8 framebuffer -> opaque */
+                }
             }
         }
     }
-    gld_log("     READBACK filled %dx%d from target_off=0x%x pitch=%u H=%u\n", w, h, toff, tpitch, height);
+    gld_log("     READBACK filled %dx%d fmt=0x%x from target_off=0x%x pitch=%u H=%u\n",
+            w, h, format, toff, tpitch, height);
     return 0;
 }
 int mach64_ctl0c(gld_context *c,uint32_t a,uint32_t b,uint32_t d,uint32_t e,uint32_t f,uint32_t g){ctl_dump("table[0x0c]",c,a,b,d,e,f,g);return 0;}
