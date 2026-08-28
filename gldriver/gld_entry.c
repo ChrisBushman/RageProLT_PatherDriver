@@ -364,8 +364,10 @@ void gldInitDispatch(gld_context *ctx, void *table, void *outinfo)
     /* table[0x08] = GLEngine's glReadPixels readback hook; it's called with GLEngine's rb_ctx, not
      * our gld_context, so stash ours for mach64_ctl08 to read the back-buffer VRAM.  The GLEngine gc
      * holds GL_PACK_* state; our table sits at gc+0x78a8 (table[0x08]=gc+0x78b0), so gc=table-0x78a8. */
-    g_gld_readback_ctx = ctx;
-    g_gld_gc = (unsigned char *)table - 0x78a8;
+    g_gld_readback_ctx = ctx;                        /* global fallback (ctl08 prefers its rb_ctx arg) */
+    g_gld_gc = (unsigned char *)table - 0x78a8;       /* global fallback for the pixel-store readers   */
+    if (ctx->backend)                                 /* per-context gc = the hardened path pixel ops use */
+        MACH64_PRIV(ctx)->gc = (unsigned char *)table - 0x78a8;
     *(void **)((unsigned char *)table + 0x00) = (void *)mach64_ctl00;
     *(void **)((unsigned char *)table + 0x04) = (void *)mach64_flush;
     *(void **)((unsigned char *)table + 0x08) = (void *)mach64_ctl08;

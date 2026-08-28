@@ -446,6 +446,11 @@ static uint32_t mach64_blend_dst(uint32_t glf)
 #define GLI_FOG_EN_BIT   0x00000100u      /* bit 8 (recovered via GLD_FOGSCAN)    */
 #define GLI_FOG_COLOR    0x6358u          /* GL_FOG_COLOR RGBA floats (verified)  */
 
+/* These two are "current draw" globals: set in mach64_bind_texture at the START of each primitive
+ * batch (from the drawing context's gli state) and consumed in that SAME batch's emit_tri/read_vertex.
+ * On the serialized GL thread a draw is atomic, so each draw refreshes them before use -- safe under
+ * multiple contexts without per-context storage (unlike the pixel-store gc, which a later pixel op
+ * reads and so had to be made per-context). */
 int mach64_fog_on = 0;                    /* consumed by mach64_read_vertex       */
 int mach64_flat_on = 0;                   /* glShadeModel(GL_FLAT): emit_tri flattens colour */
 

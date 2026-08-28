@@ -473,16 +473,28 @@ unsigned char *g_gld_gc = 0;   /* GLEngine's gc (dispatch table - 0x78a8); holds
 
 /* Read GL_PACK_* state from GLEngine's gc (default-safe).  Offsets reversed from glPixelStorei:
  * ALIGNMENT@0x63d8, ROW_LENGTH@0x63c4, SKIP_PIXELS@0x63d0, SKIP_ROWS@0x63cc, SWAP_BYTES@0x63dc. */
-static void mach64_pack_state(int *align, int *rowlen, int *skippix, int *skiprows, int *swap)
+/* The GLEngine gc (GL_PACK / GL_UNPACK pixel-store + raster state) for a SPECIFIC context.
+ * Per-context via mach64_priv.gc (set in gldUpdateDispatch), so a pixel op reads the state of the
+ * context it runs on instead of whichever context last updated dispatch.  Falls back to the
+ * last-dispatched global if a context has no backend/gc yet (defensive). */
+static unsigned char *mach64_ctx_gc(gld_context *ctx)
 {
+    if (ctx && ctx->backend && MACH64_PRIV(ctx)->gc) return MACH64_PRIV(ctx)->gc;
+    return g_gld_gc;
+}
+
+static void mach64_pack_state(gld_context *ctx, int *align, int *rowlen, int *skippix,
+                              int *skiprows, int *swap)
+{
+    unsigned char *g = mach64_ctx_gc(ctx);
     *align = 4; *rowlen = 0; *skippix = 0; *skiprows = 0; *swap = 0;
-    if (g_gld_gc) {
-        int a = *(int *)(g_gld_gc + 0x63d8);
+    if (g) {
+        int a = *(int *)(g + 0x63d8);
         if (a == 1 || a == 2 || a == 4 || a == 8) *align = a;
-        *rowlen   = *(int *)(g_gld_gc + 0x63c4);
-        *skippix  = *(int *)(g_gld_gc + 0x63d0);
-        *skiprows = *(int *)(g_gld_gc + 0x63cc);
-        *swap     = g_gld_gc[0x63dc] ? 1 : 0;
+        *rowlen   = *(int *)(g + 0x63c4);
+        *skippix  = *(int *)(g + 0x63d0);
+        *skiprows = *(int *)(g + 0x63cc);
+        *swap     = g[0x63dc] ? 1 : 0;
         if (*rowlen   < 0) *rowlen   = 0;
         if (*skippix  < 0) *skippix  = 0;
         if (*skiprows < 0) *skiprows = 0;
@@ -492,18 +504,19 @@ static void mach64_pack_state(int *align, int *rowlen, int *skippix, int *skipro
 /* GL_UNPACK_* state (for glDrawPixels/glBitmap) -- same layout as PACK, +0x1c (verified live via
  * tools/mach64_unpackprobe): ALIGNMENT@0x63f4 ROW_LENGTH@0x63e0 SKIP_PIXELS@0x63ec SKIP_ROWS@0x63e8
  * SWAP_BYTES@0x63f8 LSB_FIRST@0x63f9 (bytes).  Defaults 4/0/0/0/0/0. */
-static void mach64_unpack_state(int *align, int *rowlen, int *skippix, int *skiprows,
-                                int *swap, int *lsbfirst)
+static void mach64_unpack_state(gld_context *ctx, int *align, int *rowlen, int *skippix,
+                                int *skiprows, int *swap, int *lsbfirst)
 {
+    unsigned char *g = mach64_ctx_gc(ctx);
     *align = 4; *rowlen = 0; *skippix = 0; *skiprows = 0; *swap = 0; *lsbfirst = 0;
-    if (g_gld_gc) {
-        int a = *(int *)(g_gld_gc + 0x63f4);
+    if (g) {
+        int a = *(int *)(g + 0x63f4);
         if (a == 1 || a == 2 || a == 4 || a == 8) *align = a;
-        *rowlen   = *(int *)(g_gld_gc + 0x63e0);
-        *skippix  = *(int *)(g_gld_gc + 0x63ec);
-        *skiprows = *(int *)(g_gld_gc + 0x63e8);
-        *swap     = g_gld_gc[0x63f8] ? 1 : 0;
-        *lsbfirst = g_gld_gc[0x63f9] ? 1 : 0;
+        *rowlen   = *(int *)(g + 0x63e0);
+        *skippix  = *(int *)(g + 0x63ec);
+        *skiprows = *(int *)(g + 0x63e8);
+        *swap     = g[0x63f8] ? 1 : 0;
+        *lsbfirst = g[0x63f9] ? 1 : 0;
         if (*rowlen   < 0) *rowlen   = 0;
         if (*skippix  < 0) *skippix  = 0;
         if (*skiprows < 0) *skiprows = 0;
@@ -540,7 +553,7 @@ int mach64_ctl08(void *rb_ctx, int x, int y, int w, int h,
             unsigned char *base = (unsigned char *)pixels;
             uint32_t zpitch_b = zpitch * 2u;
             int p_align, p_rowlen, p_skippix, p_skiprows, p_swap, l, row_stride, row, col;
-            mach64_pack_state(&p_align, &p_rowlen, &p_skippix, &p_skiprows, &p_swap);
+            mach64_pack_state(gc, &p_align, &p_rowlen, &p_skippix, &p_skiprows, &p_swap);
             l = p_rowlen > 0 ? p_rowlen : w;
             row_stride = (elem >= p_align) ? (l * elem)
                                            : (p_align * ((l * elem + p_align - 1) / p_align));
@@ -604,7 +617,7 @@ int mach64_ctl08(void *rb_ctx, int x, int y, int w, int h,
             int bpp_out = (pk || has_a) ? 4 : 3;
             int elem = pk ? 4 : 1;                                   /* element size (bytes) */
             int p_align, p_rowlen, p_skippix, p_skiprows, p_swap, l, row_stride, row, col;
-            mach64_pack_state(&p_align, &p_rowlen, &p_skippix, &p_skiprows, &p_swap);
+            mach64_pack_state(gc, &p_align, &p_rowlen, &p_skippix, &p_skiprows, &p_swap);
             l = p_rowlen > 0 ? p_rowlen : w;
             row_stride = (elem >= p_align) ? (l * bpp_out)
                                            : (p_align * ((l * bpp_out + p_align - 1) / p_align));
@@ -693,7 +706,7 @@ int mach64_ctl0c(gld_context *c, uint32_t a, uint32_t b, uint32_t d,
     dx = (int)(rp[0] + 0.5f);
     dy = (int)(rp[1] + 0.5f);
     pitch_b = p->target_pitch * 4u;
-    mach64_unpack_state(&align, &u_rowlen, &u_skippix, &u_skiprows, &u_swap, &u_lsb);
+    mach64_unpack_state(c, &align, &u_rowlen, &u_skippix, &u_skiprows, &u_swap, &u_lsb);
     l = u_rowlen > 0 ? u_rowlen : w;      /* GL_UNPACK_ROW_LENGTH overrides the image width */
     rowstride = (elem >= align) ? (l * bpp_in)
                                 : (align * ((l * bpp_in + align - 1) / align));
@@ -810,8 +823,8 @@ int mach64_ctl14(gld_context *c, uint32_t a, uint32_t b, uint32_t d,
     /* current raster colour (RGBA floats) from the GLEngine gc.  Raster block: pos x@0x2d0..w@0x2e0,
      * then GL_CURRENT_RASTER_COLOR at 0x2e4 (verified: glColor3f(1,1,0) reads back R@0x2e4=1 G@0x2e8=1
      * B@0x2ec=0).  Fallback to white if the gc pointer is unset. */
-    if (g_gld_gc) {
-        const float *rc = (const float *)(g_gld_gc + 0x2e4);
+    if (mach64_ctx_gc(c)) {
+        const float *rc = (const float *)(mach64_ctx_gc(c) + 0x2e4);
         int ri = (int)(rc[0]*255.0f+0.5f), gi = (int)(rc[1]*255.0f+0.5f);
         int bi = (int)(rc[2]*255.0f+0.5f), ai = (int)(rc[3]*255.0f+0.5f);
         R = (unsigned char)(ri<0?0:ri>255?255:ri); G = (unsigned char)(gi<0?0:gi>255?255:gi);
@@ -820,7 +833,7 @@ int mach64_ctl14(gld_context *c, uint32_t a, uint32_t b, uint32_t d,
     dx = (int)(rp[0] + 0.5f);
     dy = (int)(rp[1] + 0.5f);
     pitch_b = p->target_pitch * 4u;
-    mach64_unpack_state(&u_align, &u_rowlen, &u_skippix, &u_skiprows, &u_swap, &u_lsb);
+    mach64_unpack_state(c, &u_align, &u_rowlen, &u_skippix, &u_skiprows, &u_swap, &u_lsb);
     (void)u_swap;                          /* SWAP_BYTES is a no-op for 1-bpp */
     lbits = u_rowlen > 0 ? u_rowlen : w;   /* GL_UNPACK_ROW_LENGTH (pixels/row) */
     rowbytes = (((lbits + 7) / 8 + u_align - 1) / u_align) * u_align;   /* row bytes padded to alignment */

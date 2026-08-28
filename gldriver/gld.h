@@ -102,6 +102,10 @@ typedef struct {
     uint32_t   z_off;              /* depth buffer byte offset (0 = none)  */
     uint32_t   z_pitch;            /* depth buffer pitch (16-bit Z pixels)  */
     uint32_t   frame_new;          /* 1 => clear Z before next frame's geom */
+    unsigned char *gc;             /* GLEngine's gc for THIS context (dispatch table - 0x78a8):
+                                    * holds GL_PACK / GL_UNPACK pixel-store + raster state.  Per-context
+                                    * (set in gldUpdateDispatch) so pixel ops read the running context's
+                                    * state, not whichever context last updated dispatch. */
     /* ---- double buffering (dbuf=0 => render straight to the front/scanout) - */
     uint32_t   dbuf;               /* 1 => render to back, blit on present  */
     uint32_t   front_off;          /* scanout (front) surface byte offset   */
