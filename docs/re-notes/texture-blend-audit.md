@@ -25,9 +25,14 @@ gli, emits SCALE_3D_CNTL/TEX_CNTL/ALPHA_TST_CNTL/DP_*) + gld_state.c.
    ALPHA-BLENDED textures (grates/fences/smoke stay pixelated) -- setting the bit is harmless there.
    FOLLOW-UP: the MIN/mip filter (TEX_BLEND_FCN, bilinear_min already parsed) -- bit position not yet
    HW-verified, so minified/mip textures still use nearest between levels.
-2. **Texture internal formats -- RGB/RGBA only (MEDIUM).**  No GL_LUMINANCE/ALPHA/LUMINANCE_ALPHA/
-   INTENSITY (common for fonts, masks, detail/light maps).  FIX: convert L/A/LA/I -> ARGB8888 at
-   upload (mach64_upload_image); the bind path already stores ARGB8888.
+2. **Texture internal formats -- DONE (2026-08-27).**  GLEngine hands texels in the app's BASE format,
+   tightly packed (fmt @ level rec+0x0c; confirmed via GLD_TEXFMT_PROBE byte dump -- NOT pre-expanded
+   to RGBA).  Only 0x1907(RGB)/0x1908(RGBA) were handled; the rest fell into the RGB path and read
+   garbage.  Added conversions in mach64_blit_texels: 0x1909 GL_LUMINANCE (1B -> grey opaque), 0x8049
+   INTENSITY (1B -> grey, A=I), 0x1906 ALPHA (1B -> RGB 0, A), 0x190A LUMINANCE_ALPHA (2B -> grey+A);
+   has_alpha now set for RGBA/ALPHA/LA/INTENSITY.  HW-verified (tools/mach64_texfmt): a 2x2
+   GL_LUMINANCE texture (64/128/192/255) reads back the exact greys.  (Test gotcha: a 2x2 1-byte
+   texture needs GL_UNPACK_ALIGNMENT=1, else GLEngine reads past the row.)
 3. **Texture env -- MODULATE/REPLACE/DECAL only (MEDIUM-LOW).**  No GL_BLEND (0x2102), GL_ADD, or
    GL_COMBINE (0x8570).  GL_BLEND/GL_ADD appear in some apps.
 4. **Blend extras (LOW/niche).**  No GL_SRC_ALPHA_SATURATE, glBlendEquation (SUBTRACT/etc. -- ADD

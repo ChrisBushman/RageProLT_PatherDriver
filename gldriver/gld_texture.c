@@ -219,10 +219,22 @@ static void mach64_blit_texels(gld_context *ctx, uint32_t dst_off, uint32_t pitc
         uint32_t chunk[16], k = 0;
         while (k < 16 && i < first + count) {
             uint32_t argb;
-            if (fmt == 0x1908) { const unsigned char *px = src + i*4;
-                argb = ((uint32_t)px[3]<<24)|((uint32_t)px[0]<<16)|((uint32_t)px[1]<<8)|px[2];
-            } else { const unsigned char *px = src + i*3;
-                argb = 0xff000000u|((uint32_t)px[0]<<16)|((uint32_t)px[1]<<8)|px[2];
+            /* GLEngine hands texels in the app's base format, tightly packed (fmt @ level rec+0x0c,
+             * observed via GLD_TEXFMT_PROBE).  Convert to native ARGB8888.  1-byte formats
+             * (LUMINANCE/ALPHA/INTENSITY) and 2-byte (LUMINANCE_ALPHA) expand to grey/alpha. */
+            switch (fmt) {
+            case 0x1908u: { const unsigned char *px = src + i*4;   /* GL_RGBA  */
+                argb = ((uint32_t)px[3]<<24)|((uint32_t)px[0]<<16)|((uint32_t)px[1]<<8)|px[2]; break; }
+            case 0x1909u: { unsigned L = src[i];                   /* GL_LUMINANCE -> grey, opaque */
+                argb = 0xff000000u|(L<<16)|(L<<8)|L; break; }
+            case 0x8049u: { unsigned I = src[i];                   /* GL_INTENSITY -> grey, A = I */
+                argb = (I<<24)|(I<<16)|(I<<8)|I; break; }
+            case 0x1906u: { unsigned A = src[i];                   /* GL_ALPHA -> RGB 0, A */
+                argb = (A<<24); break; }
+            case 0x190Au: { const unsigned char *px = src + i*2;   /* GL_LUMINANCE_ALPHA */
+                unsigned L = px[0], A = px[1]; argb = (A<<24)|(L<<16)|(L<<8)|L; break; }
+            default:      { const unsigned char *px = src + i*3;   /* GL_RGB (and fallback) */
+                argb = 0xff000000u|((uint32_t)px[0]<<16)|((uint32_t)px[1]<<8)|px[2]; break; }
             }
             chunk[k++] = argb; i++;
         }
@@ -245,6 +257,12 @@ static int mach64_upload_image(gld_context *ctx, uint32_t dst_off,
 {
     uint32_t n = w * h;
     if (w > MACH64_BLIT_MAX) return 0;
+#ifdef GLD_TEXFMT_PROBE
+    gld_log("  texel src fmt=0x%x bytes[0..15]: %02x %02x %02x %02x  %02x %02x %02x %02x  "
+            "%02x %02x %02x %02x  %02x %02x %02x %02x\n", fmt,
+            src[0],src[1],src[2],src[3], src[4],src[5],src[6],src[7],
+            src[8],src[9],src[10],src[11], src[12],src[13],src[14],src[15]);
+#endif
     if (w >= 8) {
         uint32_t rows_per = MACH64_BLIT_MAX / w, y0;
         for (y0 = 0; y0 < h; y0 += rows_per) {
@@ -308,7 +326,9 @@ static int mach64_upload(gld_context *ctx, void *texobj)
 
     slot = slot_alloc(tex_key(texobj), lvl[0].w, lvl[0].h, total);
     if (!slot) return 0;
-    slot->has_alpha = (lvl[0].fmt == 0x1908);   /* GL_RGBA -> real alpha channel */
+    {   uint16_t f0 = (uint16_t)lvl[0].fmt;      /* alpha-bearing: RGBA / ALPHA / LUM_ALPHA / INTENSITY */
+        slot->has_alpha = (f0 == 0x1908u || f0 == 0x1906u || f0 == 0x190Au || f0 == 0x8049u);
+    }
     slot->nlevels   = nlevels;
     /* GL_TEXTURE_WRAP_S/T live in the state-obj at +0x10 as (WRAP_S<<16)|WRAP_T,
      * raw GL enums (recovered via tools/mach64_wrapstate).  Any non-REPEAT (0x2901)
