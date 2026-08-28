@@ -24,11 +24,14 @@ rm -f /tmp/mach64gld.log
 cc -O2 -o "$DIR/mach64_wintest" "$DIR/mach64_wintest.c" \
     -framework Carbon -framework AGL -framework OpenGL 2>&1 || { echo "BUILD FAILED"; kextunload /tmp/$B; exit 1; }
 
-echo "=== running windowed probe (no swap; safe) ==="
-"$DIR/mach64_wintest" 2>&1 | tee "$ROOT/wintest-out.txt"
+# Pass "noenv" to force the driver to resolve the window bounds via its CGS resolver ALONE
+# (no MACH64_WIN_RECT fallback) -- isolates whether the automatic surface-handshake works.
+MODE="$1"
+echo "=== running windowed probe${MODE:+ ($MODE)} ==="
+"$DIR/mach64_wintest" $MODE 2>&1 | tee "$ROOT/wintest-out.txt"
 kextunload /tmp/$B
 
-echo "=== driver: windowed attach + raw descriptor dump ==="
-grep -E "gldAttachDrawable|drawable\[|\[cgs\]|\[win\]" /tmp/mach64gld.log 2>/dev/null | head -20
+echo "=== driver: windowed attach + CGS resolve + win activation ==="
+grep -E "gldAttachDrawable|drawable\[|\[cgs\]|\[win\]" /tmp/mach64gld.log 2>/dev/null | head -25
 cp -f /tmp/mach64gld.log "$ROOT/wintest-log.txt" 2>/dev/null
-echo "--- done ---"
+echo "--- done; verdict: [cgs] ...-> screen = resolver worked; [win] WINDOWED = blit armed ---"

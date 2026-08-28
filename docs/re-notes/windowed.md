@@ -2,8 +2,25 @@
 
 Tool: `tools/mach64_wintest.c` + `tools/wintest.sh`.  Two probes established where windowed
 support stands.  Bottom line: **windowed is NOT gated on the full device takeover — engine
-coexistence with a live WindowServer already works.  The ONE remaining blocker is the surface
-handshake (resolving the drawable's surface ID -> window bounds).**
+coexistence with a live WindowServer already works.**
+
+## RESOLVED (2026-08-27): the surface handshake works via CGS
+The "one remaining blocker" below (resolving the drawable's surface ID -> window bounds) is
+SOLVED for the common single-window case and HW-verified.  `gld_cgs.c`
+(`mach64_cgs_resolve_bounds`) resolves it from userspace via the private CGS API
+(`CGSGetWindowList`/`CGSGetSurfaceList`/`CGSGetScreenRectForWindow`/`CGSGetSurfaceBounds`) --
+Apple's WindowServer, NOT the framebuffer and NOT the kernel surface manager (so no Path B needed).
+`gldAttachDrawable` calls it FIRST (env `MACH64_WIN_RECT` is only a manual fallback if it returns 0).
+HW-verified (wintest, driver log): GLEngine drawable-id `sid=0x811b` -> CGS `win 64 surf 0x101` ->
+screen `(120,80) 400x300`, exactly matching the window; `[win]` armed the blit there and the spinning
+triangle rendered in place with the desktop live.  The env fallback code path was NOT taken (CGS
+returned 1).  RESIDUAL GAP (narrow): MULTIPLE simultaneous GL windows -- the resolver picks the first
+window that has a surface (GLEngine's `0x80xx` drawable-id and CGS's `0x101` surface-id are different
+namespaces, so it can't ID-match to disambiguate).  Single-window apps work today.
+
+--- original probe notes (2026-08-26), kept for history: ---
+The ONE remaining blocker (at the time) was the surface handshake (resolving the drawable's surface
+ID -> window bounds).
 
 ## Probe 1 — safe descriptor capture (no swap)
 Bound an ACCELERATED double-buffered AGL context to a normal 400x300 Carbon window (content at

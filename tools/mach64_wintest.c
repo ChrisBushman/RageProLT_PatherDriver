@@ -18,6 +18,7 @@
 #include <OpenGL/gl.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <unistd.h>
 
 /* Private CGS API (Panther): probe whether a REAL accelerated drawable surface enumerates and what
@@ -29,8 +30,11 @@ extern int CGSGetSurfaceList(CGSConnectionID,CGSWindowID,int,CGSSurfaceID*,int*)
 extern int CGSGetScreenRectForWindow(CGSConnectionID,CGSWindowID,CGRect*);
 extern int CGSGetSurfaceBounds(CGSConnectionID,CGSWindowID,CGSSurfaceID,CGRect*);
 
-int main(void)
+int main(int argc, char **argv)
 {
+    /* "noenv" arg: skip setting MACH64_WIN_RECT, forcing the driver to rely SOLELY on its
+     * automatic CGS surface-ID -> window-bounds resolver (no manual-rect crutch to mask a failure). */
+    int noenv = (argc > 1 && argv[1] && !strcmp(argv[1], "noenv"));
     Rect r = { 80, 120, 380, 520 };   /* {top,left,bottom,right}: 400x300 content at (120,80) */
     WindowRef win = NULL;
     OSStatus err = CreateNewWindow(kDocumentWindowClass,
@@ -46,9 +50,14 @@ int main(void)
     int wx = cb.left, wy = cb.top, ww = cb.right - cb.left, wh = cb.bottom - cb.top;
     fprintf(stderr, "CONTENT bounds l=%d t=%d r=%d b=%d  w=%d h=%d\n",
             cb.left, cb.top, cb.right, cb.bottom, ww, wh);
-    {   char buf[64]; snprintf(buf, sizeof buf, "%d,%d,%d,%d", wx, wy, ww, wh);
+    if (noenv) {
+        unsetenv("MACH64_WIN_RECT");
+        fprintf(stderr, "NOENV: MACH64_WIN_RECT unset -- driver must resolve via CGS alone\n");
+    } else {
+        char buf[64]; snprintf(buf, sizeof buf, "%d,%d,%d,%d", wx, wy, ww, wh);
         setenv("MACH64_WIN_RECT", buf, 1);
-        fprintf(stderr, "MACH64_WIN_RECT=%s\n", buf); }
+        fprintf(stderr, "MACH64_WIN_RECT=%s\n", buf);
+    }
 
     GLint attribs[] = { AGL_RGBA, AGL_DOUBLEBUFFER, AGL_DEPTH_SIZE, 16,
                         AGL_ACCELERATED, AGL_NO_RECOVERY, AGL_NONE };
