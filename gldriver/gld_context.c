@@ -177,8 +177,23 @@ int gldDestroyContext(gld_context *ctx)
         IOServiceClose((io_connect_t)MACH64_PRIV(ctx)->apple_surf_cn);
 #endif
     if (ctx->backend) { free(ctx->backend); ctx->backend = 0; }
-    /* TODO: IOConnectUnmapMemory the four regions before closing. */
-    if (ctx->connect) IOServiceClose(ctx->connect);
+    /* Release the userspace VM mappings gldCreateContext made before closing the
+     * connection.  IOServiceClose tears down the kernel side but leaves these
+     * vm_map entries in the process, so repeated context create/destroy would leak
+     * address space.  Only the three regions actually mapped are unmapped (same
+     * memtype + task as the map calls); the type-0 register aperture is never mapped. */
+    if (ctx->connect) {
+        if (ctx->regs)
+            IOConnectUnmapMemory(ctx->connect, MACH64_MEM_SURFACE, mach_task_self(),
+                                 (vm_address_t)ctx->regs);
+        if (ctx->surface)
+            IOConnectUnmapMemory(ctx->connect, MACH64_MEM_CONTROL, mach_task_self(),
+                                 (vm_address_t)ctx->surface);
+        if (ctx->fb)
+            IOConnectUnmapMemory(ctx->connect, MACH64_MEM_CMDBUF, mach_task_self(),
+                                 (vm_address_t)ctx->fb);
+        IOServiceClose(ctx->connect);
+    }
     free(ctx);
     return 0;
 }
