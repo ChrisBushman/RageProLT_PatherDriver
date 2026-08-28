@@ -130,8 +130,11 @@ glReadPixels=table[0x08]/ctl08, glCopyPixels=table[0x10]/ctl10, glDrawPixels=tab
 glBitmap=table[0x14]/ctl14.  The per-context libGL dispatch (ctx+0x3b8/0xd4/0x114/0x1c) reaches a
 GLEngine impl that tail-calls our per-renderer hook slot; we fill the slot.
 
-## Next step (needs one HW run)
-Run tools/pxdisp.sh -> mach64_pxdisp reads [ctx+0x114]/[ctx+0xd4]/[ctx+0x1c] live + dladdr -> the
-GLEngine impl offsets OUR renderer actually uses, and dumps the gc+0x78xx table.  Then disassemble
-those impls to see which gc+0x78xx slot each calls (the one to fill).  For glCopyPixels the fill is a
-framebuffer->framebuffer 2D blit (mach64_blit_surface) installed at that slot in gldInitDispatch.
+## glCopyTexImage2D -- WORKS by decomposition, no code needed (verified 2026-08-27)
+glCopyTexImage2D has NO dedicated hook and needs none: GLEngine decomposes it into our framebuffer
+READBACK (table[0x08]/ctl08) + our texture UPLOAD.  Confirmed live (tools/mach64_copyteximage, driver
+log): a glCopyTexImage2D(...,100,100,64,64,0) emits ">>> READBACK x=100 y=100 w=64 h=64" then
+"mach64 texture upload: 64x64 -> VRAM".  HW-verified correct incl. VERTICAL ORIENTATION -- a split
+source (bottom green / top red) copies to a texture that samples bottom green / top red (no Y-flip
+bug in the readback->upload compose).  So because ctl08 readback and the texture upload path are each
+correct, glCopyTexImage2D (and glCopyTexSubImage2D, same compose) come for free.
