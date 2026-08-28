@@ -664,7 +664,33 @@ int mach64_ctl08(void *rb_ctx, int x, int y, int w, int h,
  * We convert each client pixel to native ARGB8888 (inverse of the glReadPixels/mach64_ctl08 path) and
  * write it to the render target via the whole-VRAM CPU map (c->regs), Y-flipping GL's bottom-left
  * origin (image row 0 = bottom = raster y).  Honours GL_UNPACK_ALIGNMENT/ROW_LENGTH/SKIP_ROWS/
- * SKIP_PIXELS/SWAP_BYTES (mach64_unpack_state).  Pixel zoom (!=1) is not applied -- rare; deferred. */
+ * SKIP_PIXELS/SWAP_BYTES (mach64_unpack_state) and glPixelZoom (gc+0x63bc/0x63c0): each source pixel
+ * fills its zoomed destination rectangle (fragment-center rule; negative zoom flips that axis). */
+
+/* Fragment-center ceil: a framebuffer pixel n is covered by window span [lo,hi) when its centre n+0.5
+ * falls inside, so the covered integer range is [iceil(lo-0.5), iceil(hi-0.5)).  Handles negatives. */
+static int iceil(float f) { int i = (int)f; return (f > (float)i) ? i + 1 : i; }
+
+/* Decode one glDrawPixels source pixel to R/G/B/A.  Shared by the 1:1 and pixel-zoom paths.
+ * pk: 0=byte components, 1=INT_8_8_8_8, 2=_REV.  u_swap = GL_UNPACK_SWAP_BYTES (reverses the 4-byte
+ * packed word; a no-op for 1-byte components, so it only applies in the packed branch). */
+static void mach64_decode_pixel(const unsigned char *s, int pk, int is_bgr, int has_a, int u_swap,
+                                unsigned char *R, unsigned char *G, unsigned char *B, unsigned char *A)
+{
+    if (pk == 0) {
+        if (is_bgr) { *B = s[0]; *G = s[1]; *R = s[2]; }
+        else        { *R = s[0]; *G = s[1]; *B = s[2]; }
+        *A = has_a ? s[3] : 0xFFu;
+    } else {
+        uint32_t v = *(const uint32_t *)s, c0, c1, c2, c3;
+        if (u_swap) v = (v>>24) | ((v>>8)&0xff00u) | ((v<<8)&0xff0000u) | (v<<24);
+        if (pk == 1) { c0=(v>>24)&0xffu; c1=(v>>16)&0xffu; c2=(v>>8)&0xffu; c3=v&0xffu; }
+        else         { c0=v&0xffu; c1=(v>>8)&0xffu; c2=(v>>16)&0xffu; c3=(v>>24)&0xffu; }
+        if (is_bgr) { *B=(unsigned char)c0; *G=(unsigned char)c1; *R=(unsigned char)c2; }
+        else        { *R=(unsigned char)c0; *G=(unsigned char)c1; *B=(unsigned char)c2; }
+        *A = (unsigned char)c3;
+    }
+}
 int mach64_ctl0c(gld_context *c, uint32_t a, uint32_t b, uint32_t d,
                  uint32_t e, uint32_t f, uint32_t g)
 {
@@ -677,6 +703,7 @@ int mach64_ctl0c(gld_context *c, uint32_t a, uint32_t b, uint32_t d,
     int u_rowlen, u_skippix, u_skiprows, u_swap, u_lsb, l;
     volatile unsigned char *vram;
     uint32_t pitch_b;
+    float zx = 1.0f, zy = 1.0f;
 
     if (!p || !p->target_off || !p->target_pitch || !rp || !src || w <= 0 || h <= 0) {
         ctl_dump("table[0x0c]", c, a, b, d, e, f, g); return 0;
@@ -706,42 +733,44 @@ int mach64_ctl0c(gld_context *c, uint32_t a, uint32_t b, uint32_t d,
     dy = (int)(rp[1] + 0.5f);
     pitch_b = p->target_pitch * 4u;
     mach64_unpack_state(c, &align, &u_rowlen, &u_skippix, &u_skiprows, &u_swap, &u_lsb);
+    {   unsigned char *gcp = mach64_ctx_gc(c);   /* glPixelZoom: GL_ZOOM_X @ gc+0x63bc, GL_ZOOM_Y @ +0x63c0 */
+        if (gcp) { float rzx = *(const float *)(gcp + 0x63bc), rzy = *(const float *)(gcp + 0x63c0);
+                   if (rzx != 0.0f) zx = rzx; if (rzy != 0.0f) zy = rzy; }   /* 0 = unset/bad -> no zoom */
+    }
     l = u_rowlen > 0 ? u_rowlen : w;      /* GL_UNPACK_ROW_LENGTH overrides the image width */
     rowstride = (elem >= align) ? (l * bpp_in)
                                 : (align * ((l * bpp_in + align - 1) / align));
     src += u_skiprows * rowstride + u_skippix * bpp_in;   /* GL_UNPACK_SKIP_ROWS/PIXELS */
-    gld_log("glDrawPixels: %dx%d fmt=0x%x type=0x%x -> (%d,%d) [W=%d H=%d unpack a=%d rl=%d sp=%d sr=%d]\n",
-            w, h, format, type, dx, dy, W, H, align, u_rowlen, u_skippix, u_skiprows);
+    gld_log("glDrawPixels: %dx%d fmt=0x%x type=0x%x -> (%d,%d) zoom=%.2f,%.2f [W=%d H=%d unpack a=%d rl=%d sp=%d sr=%d]\n",
+            w, h, format, type, dx, dy, zx, zy, W, H, align, u_rowlen, u_skippix, u_skiprows);
     mach64_frame_start(c);                /* deferred glClear -> clear before this upload */
     mach64_flush_batch(c);                /* pending geometry before the upload */
     for (row = 0; row < h; row++) {
-        int fbrow = H - 1 - (dy + row);   /* image row 0 = bottom = raster y -> VRAM row */
         const unsigned char *srow = src + row * rowstride;
-        if (fbrow < 0 || fbrow >= H) continue;
+        float wy0 = (float)dy + (float)row * zy, wy1 = (float)dy + (float)(row + 1) * zy;
+        int ylo = iceil((wy0 < wy1 ? wy0 : wy1) - 0.5f);
+        int yhi = iceil((wy0 < wy1 ? wy1 : wy0) - 0.5f);
+        int wy;
         for (col = 0; col < w; col++) {
-            int gx = dx + col;
             const unsigned char *s = srow + col * bpp_in;
-            volatile unsigned char *o;
+            float wx0 = (float)dx + (float)col * zx, wx1 = (float)dx + (float)(col + 1) * zx;
+            int xlo = iceil((wx0 < wx1 ? wx0 : wx1) - 0.5f);
+            int xhi = iceil((wx0 < wx1 ? wx1 : wx0) - 0.5f);
             unsigned char R, G, B, A;
-            if (gx < 0 || gx >= W) continue;
-            if (pk == 0) {
-                if (is_bgr) { B = s[0]; G = s[1]; R = s[2]; }
-                else        { R = s[0]; G = s[1]; B = s[2]; }
-                A = has_a ? s[3] : 0xFFu;
-            } else {
-                /* packed uint32 -- inverse of the readback pack: 8_8_8_8 puts the FIRST format
-                 * component in the MSB, _REV in the LSB.  c0..c3 = FORMAT-order components.
-                 * (TODO: GL_UNPACK_SWAP_BYTES would byte-reverse v; default off.) */
-                uint32_t v = *(const uint32_t *)s, c0, c1, c2, c3;
-                if (u_swap) v = (v>>24) | ((v>>8)&0xff00u) | ((v<<8)&0xff0000u) | (v<<24);
-                if (pk == 1) { c0=(v>>24)&0xffu; c1=(v>>16)&0xffu; c2=(v>>8)&0xffu; c3=v&0xffu; }
-                else         { c0=v&0xffu; c1=(v>>8)&0xffu; c2=(v>>16)&0xffu; c3=(v>>24)&0xffu; }
-                if (is_bgr) { B=(unsigned char)c0; G=(unsigned char)c1; R=(unsigned char)c2; }
-                else        { R=(unsigned char)c0; G=(unsigned char)c1; B=(unsigned char)c2; }
-                A = (unsigned char)c3;
+            int wx;
+            mach64_decode_pixel(s, pk, is_bgr, has_a, u_swap, &R, &G, &B, &A);
+            for (wy = ylo; wy < yhi; wy++) {           /* fill this source pixel's zoomed dest rect */
+                int fbrow = H - 1 - wy;                /* GL bottom-left origin -> top-down VRAM row */
+                volatile unsigned char *orow;
+                if (fbrow < 0 || fbrow >= H) continue;
+                orow = vram + p->target_off + (uint32_t)fbrow * pitch_b;
+                for (wx = xlo; wx < xhi; wx++) {
+                    volatile unsigned char *o;
+                    if (wx < 0 || wx >= W) continue;
+                    o = orow + (uint32_t)wx * 4u;
+                    o[0] = B; o[1] = G; o[2] = R; o[3] = A;   /* native LE ARGB8888 */
+                }
             }
-            o = vram + p->target_off + (uint32_t)fbrow * pitch_b + (uint32_t)gx * 4u;
-            o[0] = B; o[1] = G; o[2] = R; o[3] = A;   /* native LE ARGB8888 */
         }
     }
     return 0;

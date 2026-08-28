@@ -122,8 +122,16 @@ into raster_dst; the xmove/ymove raster advance is GLEngine's, not ours.
 - **Lazy-clear fix**: the deferred glClear (frame_new) was only fired by the first triangle, so a
   geometry-less glClear+glDrawPixels/glBitmap frame never cleared.  Extracted mach64_frame_start();
   the pixel ops now call it too.  HW-verified: drawpixels bg reads the clear colour (was black).
-- **Pixel zoom / 5_6_5: DEFERRED** (noted in code).  glDrawPixels impl reads zoom (gc+0x63bc/0x63c0)
-  but non-unit zoom is rare (would need pixel replication in ctl0c); 5_6_5 is niche (readback lacks it).
+- **Pixel zoom -- DONE (2026-08-27).**  glPixelZoom X/Y are floats at gc+0x63bc/0x63c0 (offset confirmed
+  by the "zoom=X,Y" log reading 4.00 for glPixelZoom(4,4)).  ctl0c now fills each source pixel's zoomed
+  destination rectangle by the fragment-center rule (iceil(lo-0.5)..iceil(hi-0.5)); negative zoom flips
+  the axis.  Shared mach64_decode_pixel between the 1:1 and zoom paths.  HW-verified (tools/mach64_pixzoom):
+  a 2x2 image at zoom (4,4) draws correct 4x4 blocks (8x8 extent, past-edge = background); zoom (1,1) is
+  byte-identical to before (no regression).
+- **GL_UNPACK_SWAP_BYTES -- DONE.**  Already implemented in the packed decode (a no-op for 1-byte
+  components); HW-verified (mach64_pixzoom): a GL_UNSIGNED_INT_8_8_8_8 pixel 0x10203040 with SWAP_BYTES
+  reads (64,48,32) = the byte-reversed word.
+- **5_6_5 texture type -- DONE** (see texture-blend-audit.md 2b).  Readback still lacks 5_6_5 (niche).
 
 ## *** PIXEL-OPS ARC COMPLETE (2026-08-27) *** all four via the renderer dispatch-hook technique:
 glReadPixels=table[0x08]/ctl08, glCopyPixels=table[0x10]/ctl10, glDrawPixels=table[0x0c]/ctl0c,
