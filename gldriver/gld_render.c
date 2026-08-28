@@ -307,14 +307,13 @@ void mach64_blit_surface(gld_context *ctx, uint32_t src_off, uint32_t dst_off,
     p->dirty |= MACH64_DIRTY_STATE;   /* 3D state clobbered -> re-emit next tri */
 }
 
-/* ---- one triangle: the core draw path -------------------------------
- * Re-emit the state block if dirty, emit the 3 vertices + the reciprocal-area
- * trigger, then submit.  Returns 0 on a degenerate triangle (dropped).
- *
- * TODO batching: today each triangle is its own DMA kick (correct, matches
- * ringtest).  For throughput, accumulate many triangles into one command buffer
- * and submit once per flush -- the emit core already supports that; just move
- * the submit out of here and flush on buffer-full / gldFlush. */
+/* ---- triangle batching ----------------------------------------------
+ * mach64_draw_triangle (below) accumulates state + geometry into the persistent
+ * per-context command buffer p->batch instead of submitting per-triangle; the whole
+ * batch is DMA-kicked ONCE by mach64_flush_batch at frame boundaries or on overflow
+ * (the kext chains the submit across descriptors, so a full buffer still kicks once).
+ * This replaced the old submit-per-triangle path (~80 kicks/frame, ~3fps of pure
+ * submit overhead). */
 /* Submit the accumulated triangle batch (if any) as ONE DMA kick, then reset it.
  * Called at frame boundaries (gldFlush/Finish/FlushBuffer) and before any operation
  * that must observe the triangles (fill/blit/clear/texture upload). */
