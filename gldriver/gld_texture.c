@@ -231,7 +231,7 @@ static uint32_t ilog2u(uint32_t v) { uint32_t r = 0; while (v > 1) { v >>= 1; r+
  * pitch `pitch_units`*8 pixels.  count must be <= MACH64_BLIT_MAX. */
 static void mach64_blit_texels(gld_context *ctx, uint32_t dst_off, uint32_t pitch_units,
                                uint32_t bw, uint32_t bh, const unsigned char *src,
-                               uint32_t first, uint32_t count, uint16_t fmt)
+                               uint32_t first, uint32_t count, uint16_t fmt, uint16_t type)
 {
     mach64_priv *p = MACH64_PRIV(ctx);
     m64_cmdbuf cb;
@@ -255,8 +255,19 @@ static void mach64_blit_texels(gld_context *ctx, uint32_t dst_off, uint32_t pitc
         while (k < 16 && i < first + count) {
             uint32_t argb;
             /* GLEngine hands texels in the app's base format, tightly packed (fmt @ level rec+0x0c,
-             * observed via GLD_TEXFMT_PROBE).  Convert to native ARGB8888.  1-byte formats
-             * (LUMINANCE/ALPHA/INTENSITY) and 2-byte (LUMINANCE_ALPHA) expand to grey/alpha. */
+             * the pixel TYPE @ +0x0e, observed via GLD_TEXFMT_PROBE).  Convert to native ARGB8888.
+             * 1-byte formats (LUMINANCE/ALPHA/INTENSITY) and 2-byte (LUMINANCE_ALPHA) expand to
+             * grey/alpha.  Packed types are keyed on `type` (fmt stays the base RGB code). */
+            if (type == 0x8363u) {   /* GL_UNSIGNED_SHORT_5_6_5: packed RGB in one native (big-endian) u16 */
+                unsigned v  = ((unsigned)src[i*2] << 8) | src[i*2 + 1];
+                unsigned r5 = (v >> 11) & 0x1fu, g6 = (v >> 5) & 0x3fu, b5 = v & 0x1fu;
+                unsigned R  = (r5 << 3) | (r5 >> 2);   /* 5/6-bit -> 8-bit with bit replication */
+                unsigned G  = (g6 << 2) | (g6 >> 4);
+                unsigned B  = (b5 << 3) | (b5 >> 2);
+                argb = 0xff000000u | (R << 16) | (G << 8) | B;
+                chunk[k++] = argb; i++;
+                continue;
+            }
             switch (fmt) {
             case 0x1908u: { const unsigned char *px = src + i*4;   /* GL_RGBA  */
                 argb = ((uint32_t)px[3]<<24)|((uint32_t)px[0]<<16)|((uint32_t)px[1]<<8)|px[2]; break; }
@@ -288,7 +299,8 @@ static void mach64_blit_texels(gld_context *ctx, uint32_t dst_off, uint32_t pitc
  * into <=MACH64_BLIT_MAX chunks, each at its own sub-offset.  Returns 0 if w is
  * too wide to chunk by rows. */
 static int mach64_upload_image(gld_context *ctx, uint32_t dst_off,
-                               uint32_t w, uint32_t h, const unsigned char *src, uint16_t fmt)
+                               uint32_t w, uint32_t h, const unsigned char *src,
+                               uint16_t fmt, uint16_t type)
 {
     uint32_t n = w * h;
     if (w > MACH64_BLIT_MAX) return 0;
@@ -303,13 +315,13 @@ static int mach64_upload_image(gld_context *ctx, uint32_t dst_off,
         for (y0 = 0; y0 < h; y0 += rows_per) {
             uint32_t rows = (h - y0 < rows_per) ? (h - y0) : rows_per;
             mach64_blit_texels(ctx, dst_off + y0 * w * 4u, w / 8, w, rows,
-                               src, y0 * w, rows * w, fmt);
+                               src, y0 * w, rows * w, fmt, type);
         }
     } else {
         uint32_t start;
         for (start = 0; start < n; start += MACH64_BLIT_MAX) {
             uint32_t cnt = (n - start < MACH64_BLIT_MAX) ? (n - start) : MACH64_BLIT_MAX;
-            mach64_blit_texels(ctx, dst_off + start * 4u, 1, cnt, 1, src, start, cnt, fmt);
+            mach64_blit_texels(ctx, dst_off + start * 4u, 1, cnt, 1, src, start, cnt, fmt, type);
         }
     }
     return 1;
@@ -329,7 +341,7 @@ static int mach64_upload(gld_context *ctx, void *texobj)
     mach64_priv *p = MACH64_PRIV(ctx);
     const unsigned char *t = (const unsigned char *)texobj;
     mach64_flush_batch(ctx);   /* order: pending triangles before texture VRAM changes */
-    struct { uint32_t w, h, src, fmt, bytes; } lvl[12];
+    struct { uint32_t w, h, src, fmt, type, bytes; } lvl[12];
     uint32_t state, base_lod, total, cur;
     const unsigned char *s;
     mach64_tex_slot *slot;
@@ -348,9 +360,17 @@ static int mach64_upload(gld_context *ctx, void *texobj)
         uint32_t lw = *(const uint16_t *)(r + 0x00), lh = *(const uint16_t *)(r + 0x02);
         uint32_t lsrc = *(const uint32_t *)(r + 0x10);
         if (!lw || !lh || lsrc < 0x10000 || lsrc >= 0x40000000) break;
+#ifdef GLD_TEXFMT_PROBE
+        if (L == 0)   /* dump the whole 20-byte level record to locate the pixel-TYPE field (5_6_5) */
+            gld_log("  texrec L0: %02x %02x %02x %02x  %02x %02x %02x %02x  %02x %02x %02x %02x  "
+                    "%02x %02x %02x %02x  %02x %02x %02x %02x\n",
+                    r[0],r[1],r[2],r[3], r[4],r[5],r[6],r[7], r[8],r[9],r[10],r[11],
+                    r[12],r[13],r[14],r[15], r[16],r[17],r[18],r[19]);
+#endif
         if (lw > MACH64_BLIT_MAX) { if (L == 0) { gld_log("mach64 tex: %ux%u too wide\n", lw, lh); return 0; } break; }
         lvl[nlevels].w = lw; lvl[nlevels].h = lh; lvl[nlevels].src = lsrc;
-        lvl[nlevels].fmt = *(const uint16_t *)(r + 0x0c);
+        lvl[nlevels].fmt  = *(const uint16_t *)(r + 0x0c);
+        lvl[nlevels].type = *(const uint16_t *)(r + 0x0e);   /* pixel type (0x1401 UBYTE / 0x8363 5_6_5) */
         lvl[nlevels].bytes = tex_align(lw * lh * 4u);
         nlevels++;
     }
@@ -388,7 +408,8 @@ static int mach64_upload(gld_context *ctx, void *texobj)
         uint32_t mx = lvl[L].w > lvl[L].h ? lvl[L].w : lvl[L].h;
         uint32_t r  = ilog2u(mx);
         mach64_upload_image(ctx, cur, lvl[L].w, lvl[L].h,
-                            (const unsigned char *)(uintptr_t)lvl[L].src, (uint16_t)lvl[L].fmt);
+                            (const unsigned char *)(uintptr_t)lvl[L].src,
+                            (uint16_t)lvl[L].fmt, (uint16_t)lvl[L].type);
         if (r < 12) slot->mip_off[r] = cur;
         cur += lvl[L].bytes;
     }

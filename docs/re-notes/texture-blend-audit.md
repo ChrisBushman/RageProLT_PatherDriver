@@ -50,6 +50,15 @@ gli, emits SCALE_3D_CNTL/TEX_CNTL/ALPHA_TST_CNTL/DP_*) + gld_state.c.
    has_alpha now set for RGBA/ALPHA/LA/INTENSITY.  HW-verified (tools/mach64_texfmt): a 2x2
    GL_LUMINANCE texture (64/128/192/255) reads back the exact greys.  (Test gotcha: a 2x2 1-byte
    texture needs GL_UNPACK_ALIGNMENT=1, else GLEngine reads past the row.)
+   2b. **Packed pixel TYPE GL_UNSIGNED_SHORT_5_6_5 -- DONE (2026-08-27).**  fmt alone doesn't identify
+   packed types: a 5_6_5 texture arrives as fmt=0x1907 (RGB) but with 2-byte packed data, so the RGB
+   3-byte reader produced garbage.  The pixel TYPE is a SEPARATE u16 at level rec **+0x0e** (0x1401
+   UNSIGNED_BYTE vs 0x8363 UNSIGNED_SHORT_5_6_5), found by diffing an 8-bit vs a 5_6_5 record
+   (tools/mach64_tex565, -DGLD_TEXFMT_PROBE dumps the 20-byte record).  mach64_upload now reads it and
+   threads it through mach64_upload_image -> mach64_blit_texels, which expands 5_6_5 (big-endian u16,
+   R5/G6/B5 with bit-replication to 8-bit) -> ARGB8888.  HW-verified: a 2x2 RGB565 red/green/blue/white
+   texture reads back pure (255,0,0)/(0,255,0)/(0,0,255)/(255,255,255); the type param is extensible to
+   other packed types (5_6_5_REV, 4_4_4_4, 1_5_5_5) if ever needed.
 3. **Texture env -- DONE / HARDWARE-LIMITED (2026-08-27).**  The mach64 TEX_LIGHT_FCN field is 2 bits
    = 3 modes: REPLACE / MODULATE / ALPHA_DECAL.  Those work (and interact correctly with the new
    L/A/I formats: MODULATE/REPLACE compliant).  GL_BLEND / GL_ADD / GL_COMBINE are NOT hardware-doable
