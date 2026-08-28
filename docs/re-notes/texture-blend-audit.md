@@ -68,18 +68,22 @@ gli, emits SCALE_3D_CNTL/TEX_CNTL/ALPHA_TST_CNTL/DP_*) + gld_state.c.
      in the reference's factor switch -> software fallback; the mach64 has no blend-colour register.
    - **SRC/DST asymmetry is not a gap:** SRC has no SRC_COLOR/1-SRC_COLOR, DST has no DST_COLOR/
      1-DST_COLOR -- that is the pre-2.0 GL spec + matches the HW factor sets we already map (8 each).
-   - **GL_SRC_ALPHA_SATURATE (0x0308) -- the ONE real implementable gap (niche, DEFERRED).**  The HW
-     *does* support it: reference sets ALPHA_BLEND_SRC_SRCALPHA | **MACH64_ALPHA_BLEND_SAT** (SRC factor
-     only).  Our mach64_blend_src doesn't map 0x0308 -> it currently falls to the GL_ONE default.  Adding
-     it needs the ALPHA_BLEND_SAT bit in SCALE_3D_CNTL (a separate bit outside the [18:16] SRC field, and
-     its exact position is not yet HW-verified) plus a HW test.  Low value + needs an unverified register
-     bit -> not worth the HW-probe risk right now; recorded here for if it ever matters.
+   - **GL_SRC_ALPHA_SATURATE (0x0308) -- DONE (2026-08-27).**  mach64_blend_src now maps it to
+     ALPHA_BLEND_SRC_SRCALPHA | ALPHA_BLEND_SAT, exactly as the reference does.  The SAT bit is
+     **0x00002000 (bit 13)** -- NOT reconstructable from the imaged RRG PDF, so sourced from the
+     xf86-video-mach64 driver header (atiregs.h, MACH64_ALPHA_BLEND_SAT = 1<<13) and cross-verified
+     against 8 other SCALE_3D_CNTL bits in that header that all match this driver's working values
+     (SCALE_3D_FCN_TEXTURE 2<<6, SRC_SRCALPHA 4<<16, TEX_LIGHT_FCN_MODULATE 1<<22, MIP_MAP_DISABLE 1<<24,
+     BILINEAR_TEX_EN 1<<25, ...).  HW-verified (tools/mach64_satblend): on a black buffer (Ad=0) saturate
+     reduces to SRC_ALPHA and reads back the identical (100,50,25); no hang.  (Same header also revealed
+     TEX_BLEND_FCN_LINEAR is 2<<26=0x08000000, not the 0x04000000 the min-filter probe had used -- value
+     corrected in gld_texture.c though still moot, no mip chain.)
 5. **Multitexture -- N/A.**  The LT Pro has a single TMU; ARB_multitexture is not HW-supported.
 
 ## Status: AUDIT CLOSED (2026-08-27)
 Every gap is resolved or bounded by hardware.  Real wins shipped: bilinear MAGNIFICATION (#1),
 luminance/alpha/intensity formats (#2).  Hardware limits confirmed + documented, not driver bugs:
 min/mip filter + HW mipmapping (#1b), env BLEND/ADD/COMBINE (#3), blend equation ADD-only + constant
--colour factors (#4).  N/A: multitexture (#5).  One niche implementable factor deferred:
-GL_SRC_ALPHA_SATURATE (#4) -- needs an unverified SCALE_3D_CNTL bit + HW test.  See also the
-consolidated hardware-limits note in memory (rageprolt-hw-limits).
+-colour factors (#4).  N/A: multitexture (#5).  Last implementable factor now shipped:
+GL_SRC_ALPHA_SATURATE (#4, ALPHA_BLEND_SAT bit13, HW-verified).  See also the consolidated
+hardware-limits note in memory (rageprolt-hw-limits).

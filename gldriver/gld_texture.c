@@ -402,6 +402,11 @@ static uint32_t mach64_blend_src(uint32_t glf)
     case 0x0303: return 5u << 16;   /* GL_ONE_MINUS_SRC_ALPHA  */
     case 0x0304: return 6u << 16;   /* GL_DST_ALPHA            */
     case 0x0305: return 7u << 16;   /* GL_ONE_MINUS_DST_ALPHA  */
+    case 0x0308: return (4u << 16) | 0x00002000u;  /* GL_SRC_ALPHA_SATURATE: SRC_ALPHA + ALPHA_BLEND_SAT
+                                     * (bit13, from xf86-video-mach64 atiregs.h -- cross-verified vs the
+                                     * other SCALE_3D_CNTL bits this driver already uses).  min(As,1-Ad)
+                                     * for RGB, 1 for alpha -- the HW SAT bit does exactly this.  SRC-only
+                                     * factor per the GL spec, so it is NOT added to mach64_blend_dst. */
     default:     return 1u << 16;
     }
 }
@@ -774,11 +779,13 @@ int mach64_bind_texture(gld_context *ctx)
      * base level -- the identical, proven HW path that non-mipmapped textures already use.  Minified
      * textures therefore alias (no LOD) rather than mip, which is the hardware's real capability. */
     /* TEX_BLEND_FCN [27:26] (BILINEAR_TEX_EN above is the mag filter; this is the min/mip filter):
-     * NEAREST=0, LINEAR=0x04000000, TRILINEAR=0x08000000 (multitex, N/A on the single-TMU LT Pro).
-     * Bit position: DRI reference (mach64_texstate.c BilinearMin path) + mesa default 0x0b4100cb (bit27
-     * set => field at [27:26]).
+     * NEAREST=0, LINEAR=(2<<26)=0x08000000, TRILINEAR=(3<<26)=0x0c000000 (multitex, N/A single-TMU).
+     * Authoritative values from xf86-video-mach64 atiregs.h (MACH64_TEX_BLEND_FCN_LINEAR = 2<<26).
+     * NOTE: the tools/mach64_texmin probe used 0x04000000 (=1<<26), which is the WRONG encoding for this
+     * 2-bit field -- so those runs exercised an invalid TEX_BLEND_FCN value, which likely contributed to
+     * the black/hang on top of the missing mip chain.  Value corrected below.
      *
-     * HW-VERIFIED (tools/mach64_texmin) that this is a MIP-LEVEL BLEND control, NOT an intra-level min
+     * HW-tested (tools/mach64_texmin) that this is a MIP-LEVEL BLEND control, NOT an intra-level min
      * filter: setting LINEAR makes the HW fetch+blend a second (smaller) mip level.  On a SINGLE-LEVEL
      * texture at a minifying LOD that level does not exist, so the fetch hits a bogus address -> the
      * textured output goes BLACK (small texture) or the bus HANGS (large texture -- 128x128 wedged the
@@ -792,7 +799,7 @@ int mach64_bind_texture(gld_context *ctx)
     if (bound->bilinear_min) {
         static int probe = -1;
         if (probe < 0) probe = getenv("GLD_TEXBLEND_PROBE") ? 1 : 0;
-        if (probe) new_scale_3d |= 0x04000000u;            /* TEX_BLEND_FCN_LINEAR */
+        if (probe) new_scale_3d |= 0x08000000u;            /* TEX_BLEND_FCN_LINEAR (2<<26) */
     }
 
     /* GL_FOG on textured geometry: fog wins the alpha channel (clears TEX_MAP_AEN,
