@@ -25,8 +25,22 @@
  * S/T convention are best-effort and flagged for hardware validation.
  */
 #include <stdlib.h>   /* getenv (GLD_TEXBLEND_PROBE gate) */
+#include <pthread.h>  /* g_tex_lock: the VRAM texture heap is process-shared across contexts */
 #include "gld.h"
 #include "../common/mach64_regs.h"
+
+/* The texture heap (g_slots / g_heap_next / g_free / g_pending below) is a single
+ * process-wide VRAM allocator shared by every GL context.  An app driving multiple
+ * contexts from multiple threads can call the upload / delete / dirty paths
+ * concurrently, which would corrupt the slot table, free list, and bump pointer.
+ * One mutex guards all mutations; it is taken at the PUBLIC entry points only
+ * (slot_alloc / texture_deleted / texture_dirtied / set_texheap / the pending drain
+ * / the bind-time slot lookup), so the internal helpers heap_alloc / heap_free /
+ * slot_find run lock-free with the lock already held.  Uncontended (the common
+ * single-threaded case) a mutex is nearly free, and texture alloc is not per-draw. */
+static pthread_mutex_t g_tex_lock = PTHREAD_MUTEX_INITIALIZER;
+#define TEX_LOCK()   pthread_mutex_lock(&g_tex_lock)
+#define TEX_UNLOCK() pthread_mutex_unlock(&g_tex_lock)
 
 /* ---- texture VRAM allocator ------------------------------------------
  * Texels live above the depth buffer (Z @ 0x400000) in the 8 MB VRAM aperture.
@@ -67,7 +81,9 @@ static uint32_t        g_heap_end  = MACH64_TEX_HEAP_END;
 
 void mach64_set_texheap(uint32_t base, uint32_t end)
 {
+    TEX_LOCK();
     g_heap_base = base; g_heap_end = end; g_heap_next = base;
+    TEX_UNLOCK();
     gld_log("mach64_set_texheap: heap = [0x%x, 0x%x) (%u KB)\n",
             base, end, (end - base) >> 10);
 }
@@ -141,7 +157,7 @@ static uint32_t heap_alloc(uint32_t size)
  * w*h texture, or a whole mip chain -- caller sizes it).  w/h are the BASE dims
  * stored for the texture registers.  A re-upload reuses its region if the new one
  * still fits; if it grew, the old region is freed before a fresh one is taken. */
-static mach64_tex_slot *slot_alloc(uint32_t key, uint32_t w, uint32_t h, uint32_t nbytes)
+static mach64_tex_slot *slot_alloc_locked(uint32_t key, uint32_t w, uint32_t h, uint32_t nbytes)
 {
     uint32_t sz = tex_align(nbytes);
     uint32_t off;
@@ -160,6 +176,19 @@ static mach64_tex_slot *slot_alloc(uint32_t key, uint32_t w, uint32_t h, uint32_
     return s;
 }
 
+/* Locking wrapper around slot_alloc_locked (single critical section over the slot table
+ * + heap).  The returned slot is used unlocked by the caller, which is safe because a slot
+ * belongs to one texture key: concurrent uploads target different keys/slots (two threads
+ * modifying the SAME bound texture is a GL user error). */
+static mach64_tex_slot *slot_alloc(uint32_t key, uint32_t w, uint32_t h, uint32_t nbytes)
+{
+    mach64_tex_slot *s;
+    TEX_LOCK();
+    s = slot_alloc_locked(key, w, h, nbytes);
+    TEX_UNLOCK();
+    return s;
+}
+
 /* GLEngine records the currently-bound texture's texobj (our gldCreateTexture
  * result) as a gli field at +0x15748 (recovered by a within-process gli-region
  * diff across two differently-bound draws, tools/mach64_texmulti).  bind_texture
@@ -173,15 +202,20 @@ void mach64_texture_dirtied(void *texobj)
 {
     int i;
     if (!texobj) return;
-    for (i = 0; i < g_npending; i++) if (g_pending[i] == texobj) return;
+    TEX_LOCK();
+    for (i = 0; i < g_npending; i++) if (g_pending[i] == texobj) { TEX_UNLOCK(); return; }
     if (g_npending < 16) g_pending[g_npending++] = texobj;
+    TEX_UNLOCK();
 }
 void mach64_texture_bound(void *texobj) { (void)texobj; }   /* no bind hook; see gli */
 
 void mach64_texture_deleted(void *texobj)
 {
-    mach64_tex_slot *s = slot_find(tex_key(texobj));
+    mach64_tex_slot *s;
+    TEX_LOCK();
+    s = slot_find(tex_key(texobj));
     if (s) { heap_free(s->off, s->rsize); s->key = 0; }   /* reclaim VRAM + slot */
+    TEX_UNLOCK();
 }
 
 static uint32_t ilog2u(uint32_t v) { uint32_t r = 0; while (v > 1) { v >>= 1; r++; } return r; }
@@ -570,8 +604,18 @@ int mach64_bind_texture(gld_context *ctx)
     int changed, lop_on;
 
     /* Upload any image-dirtied textures (their state objects are populated by
-     * draw time); each lands in its own VRAM slot. */
-    while (g_npending) mach64_upload(ctx, g_pending[--g_npending]);
+     * draw time); each lands in its own VRAM slot.  Pop the queue under the lock,
+     * then upload OUTSIDE it -- mach64_upload -> slot_alloc takes the lock itself,
+     * so holding it across the DMA upload would both deadlock and needlessly
+     * serialise uploads. */
+    for (;;) {
+        void *pend = 0;
+        TEX_LOCK();
+        if (g_npending) pend = g_pending[--g_npending];
+        TEX_UNLOCK();
+        if (!pend) break;
+        mach64_upload(ctx, pend);
+    }
 
 #ifdef GLD_FOGSCAN
     /* Recover the GL_FOG-enable gli offset (0x6354 was disproven = dither).  Snapshot
@@ -702,7 +746,9 @@ int mach64_bind_texture(gld_context *ctx)
     {   uint32_t bt = mach64_gli_u32(ctx, GLI_BOUND_TEXOBJ);
         uint32_t key = (bt > 0x10000 && bt < 0x40000000)
                      ? *(const uint32_t *)(uintptr_t)(bt + 0x30) : 0;
+        TEX_LOCK();                        /* consistent read vs a concurrent uploader */
         bound = slot_find(key);
+        TEX_UNLOCK();                      /* `bound` is this thread's own bound texture */
     }
 
     if (!bound || !tex_on) {               /* no bound texture, or texturing off */
