@@ -54,6 +54,7 @@ typedef struct {
     uint32_t mip_off[12];
     int      nlevels;
     uint32_t clamp_s, clamp_t;
+    uint32_t bilinear_mag, bilinear_min;   /* GL_LINEAR mag / linear-within-level min filter */
 } mach64_tex_slot;
 static mach64_tex_slot g_slots[MACH64_TEX_SLOTS];
 static uint32_t        g_heap_next = MACH64_TEX_HEAP_BASE;
@@ -313,8 +314,17 @@ static int mach64_upload(gld_context *ctx, void *texobj)
      * raw GL enums (recovered via tools/mach64_wrapstate).  Any non-REPEAT (0x2901)
      * mode -- GL_CLAMP/CLAMP_TO_EDGE/CLAMP_TO_BORDER -- maps to hardware clamp. */
     {   uint32_t wrap = *(const uint32_t *)(s + 0x10);
+        uint16_t minf = *(const uint16_t *)(s + 0x16);   /* GL_TEXTURE_MIN_FILTER (u16) */
+        uint16_t magf = *(const uint16_t *)(s + 0x18);   /* GL_TEXTURE_MAG_FILTER (u16) */
         slot->clamp_s = ((wrap >> 16) != 0x2901u);
         slot->clamp_t = ((wrap & 0xffffu) != 0x2901u);
+        /* GL filter enums (state-object offsets found via GLD_TEXFILTER_PROBE): 0x2600 NEAREST,
+         * 0x2601 LINEAR, 0x2700..0x2703 the mipmap variants (odd low bit = LINEAR within a level).
+         * mag GL_LINEAR -> hardware bilinear (SCALE_3D_CNTL BILINEAR_TEX_EN bit25, HW-verified).
+         * NOTE: the Rage LT Pro cannot bilinear-filter ALPHA-BLENDED textures (a HW limitation --
+         * grates/fences/smoke stay pixelated); setting the bit is harmless there (HW falls back). */
+        slot->bilinear_mag = (magf == 0x2601u);
+        slot->bilinear_min = ((minf & 1u) != 0u);   /* 0x2601/0x2701/0x2703 -> linear min */
     }
 
     /* Upload each level; index its offset by its maxLog2 (= its TEX_n_OFF reg). */
@@ -727,7 +737,9 @@ int mach64_bind_texture(gld_context *ctx)
     new_scale_3d = 0x1u | (1u << 1) | (1u << 3) | (1u << 4)
                  | (2u << 6) | blend | light_fcn
                  | (bound->nlevels > 1 ? 0u : (1u << 24))   /* MIP_MAP_DISABLE unless mipped */
-                 | (bound->has_alpha ? (1u << 30) : 0u);   /* TEX_MAP_AEN */
+                 | (bound->has_alpha ? (1u << 30) : 0u)     /* TEX_MAP_AEN */
+                 | (bound->bilinear_mag ? 0x02000000u : 0u); /* BILINEAR_TEX_EN: GL_LINEAR mag filter */
+    /* TODO: TEX_BLEND_FCN (min/mip filter, bilinear_min) -- bit position not yet HW-verified. */
 
     /* GL_FOG on textured geometry: fog wins the alpha channel (clears TEX_MAP_AEN,
      * "can't use texture alpha when fogging") and blends the textured fragment
