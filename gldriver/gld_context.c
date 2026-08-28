@@ -176,6 +176,8 @@ int gldDestroyContext(gld_context *ctx)
     if (ctx->backend && MACH64_PRIV(ctx)->apple_surf_cn)
         IOServiceClose((io_connect_t)MACH64_PRIV(ctx)->apple_surf_cn);
 #endif
+    if (ctx->backend && MACH64_PRIV(ctx)->win_buf_off)   /* release windowed buffer if not detached */
+        mach64_winbuf_free(MACH64_PRIV(ctx)->win_buf_off, MACH64_PRIV(ctx)->win_buf_size);
     if (ctx->backend) { free(ctx->backend); ctx->backend = 0; }
     /* Release the userspace VM mappings gldCreateContext made before closing the
      * connection.  IOServiceClose tears down the kernel side but leaves these

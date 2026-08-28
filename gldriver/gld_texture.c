@@ -153,6 +153,53 @@ static uint32_t heap_alloc(uint32_t size)
     { uint32_t off = g_heap_next; g_heap_next += size; return off; }
 }
 
+/* Windowed per-context back+Z VRAM pool.  A PERSISTENT allocator (never reset per-attach, unlike the
+ * texture heap) so multiple windowed double-buffered contexts each get their OWN render target instead
+ * of sharing one screen-sized back buffer.  It lives in the screen-sized back/Z region the fullscreen
+ * layout reserves but windowed mode doesn't use (each windowed ctx takes a window-sized buffer).
+ * Lazily initialised on the first windowed attach; guarded by the texture-heap mutex. */
+static uint32_t g_winpool_base = 0, g_winpool_end = 0, g_winpool_next = 0;
+static mach64_free_blk g_winfree[MACH64_TEX_SLOTS];
+static int             g_winnfree = 0;
+
+void mach64_winpool_init(uint32_t base, uint32_t end)
+{
+    TEX_LOCK();
+    if (!g_winpool_base && end > base) {   /* first windowed attach wins; later attaches reuse it */
+        g_winpool_base = base; g_winpool_end = end; g_winpool_next = base;
+        gld_log("mach64_winpool: [0x%x, 0x%x) (%u KB)\n", base, end, (end - base) >> 10);
+    }
+    TEX_UNLOCK();
+}
+
+uint32_t mach64_winbuf_alloc(uint32_t bytes)   /* 0 = pool exhausted */
+{
+    uint32_t sz = (bytes + 31u) & ~31u, off = 0;
+    int i, best = -1;
+    TEX_LOCK();
+    for (i = 0; i < g_winnfree; i++)
+        if (g_winfree[i].size >= sz && (best < 0 || g_winfree[i].size < g_winfree[best].size)) best = i;
+    if (best >= 0) {
+        off = g_winfree[best].off;
+        if (g_winfree[best].size == sz) g_winfree[best] = g_winfree[--g_winnfree];
+        else { g_winfree[best].off += sz; g_winfree[best].size -= sz; }
+    } else if (g_winpool_next && g_winpool_next + sz <= g_winpool_end) {
+        off = g_winpool_next; g_winpool_next += sz;
+    }
+    TEX_UNLOCK();
+    return off;
+}
+
+void mach64_winbuf_free(uint32_t off, uint32_t bytes)
+{
+    uint32_t sz = (bytes + 31u) & ~31u;
+    if (!off || !sz) return;
+    TEX_LOCK();
+    if (off + sz == g_winpool_next) g_winpool_next = off;        /* top of pool: drop the bump pointer */
+    else if (g_winnfree < MACH64_TEX_SLOTS) { g_winfree[g_winnfree].off = off; g_winfree[g_winnfree].size = sz; g_winnfree++; }
+    TEX_UNLOCK();
+}
+
 /* Find or allocate a 32-byte-aligned VRAM region of `nbytes` for `key` (a base
  * w*h texture, or a whole mip chain -- caller sizes it).  w/h are the BASE dims
  * stored for the texture registers.  A re-upload reuses its region if the new one

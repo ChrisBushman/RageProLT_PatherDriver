@@ -56,8 +56,14 @@ int gldAttachDrawable(gld_context *ctx, int type, void *drawable, uint32_t flags
      * so the CRTC never leaves the desktop front buffer -- the desktop is intact when the
      * app exits.  (Previously the flip-present moved the CRTC to our back buffer, which had
      * to be flipped back here.) */
-    if (type == 0 || !drawable)
+    if (type == 0 || !drawable) {
+        if (ctx->backend && MACH64_PRIV(ctx)->win_buf_off) {   /* release the per-context windowed buffer */
+            mach64_winbuf_free(MACH64_PRIV(ctx)->win_buf_off, MACH64_PRIV(ctx)->win_buf_size);
+            MACH64_PRIV(ctx)->win_buf_off = 0; MACH64_PRIV(ctx)->win_buf_size = 0;
+            MACH64_PRIV(ctx)->win_mode = 0;
+        }
         return 0;
+    }
 
     {
         const uint32_t *d = (const uint32_t *)drawable;
@@ -205,6 +211,29 @@ int gldAttachDrawable(gld_context *ctx, int type, void *drawable, uint32_t flags
                  * drawable -- full-width at the origin -- keeps the CRTC page-flip path). */
                 if (got && ww > 0 && wh > 0 && ww <= (int)fb_pitch_px && wh <= 2048 &&
                     (ww < (int)fb_pitch_px || wx > 0 || wy > 0)) {
+                    /* PER-CONTEXT back+Z: allocate a window-sized (screen-PITCHED, wh rows) back+Z from
+                     * the windowed VRAM pool so multiple windowed contexts render independently instead
+                     * of sharing the one screen-sized back the dbuf block set.  The pool occupies that
+                     * reserved-but-unused screen back/Z region.  Falls back to the shared back if the
+                     * pool is exhausted.  Screen-pitched -> the present blit stays single-pitch. */
+                    uint32_t zsize = fb_pitch_px * 2u * height;
+                    mach64_winpool_init(base_bytes + surf, z_off + zsize);
+                    if (pv->win_buf_off) {                     /* re-attach: release the old allocation */
+                        mach64_winbuf_free(pv->win_buf_off, pv->win_buf_size);
+                        pv->win_buf_off = 0; pv->win_buf_size = 0;
+                    }
+                    {   uint32_t bsz = fb_pitch_px * 4u * (uint32_t)wh;   /* back: wh rows @ screen pitch */
+                        uint32_t zsz = fb_pitch_px * 2u * (uint32_t)wh;   /* Z: 16-bit */
+                        uint32_t buf = mach64_winbuf_alloc(bsz + zsz);
+                        if (buf) {
+                            pv->win_buf_off = buf; pv->win_buf_size = bsz + zsz;
+                            pv->back_off = pv->render_off = buf;
+                            mach64_set_render_target(ctx, buf, fb_pitch_px);
+                            mach64_set_zbuffer(ctx, buf + bsz, fb_pitch_px);
+                            gld_log("  [win] per-ctx back=0x%x z=0x%x (%u KB)\n",
+                                    buf, buf + bsz, (bsz + zsz) >> 10);
+                        }  /* else keep the shared screen back from the dbuf block */
+                    }
                     pv->win_mode = 1; pv->win_x = (uint32_t)wx; pv->win_y = (uint32_t)wy;
                     pv->fb_w = (uint32_t)ww; pv->fb_h = (uint32_t)wh;
                     *(uint32_t *)(c + 0x1f0) = (uint32_t)ww;

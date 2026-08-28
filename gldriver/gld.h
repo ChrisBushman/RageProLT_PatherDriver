@@ -119,6 +119,9 @@ typedef struct {
      * stays visible and the WindowServer keeps compositing -- the test for engine coexistence. */
     uint32_t   win_mode;           /* 1 => windowed blit present into the live desktop */
     uint32_t   win_x, win_y;       /* window content origin in screen pixels (top-left) */
+    uint32_t   win_buf_off;        /* per-context windowed back+Z buffer (0 = none/shared); freed on
+                                    * detach.  Lets multiple windowed contexts render independently. */
+    uint32_t   win_buf_size;       /* size of that pool allocation, for the free */
     /* ---- Path B port (GLD_APPLE_PROBE): live connections to Apple's ATIRagePro kext ---- */
     unsigned int apple_cn;         /* io_connect_t to Apple's type-1 GL user client (0=none) */
     unsigned int apple_surf_cn;    /* io_connect_t to Apple's type-2 IOAccelSurface client (0=none) */
@@ -157,6 +160,11 @@ void mach64_blit_surface(gld_context *ctx, uint32_t src_off, uint32_t dst_off,
                          uint32_t sx, uint32_t sy, uint32_t dx, uint32_t dy,
                          uint32_t w, uint32_t h, uint32_t pitch_px);
 void mach64_set_texheap(uint32_t base, uint32_t end);
+/* Windowed per-context back+Z VRAM pool (gld_texture.c): lazily init the region once, then
+ * alloc/free window-sized buffers so multiple windowed contexts render independently. */
+void     mach64_winpool_init(uint32_t base, uint32_t end);
+uint32_t mach64_winbuf_alloc(uint32_t bytes);   /* 0 = pool exhausted */
+void     mach64_winbuf_free(uint32_t off, uint32_t bytes);
 void mach64_present(gld_context *ctx);   /* double-buffer back->front swap */
 void mach64_flip(gld_context *ctx, uint32_t off);   /* page-flip CRTC scanout to `off` */
 void mach64_wait_flip(gld_context *ctx);            /* block until the pending flip retired */

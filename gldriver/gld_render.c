@@ -997,6 +997,9 @@ void mach64_dispatch_render_ctl(gld_context *ctx, uint32_t a4, uint32_t a5,
                  * buffer, then BLIT it into the LIVE front at (win_x,win_y).  No page-flip --
                  * the desktop stays visible and the WindowServer keeps compositing while our
                  * bus-master blit + geometry DMA run.  We always render into `back`, never swap. */
+                mach64_frame_start(ctx);   /* apply a still-deferred clear BEFORE the blit, so a
+                                            * clear-only or first frame shows the clear colour rather
+                                            * than the uninitialised (per-context) back buffer. */
                 mach64_flush_batch(ctx);
                 mach64_blit_surface(ctx, p->back_off, p->front_off,
                                     0, 0, p->win_x, p->win_y, p->fb_w, p->fb_h, p->fb_pitch);
