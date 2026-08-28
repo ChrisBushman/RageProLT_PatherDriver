@@ -99,6 +99,24 @@ geometry) shows an UNCLEARED (black) background -- our clear is lazy, fired on t
 (frame_new -> mach64_clear_color in mach64_draw_triangle).  A geometry-less frame never triggers it.
 Fix later: honour glClear even without a following triangle.
 
+## glBitmap — IMPLEMENTED + HW-VERIFIED (2026-08-27)
+glBitmap -> GLEngine+0x2a04 (dispatch ctx+0x1c); computes the raster position then calls gc+0x78bc =
+our dispatch table[0x14] = mach64_ctl14 with (raster_dst{x,y,z}, width, height, _, _, bitmap) -- args
+r7/r8 unused.  ctl14 was a stub.  IMPLEMENTED (gld_render.c mach64_ctl14): the bitmap is a 1-bpp MASK
+(MSB-first within a byte, rows bottom-to-top); SET bits drawn in the current raster colour, CLEAR bits
+skipped, Y-flipped.  RASTER COLOUR = GL_CURRENT_RASTER_COLOR at GLEngine gc+0x2e4 (RGBA floats; raster
+block is pos x@0x2d0..w@0x2e0 then colour@0x2e4 -- verified: the first HW run at 0x2e0 read the color
+shifted one float, cyan instead of yellow).  HW-VERIFIED (tools/mach64_bitmap): a 16x16 mask with the
+bottom-left 8x8 set, raster colour yellow -> the set region reads 255,255,0 at the right place, clear
+region is background, correct X/Y orientation.  (Alpha at 0x2f0 read 0 -- harmless: X8 framebuffer.)
+FIRST-CUT limits (TODO): UNPACK alignment 1 (add gc UNPACK alignment); bitmap origin assumed folded
+into raster_dst; the xmove/ymove raster advance is GLEngine's, not ours.
+
+## *** PIXEL-OPS ARC COMPLETE (2026-08-27) *** all four via the renderer dispatch-hook technique:
+glReadPixels=table[0x08]/ctl08, glCopyPixels=table[0x10]/ctl10, glDrawPixels=table[0x0c]/ctl0c,
+glBitmap=table[0x14]/ctl14.  The per-context libGL dispatch (ctx+0x3b8/0xd4/0x114/0x1c) reaches a
+GLEngine impl that tail-calls our per-renderer hook slot; we fill the slot.
+
 ## Next step (needs one HW run)
 Run tools/pxdisp.sh -> mach64_pxdisp reads [ctx+0x114]/[ctx+0xd4]/[ctx+0x1c] live + dladdr -> the
 GLEngine impl offsets OUR renderer actually uses, and dumps the gc+0x78xx table.  Then disassemble

@@ -747,7 +747,66 @@ int mach64_ctl10(gld_context *c, uint32_t a, uint32_t b, uint32_t d,
                         (uint32_t)w, (uint32_t)h, p->target_pitch);
     return 0;
 }
-int mach64_ctl14(gld_context *c,uint32_t a,uint32_t b,uint32_t d,uint32_t e,uint32_t f,uint32_t g){ctl_dump("table[0x14]",c,a,b,d,e,f,g);return 0;}
+/* glBitmap.  GLEngine's glBitmap impl (GLEngine+0x2a04) computes the raster position then calls this
+ * hook (dispatch table[0x14] = gc+0x78bc) with (raster_dst{x,y,z} float*, width, height, _, _, bitmap).
+ * The bitmap is a 1-bpp MASK: MSB-first within each byte, rows bottom-to-top, each row padded to the
+ * GL_UNPACK_ALIGNMENT.  SET bits are drawn in the current raster colour (GL_CURRENT_RASTER_COLOR --
+ * read from the GLEngine gc, as readback reads GL_PACK_* state); CLEAR bits are skipped.  First cut:
+ * UNPACK alignment 1 (TODO: read gc UNPACK alignment), bitmap origin folded into raster_dst by
+ * GLEngine. */
+int mach64_ctl14(gld_context *c, uint32_t a, uint32_t b, uint32_t d,
+                 uint32_t e, uint32_t f, uint32_t g)
+{
+    mach64_priv *p = c ? MACH64_PRIV(c) : 0;
+    const float *rp = (const float *)(uintptr_t)a;
+    const unsigned char *bm = (const unsigned char *)(uintptr_t)g;
+    int w = (int)b, h = (int)d;
+    int dx, dy, W, H, row, col, rowbytes;
+    unsigned char R, G, B, A;
+    volatile unsigned char *vram;
+    uint32_t pitch_b;
+    (void)e; (void)f;
+
+    if (!p || !p->target_off || !p->target_pitch || !rp || !bm || w <= 0 || h <= 0) {
+        ctl_dump("table[0x14]", c, a, b, d, e, f, g); return 0;
+    }
+    vram = (volatile unsigned char *)c->regs;
+    if (!vram) return 0;
+    W = (int)*(uint32_t *)((unsigned char *)c + 0x1f0);
+    H = (int)*(uint32_t *)((unsigned char *)c + 0x1f4);
+    if (W <= 0 || H <= 0) return 0;
+    /* current raster colour (RGBA floats) from the GLEngine gc.  Raster block: pos x@0x2d0..w@0x2e0,
+     * then GL_CURRENT_RASTER_COLOR at 0x2e4 (verified: glColor3f(1,1,0) reads back R@0x2e4=1 G@0x2e8=1
+     * B@0x2ec=0).  Fallback to white if the gc pointer is unset. */
+    if (g_gld_gc) {
+        const float *rc = (const float *)(g_gld_gc + 0x2e4);
+        int ri = (int)(rc[0]*255.0f+0.5f), gi = (int)(rc[1]*255.0f+0.5f);
+        int bi = (int)(rc[2]*255.0f+0.5f), ai = (int)(rc[3]*255.0f+0.5f);
+        R = (unsigned char)(ri<0?0:ri>255?255:ri); G = (unsigned char)(gi<0?0:gi>255?255:gi);
+        B = (unsigned char)(bi<0?0:bi>255?255:bi); A = (unsigned char)(ai<0?0:ai>255?255:ai);
+    } else { R = G = B = A = 0xFFu; }
+    dx = (int)(rp[0] + 0.5f);
+    dy = (int)(rp[1] + 0.5f);
+    pitch_b = p->target_pitch * 4u;
+    rowbytes = (w + 7) / 8;                /* UNPACK alignment 1 (first cut) */
+    gld_log("glBitmap: %dx%d -> (%d,%d) colour=%d,%d,%d,%d [W=%d H=%d]\n",
+            w, h, dx, dy, R, G, B, A, W, H);
+    mach64_flush_batch(c);
+    for (row = 0; row < h; row++) {
+        int fbrow = H - 1 - (dy + row);   /* bitmap row 0 = bottom = raster y -> VRAM row */
+        const unsigned char *brow = bm + row * rowbytes;
+        if (fbrow < 0 || fbrow >= H) continue;
+        for (col = 0; col < w; col++) {
+            int gx = dx + col;
+            volatile unsigned char *o;
+            if (gx < 0 || gx >= W) continue;
+            if (!(brow[col >> 3] & (0x80u >> (col & 7)))) continue;   /* clear bit -> skip */
+            o = vram + p->target_off + (uint32_t)fbrow * pitch_b + (uint32_t)gx * 4u;
+            o[0] = B; o[1] = G; o[2] = R; o[3] = A;   /* native LE ARGB8888 */
+        }
+    }
+    return 0;
+}
 
 /* table[0x04] = THE flush entry.  GLEngine's render flow calls this to dispatch
  * accumulated geometry (ref gldInitDispatch installs it -> sub_cf68 -> sub_c3c0,
