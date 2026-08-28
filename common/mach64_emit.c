@@ -40,7 +40,13 @@ void m64_emit_state(m64_cmdbuf *cb, const m64_state *st)
          * the mach64 has one offset register per mip level and the LARGEST level
          * uses the register matching its log2 size.  reg = TEX_0_OFF + maxLog2*4,
          * and maxLog2 lives in TEX_SIZE_PITCH bits [7:4] -> (sp & 0xf0) >> 2 is
-         * the byte offset from TEX_0_OFF (ref drm_mach64_state.c mach64_emit_state). */
+         * the byte offset from TEX_0_OFF (ref drm_mach64_state.c mach64_emit_state).
+         *
+         * NOTE (2026-08-27): mipmapped rendering is BROKEN (tools/mach64_texmip renders black).  Two
+         * emit variants tried: (a) per-level TEX_r_OFF writes [below] -> black but graceful; (b) the
+         * DRI single-base-register write -> black THEN HARD HANG (worse).  So (a) is kept as the lesser
+         * evil until the mach64 mip VRAM layout / addressing is properly RE'd (imaged RRG page or OS 9
+         * ATI 3D Accelerator disasm).  Non-mipmapped textures are unaffected (nlevels==1 path). */
         if (st->tex_mip) {
             /* One offset register per mip level: TEX_r_OFF for r in [0,maxlog2]. */
             int r;

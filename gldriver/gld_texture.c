@@ -24,6 +24,7 @@
  * driver (mesa_mach64_state.c); TEX_SIZE_PITCH and TEX_0_OFF encodings and the
  * S/T convention are best-effort and flagged for hardware validation.
  */
+#include <stdlib.h>   /* getenv (GLD_TEXBLEND_PROBE gate) */
 #include "gld.h"
 #include "../common/mach64_regs.h"
 
@@ -761,10 +762,38 @@ int mach64_bind_texture(gld_context *ctx)
 
     new_scale_3d = 0x1u | (1u << 1) | (1u << 3) | (1u << 4)
                  | (2u << 6) | blend | light_fcn
-                 | (bound->nlevels > 1 ? 0u : (1u << 24))   /* MIP_MAP_DISABLE unless mipped */
+                 | (1u << 24)                               /* MIP_MAP_DISABLE: ALWAYS -- see note below */
                  | (bound->has_alpha ? (1u << 30) : 0u)     /* TEX_MAP_AEN */
                  | (bound->bilinear_mag ? 0x02000000u : 0u); /* BILINEAR_TEX_EN: GL_LINEAR mag filter */
-    /* TODO: TEX_BLEND_FCN (min/mip filter, bilinear_min) -- bit position not yet HW-verified. */
+    /* NO HARDWARE MIPMAPPING (2026-08-27): the mach64/LT Pro has no usable HW mip chain.  The DRI
+     * reference (mach64_tex.c) says so outright -- "for mach64 we're only concerned with the base level
+     * since that's the only texture we upload" -- and never enables multi-level LOD.  Our earlier attempt
+     * (upload all levels, clear MIP_MAP_DISABLE, per-level TEX_r_OFF) rendered mipmapped textures BLACK,
+     * and pointing the single base register at our multi-level layout HARD-HUNG the machine (tools/
+     * mach64_texmip).  So we do exactly what the reference does: always MIP_MAP_DISABLE and use only the
+     * base level -- the identical, proven HW path that non-mipmapped textures already use.  Minified
+     * textures therefore alias (no LOD) rather than mip, which is the hardware's real capability. */
+    /* TEX_BLEND_FCN [27:26] (BILINEAR_TEX_EN above is the mag filter; this is the min/mip filter):
+     * NEAREST=0, LINEAR=0x04000000, TRILINEAR=0x08000000 (multitex, N/A on the single-TMU LT Pro).
+     * Bit position: DRI reference (mach64_texstate.c BilinearMin path) + mesa default 0x0b4100cb (bit27
+     * set => field at [27:26]).
+     *
+     * HW-VERIFIED (tools/mach64_texmin) that this is a MIP-LEVEL BLEND control, NOT an intra-level min
+     * filter: setting LINEAR makes the HW fetch+blend a second (smaller) mip level.  On a SINGLE-LEVEL
+     * texture at a minifying LOD that level does not exist, so the fetch hits a bogus address -> the
+     * textured output goes BLACK (small texture) or the bus HANGS (large texture -- 128x128 wedged the
+     * machine).  At a magnifying/near LOD it is simply inert.
+     *
+     * The correct home is a real mip chain (nlevels>1), where the levels exist -- BUT mipmapped
+     * rendering is itself currently broken (renders black even with this bit OFF; see tools/mach64_texmip
+     * and the TEX_n_OFF emit in common/mach64_emit.c, which writes one register per level whereas the DRI
+     * reference writes only the base TEX_[maxLog2]_OFF).  So until mipmapping is fixed, keep this fully
+     * probe-gated (GLD_TEXBLEND_PROBE, default OFF) -- nothing unvalidated ships. */
+    if (bound->bilinear_min) {
+        static int probe = -1;
+        if (probe < 0) probe = getenv("GLD_TEXBLEND_PROBE") ? 1 : 0;
+        if (probe) new_scale_3d |= 0x04000000u;            /* TEX_BLEND_FCN_LINEAR */
+    }
 
     /* GL_FOG on textured geometry: fog wins the alpha channel (clears TEX_MAP_AEN,
      * "can't use texture alpha when fogging") and blends the textured fragment
@@ -822,15 +851,11 @@ int mach64_bind_texture(gld_context *ctx)
      * MODULATE gives the old 0x0141009b. */
     st->tex_scale_3d   = new_scale_3d;
 
-    /* Mipmapping: hand emit the per-level offsets so it programs one TEX_r_OFF per
-     * level and (via the cleared MIP_MAP_DISABLE above) lets the HW select the LOD.
-     * A non-mipped texture keeps the single-offset path (tex_mip = 0). */
-    st->tex_mip     = (bound->nlevels > 1);
+    /* Always the single base-level offset path (tex_mip = 0): the mach64 has no usable HW mip chain
+     * (see the MIP_MAP_DISABLE note above), so even a texture that uploaded multiple levels is drawn
+     * from its base level only -- the same proven path as a non-mipmapped texture. */
+    st->tex_mip     = 0;
     st->tex_maxlog2 = (int)(wl > hl ? wl : hl);
-    if (st->tex_mip) {
-        int r;
-        for (r = 0; r < 12; r++) st->tex_mip_off[r] = bound->mip_off[r];
-    }
 
     st->textured = 1;
     if (changed)

@@ -23,8 +23,25 @@ gli, emits SCALE_3D_CNTL/TEX_CNTL/ALPHA_TST_CNTL/DP_*) + gld_state.c.
    HW-verified (tools/mach64_texfilter): a magnified GL_LINEAR texture reads back the 4-texel blend
    (128,128,128); GL_NEAREST stays pure.  HW CAVEAT (per user): the LT Pro cannot bilinear-filter
    ALPHA-BLENDED textures (grates/fences/smoke stay pixelated) -- setting the bit is harmless there.
-   FOLLOW-UP: the MIN/mip filter (TEX_BLEND_FCN, bilinear_min already parsed) -- bit position not yet
-   HW-verified, so minified/mip textures still use nearest between levels.
+
+   1b. **MIN/mip filter (TEX_BLEND_FCN) -- NOT HARDWARE-DOABLE / HW LIMIT (2026-08-27).**  Chased at
+   length (tools/mach64_texmin, mach64_texmip).  Findings, HW-verified on the LT Pro:
+   - TEX_BLEND_FCN [27:26] (NEAREST=0, LINEAR=0x04000000, TRILINEAR=0x08000000) is a MIP-LEVEL BLEND
+     control, NOT an intra-level minification filter (BILINEAR_TEX_EN bit25 is the mag filter; there is
+     no separate intra-level *min* bilinear).  Proven by the failure mode: with LINEAR set on a
+     SINGLE-level texture, at a minifying LOD the HW fetches a non-existent second level -> the textured
+     output goes BLACK (small texture) or the bus HARD-HANGS (128x128 wedged the machine twice).
+   - It only means anything with a real mip chain -- but the mach64 has NO usable HW mip chain.  The DRI
+     reference (mach64_tex.c GL_TEXTURE_BASE_LEVEL) states it outright: "for mach64 we're only concerned
+     with the base level since that's the only texture we upload."  It never uploads sub-levels and never
+     enables multi-level LOD.  Our attempt to (upload all levels + clear MIP_MAP_DISABLE + per-level
+     TEX_r_OFF) rendered mipmapped textures BLACK; pointing the single base register at our multi-level
+     layout HARD-HUNG the machine.  So HW mipmapping is not achievable here.
+   - RESOLUTION: driver now matches the reference -- ALWAYS MIP_MAP_DISABLE, base level only (tex_mip=0,
+     single base offset), the identical proven path non-mipmapped textures use.  Mipmapped textures thus
+     render from their base level (alias when minified) instead of black/hang.  TEX_BLEND_FCN stays
+     probe-gated (GLD_TEXBLEND_PROBE) as a dead experiment; it is not shippable without a mip chain.
+   - Same category as env BLEND/ADD/COMBINE (gap #3): the reference falls back because the silicon can't.
 2. **Texture internal formats -- DONE (2026-08-27).**  GLEngine hands texels in the app's BASE format,
    tightly packed (fmt @ level rec+0x0c; confirmed via GLD_TEXFMT_PROBE byte dump -- NOT pre-expanded
    to RGBA).  Only 0x1907(RGB)/0x1908(RGBA) were handled; the rest fell into the RGB path and read
