@@ -93,12 +93,14 @@ int gldChoosePixelFormat(void **pf_out, const int *attribs)
              * single-buffer (caps 0x800); this alone is the CGL scorer's DB gate
              * (node[0x08] must stay at its normal value; broadening it corrupts
              * fmt_caps and routes the context off the hardware path).
-             * GATED OFF by default: advertising DB makes GLEngine route a DB
-             * context's geometry through dispatch slot 0x60 (render-control), which
-             * is still an unimplemented stub -> a DB context renders BLACK.  Until
-             * the 0x60 batched-render path is reverse-engineered, do NOT advertise
-             * DB in shipping builds (a clean aglChoosePixelFormat rejection is
-             * better than a black screen).  Build -DGLD_DBUF to continue that work. */
+             * Double-buffering IS implemented and HW-validated (dbanim, atlantis):
+             * the old "DB routes to slot 0x60 -> black" wall was cracked -- the real
+             * gate is a GLI FLAG, not the dispatch table.  gldAttachDrawable's type-0x36
+             * back-buffer attach sets *(a7)|=2 + ctx+0x1e4=1 + caps-0x20-clear, and
+             * GLEngine then dispatches the DB context's geometry through the normal
+             * primitive slots; present is a race-free back->front 2D blit at frame
+             * boundary (mach64_dispatch_render_ctl).  See docs/re-notes/double-buffer.md.
+             * Kept behind -DGLD_DBUF as the enable switch (all test runners define it). */
             node[i][3] |= 0x8u;         /* node[0x0c] bit 3 = double-buffered */
 #endif
         }
