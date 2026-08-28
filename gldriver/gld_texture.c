@@ -733,9 +733,14 @@ int mach64_bind_texture(gld_context *ctx)
      * ALPHA_DECAL then blends Ctex over the fragment colour by At. */
     env = mach64_gli_u32(ctx, GLI_TEX_ENV_MODE) >> 16;
     switch (env) {
-        case GL_ENV_REPLACE: light_fcn = 0u << 22; break;
-        case GL_ENV_DECAL:   light_fcn = 2u << 22; break;
-        default:             light_fcn = 1u << 22; break;   /* MODULATE + fallback */
+        case GL_ENV_REPLACE:  light_fcn = 0u << 22; break;   /* REPLACE     */
+        case GL_ENV_MODULATE: light_fcn = 1u << 22; break;   /* MODULATE    */
+        case GL_ENV_DECAL:    light_fcn = 2u << 22; break;   /* ALPHA_DECAL (== REPLACE for RGB) */
+        /* The mach64 TEX_LIGHT_FCN field is only 2 bits -- 3 real modes.  GL_BLEND (0x0be2),
+         * GL_ADD (0x0104), GL_COMBINE (0x8570) are NOT hardware-doable (the DRI reference
+         * software-rasterises them via Mesa, which we can't through Apple's GLEngine).  Best
+         * hardware approximation is MODULATE.  (See docs/re-notes/texture-blend-audit.md.) */
+        default:              light_fcn = 1u << 22; break;
     }
 
     /* Framebuffer alpha blend (SCALE_3D_CNTL ALPHA_BLEND_SRC/DST): follow the

@@ -33,8 +33,15 @@ gli, emits SCALE_3D_CNTL/TEX_CNTL/ALPHA_TST_CNTL/DP_*) + gld_state.c.
    has_alpha now set for RGBA/ALPHA/LA/INTENSITY.  HW-verified (tools/mach64_texfmt): a 2x2
    GL_LUMINANCE texture (64/128/192/255) reads back the exact greys.  (Test gotcha: a 2x2 1-byte
    texture needs GL_UNPACK_ALIGNMENT=1, else GLEngine reads past the row.)
-3. **Texture env -- MODULATE/REPLACE/DECAL only (MEDIUM-LOW).**  No GL_BLEND (0x2102), GL_ADD, or
-   GL_COMBINE (0x8570).  GL_BLEND/GL_ADD appear in some apps.
+3. **Texture env -- DONE / HARDWARE-LIMITED (2026-08-27).**  The mach64 TEX_LIGHT_FCN field is 2 bits
+   = 3 modes: REPLACE / MODULATE / ALPHA_DECAL.  Those work (and interact correctly with the new
+   L/A/I formats: MODULATE/REPLACE compliant).  GL_BLEND / GL_ADD / GL_COMBINE are NOT hardware-doable
+   -- the DRI reference (mach64_texstate.c) explicitly `FALLBACK`s them to Mesa's SOFTWARE rasteriser
+   ("GL_BLEND not supported by RagePRO, use software"), which we can't do through Apple's GLEngine.
+   Best hardware approximation = MODULATE (what the driver falls back to).  So there is no implementable
+   gap here.  Minor known edge case (not worth fixing): DECAL on L/A/I/LA is GL-undefined; the reference
+   disables texturing, we leave ALPHA_DECAL (which == REPLACE for the no-alpha formats -- a reasonable
+   undefined result).
 4. **Blend extras (LOW/niche).**  No GL_SRC_ALPHA_SATURATE, glBlendEquation (SUBTRACT/etc. -- ADD
    only), constant-colour factors (needs blend colour).  Unsupported factor -> opaque fallback.
 5. **Multitexture -- N/A.**  The LT Pro has a single TMU; ARB_multitexture is not HW-supported.
