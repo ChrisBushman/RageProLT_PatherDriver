@@ -191,9 +191,10 @@ int gldAttachDrawable(gld_context *ctx, int type, void *drawable, uint32_t flags
              * engine-coexistence test: our bus-master blit + geometry DMA run concurrently with
              * the live WS.  (Geometry is bounded by the w x h viewport the app sets.) */
             {   int wx = 0, wy = 0, ww = 0, wh = 0, got = 0;
-                /* Resolve the windowed content bounds: CGS surface-ID -> window bounds FIRST (the
-                 * real, automatic path); env MACH64_WIN_RECT is the manual fallback. */
-                if (pv->dbuf && mach64_cgs_resolve_bounds(d[0], &wx, &wy, &ww, &wh))
+                /* Resolve the windowed content bounds FIRST (the real, automatic path): the descriptor's
+                 * d[1]=CGS window id, d[2]=CGS surface id (mach64_multiwin) -> exact per-window lookup,
+                 * multi-window correct.  env MACH64_WIN_RECT is the manual fallback. */
+                if (pv->dbuf && mach64_cgs_resolve_bounds(d[1], d[2], &wx, &wy, &ww, &wh))
                     got = 1;
                 if (!got) {
                     const char *wr = getenv("MACH64_WIN_RECT");

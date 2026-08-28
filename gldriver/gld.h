@@ -202,9 +202,9 @@ extern int mach64_flat_on;   /* glShadeModel(GL_FLAT): replicate the provoking v
 extern unsigned long g_perf_dispatch_us;   /* gld_prims.c accumulates emit_tri time here */
 unsigned long perf_now_us(void);
 #endif
-/* Resolve a windowed drawable's surface-ID -> on-screen content bounds via CGS (gld_cgs.c).
- * Returns 1 + fills x/y/w/h (screen px) on success, 0 if unresolved (caller falls back). */
-int mach64_cgs_resolve_bounds(uint32_t surface_id, int *x, int *y, int *w, int *h);
+/* Resolve a windowed drawable's CGS window id (descriptor d[1]) + surface id (d[2]) -> on-screen
+ * content bounds via CGS (gld_cgs.c).  Returns 1 + fills x/y/w/h (screen px), 0 if unresolved. */
+int mach64_cgs_resolve_bounds(uint32_t window_id, uint32_t surface_id, int *x, int *y, int *w, int *h);
 
 #ifdef GLD_APPLE_PROBE
 unsigned int mach64_apple_glctx_open(void);   /* open Apple's type-1 GL client, return connection */
