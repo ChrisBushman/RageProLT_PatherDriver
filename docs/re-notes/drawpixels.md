@@ -112,6 +112,19 @@ region is background, correct X/Y orientation.  (Alpha at 0x2f0 read 0 -- harmle
 FIRST-CUT limits (TODO): UNPACK alignment 1 (add gc UNPACK alignment); bitmap origin assumed folded
 into raster_dst; the xmove/ymove raster advance is GLEngine's, not ours.
 
+## POLISH DONE (2026-08-27)
+- **UNPACK state**: offsets found live (tools/mach64_unpackprobe) -- they mirror PACK at +0x1c:
+  ALIGNMENT@0x63f4 ROW_LENGTH@0x63e0 SKIP_PIXELS@0x63ec SKIP_ROWS@0x63e8 SWAP_BYTES@0x63f8 LSB_FIRST@
+  0x63f9.  Added mach64_unpack_state(); glDrawPixels honours ALIGNMENT/ROW_LENGTH/SKIP_ROWS/SKIP_PIXELS/
+  SWAP_BYTES, glBitmap honours ALIGNMENT/ROW_LENGTH/SKIP/LSB_FIRST.  HW-verified: a RED 8x4 sub-image
+  drawn from a 16x8 buffer via ROW_LENGTH=16+SKIP_PIXELS=4+SKIP_ROWS=2 reads back red (not the
+  surrounding green); bitmap alignment read from gc.
+- **Lazy-clear fix**: the deferred glClear (frame_new) was only fired by the first triangle, so a
+  geometry-less glClear+glDrawPixels/glBitmap frame never cleared.  Extracted mach64_frame_start();
+  the pixel ops now call it too.  HW-verified: drawpixels bg reads the clear colour (was black).
+- **Pixel zoom / 5_6_5: DEFERRED** (noted in code).  glDrawPixels impl reads zoom (gc+0x63bc/0x63c0)
+  but non-unit zoom is rare (would need pixel replication in ctl0c); 5_6_5 is niche (readback lacks it).
+
 ## *** PIXEL-OPS ARC COMPLETE (2026-08-27) *** all four via the renderer dispatch-hook technique:
 glReadPixels=table[0x08]/ctl08, glCopyPixels=table[0x10]/ctl10, glDrawPixels=table[0x0c]/ctl0c,
 glBitmap=table[0x14]/ctl14.  The per-context libGL dispatch (ctx+0x3b8/0xd4/0x114/0x1c) reaches a

@@ -85,7 +85,27 @@ int main(void)
         rd(515, 315, "BGRA/REV grn"); /* expect   0 255   0 */
         rd(615, 315, "RGBA/8888 blu");/* expect   0   0 255 */
     }
-    rd(500, 500, "bg");            /* untouched */
+    /* non-default UNPACK: a 16x8 buffer, GREEN with a RED 8x4 sub-region at (col4,row2); draw just
+     * that sub-region via ROW_LENGTH=16 + SKIP_PIXELS=4 + SKIP_ROWS=2 -> the drawn block is RED. */
+    {   static GLubyte big[16*8*4];
+        int xx, yy, ii, insub;
+        for (yy = 0; yy < 8; yy++) for (xx = 0; xx < 16; xx++) {
+            ii = (yy*16 + xx) * 4;
+            insub = (xx >= 4 && xx < 12 && yy >= 2 && yy < 6);
+            big[ii] = insub?255:0; big[ii+1] = insub?0:255; big[ii+2] = 0; big[ii+3] = 255;
+        }
+        glPixelStorei(GL_UNPACK_ROW_LENGTH, 16);
+        glPixelStorei(GL_UNPACK_SKIP_PIXELS, 4);
+        glPixelStorei(GL_UNPACK_SKIP_ROWS, 2);
+        glRasterPos2i(700, 300);
+        glDrawPixels(8, 4, GL_RGBA, GL_UNSIGNED_BYTE, big);
+        glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+        glPixelStorei(GL_UNPACK_SKIP_PIXELS, 0);
+        glPixelStorei(GL_UNPACK_SKIP_ROWS, 0);
+        glFinish();
+        rd(703, 301, "unpack-sub");   /* the RED sub-region -> expect 255 0 0 (GREEN 0,255,0 if UNPACK ignored) */
+    }
+    rd(500, 500, "bg (lazyclr)");  /* untouched: expect 64 128 191 now that the lazy clear fires */
     printf("glGetError = 0x%x\n", (unsigned)glGetError());
     printf("expect: left=255,0,0 right=0,255,0 bottom=0,0,255 top=255,0,0 bg=64,128,191\n");
     fflush(stdout);

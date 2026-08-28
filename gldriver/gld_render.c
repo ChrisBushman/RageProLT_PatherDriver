@@ -331,27 +331,31 @@ void mach64_flush_batch(gld_context *ctx)
     p->dirty |= MACH64_DIRTY_STATE;
 }
 
-int mach64_draw_triangle(gld_context *ctx, const m64_vertex *v0,
-                         const m64_vertex *v1, const m64_vertex *v2)
+/* Do the deferred per-frame clear (armed by glClear -> frame_new) if it hasn't fired yet.  GLEngine
+ * dispatches no clear entry point for our HW surface, so the driver owns it: colour to the app's
+ * glClearColor (front buffer, or the back buffer when double-buffered), and Z (GLEngine never touches
+ * our depth buffer).  It is LAZY -- normally the first triangle of the frame triggers it -- so any op
+ * that starts drawing (a triangle OR a pixel op) must call this; otherwise a frame that does only
+ * glClear + glDrawPixels/glBitmap/glCopyPixels never clears.  Assumes glClear once per frame (the
+ * standard pattern); the clears flush any pending batch first, so ordering holds. */
+static void mach64_frame_start(gld_context *ctx)
 {
     mach64_priv *p = MACH64_PRIV(ctx);
-    size_t limit, need;
-
-    /* Frame start (first triangle of a new frame; frame_new armed at attach and at
-     * each swap/finish).  The driver owns the clears GLEngine won't do for us --
-     * it dispatches no clear entry point, so neither colour nor Z is cleared for
-     * our HW surface unless we do it:
-     *  - Colour: to the app's glClearColor (front buffer, or the back buffer when
-     *    double-buffered -- GLEngine's own clear only ever hits the front).
-     *  - Z: GLEngine never touches our depth buffer.
-     * (Assumes the app issues glClear once per frame -- the standard pattern.)
-     * The clears flush any pending batch first, so ordering holds. */
     if (p->frame_new) {
         mach64_clear_color(ctx);
         if (p->z_off && (p->hw.z_cntl & MACH64_Z_EN))
             mach64_clear_zbuffer(ctx);   /* separate submit; also marks state dirty */
         p->frame_new = 0;
     }
+}
+
+int mach64_draw_triangle(gld_context *ctx, const m64_vertex *v0,
+                         const m64_vertex *v1, const m64_vertex *v2)
+{
+    mach64_priv *p = MACH64_PRIV(ctx);
+    size_t limit, need;
+
+    mach64_frame_start(ctx);   /* deferred glClear -> colour/Z clear on the frame's first draw */
 
     if (!p->batch.buf)
         m64_cb_init(&p->batch, p->batchbuf,
@@ -479,6 +483,27 @@ static void mach64_pack_state(int *align, int *rowlen, int *skippix, int *skipro
         *skippix  = *(int *)(g_gld_gc + 0x63d0);
         *skiprows = *(int *)(g_gld_gc + 0x63cc);
         *swap     = g_gld_gc[0x63dc] ? 1 : 0;
+        if (*rowlen   < 0) *rowlen   = 0;
+        if (*skippix  < 0) *skippix  = 0;
+        if (*skiprows < 0) *skiprows = 0;
+    }
+}
+
+/* GL_UNPACK_* state (for glDrawPixels/glBitmap) -- same layout as PACK, +0x1c (verified live via
+ * tools/mach64_unpackprobe): ALIGNMENT@0x63f4 ROW_LENGTH@0x63e0 SKIP_PIXELS@0x63ec SKIP_ROWS@0x63e8
+ * SWAP_BYTES@0x63f8 LSB_FIRST@0x63f9 (bytes).  Defaults 4/0/0/0/0/0. */
+static void mach64_unpack_state(int *align, int *rowlen, int *skippix, int *skiprows,
+                                int *swap, int *lsbfirst)
+{
+    *align = 4; *rowlen = 0; *skippix = 0; *skiprows = 0; *swap = 0; *lsbfirst = 0;
+    if (g_gld_gc) {
+        int a = *(int *)(g_gld_gc + 0x63f4);
+        if (a == 1 || a == 2 || a == 4 || a == 8) *align = a;
+        *rowlen   = *(int *)(g_gld_gc + 0x63e0);
+        *skippix  = *(int *)(g_gld_gc + 0x63ec);
+        *skiprows = *(int *)(g_gld_gc + 0x63e8);
+        *swap     = g_gld_gc[0x63f8] ? 1 : 0;
+        *lsbfirst = g_gld_gc[0x63f9] ? 1 : 0;
         if (*rowlen   < 0) *rowlen   = 0;
         if (*skippix  < 0) *skippix  = 0;
         if (*skiprows < 0) *skiprows = 0;
@@ -622,13 +647,12 @@ int mach64_ctl08(void *rb_ctx, int x, int y, int w, int h,
  *   a = float*{dst_x,dst_y,dst_z}  destination window coords (the raster position)
  *   b = width, d = height          image dims (pixels)
  *   e = format (0x1908 RGBA / 0x80E1 BGRA / 0x1907 RGB / 0x80E0 BGR)
- *   f = type   (0x1401 GL_UNSIGNED_BYTE -- first cut)
+ *   f = type   (UBYTE 0x1401 / INT_8_8_8_8 0x8035 / INT_8_8_8_8_REV 0x8367)
  *   g = pixels (client CPU pointer to the source image)
  * We convert each client pixel to native ARGB8888 (inverse of the glReadPixels/mach64_ctl08 path) and
  * write it to the render target via the whole-VRAM CPU map (c->regs), Y-flipping GL's bottom-left
- * origin (image row 0 = bottom = raster y).  First cut: GL_UNSIGNED_BYTE only, default UNPACK
- * alignment (4), pixel-zoom 1, no UNPACK row-length/skip/swap (TODO: read gc UNPACK state like the
- * PACK state readback uses). */
+ * origin (image row 0 = bottom = raster y).  Honours GL_UNPACK_ALIGNMENT/ROW_LENGTH/SKIP_ROWS/
+ * SKIP_PIXELS/SWAP_BYTES (mach64_unpack_state).  Pixel zoom (!=1) is not applied -- rare; deferred. */
 int mach64_ctl0c(gld_context *c, uint32_t a, uint32_t b, uint32_t d,
                  uint32_t e, uint32_t f, uint32_t g)
 {
@@ -638,12 +662,14 @@ int mach64_ctl0c(gld_context *c, uint32_t a, uint32_t b, uint32_t d,
     int w = (int)b, h = (int)d;
     unsigned format = e, type = f;
     int is_bgr, has_a, pk, bpp_in, elem, dx, dy, W, H, row, col, align, rowstride;
+    int u_rowlen, u_skippix, u_skiprows, u_swap, u_lsb, l;
     volatile unsigned char *vram;
     uint32_t pitch_b;
 
     if (!p || !p->target_off || !p->target_pitch || !rp || !src || w <= 0 || h <= 0) {
         ctl_dump("table[0x0c]", c, a, b, d, e, f, g); return 0;
     }
+    (void)u_lsb;
     switch (format) {
         case 0x1908u: is_bgr = 0; has_a = 1; break;   /* GL_RGBA */
         case 0x80E1u: is_bgr = 1; has_a = 1; break;   /* GL_BGRA */
@@ -667,11 +693,14 @@ int mach64_ctl0c(gld_context *c, uint32_t a, uint32_t b, uint32_t d,
     dx = (int)(rp[0] + 0.5f);
     dy = (int)(rp[1] + 0.5f);
     pitch_b = p->target_pitch * 4u;
-    align = 4;                            /* default GL_UNPACK_ALIGNMENT (TODO: read gc UNPACK state) */
-    rowstride = (elem >= align) ? (w * bpp_in)
-                                : (align * ((w * bpp_in + align - 1) / align));
-    gld_log("glDrawPixels: %dx%d fmt=0x%x type=0x%x -> (%d,%d) [W=%d H=%d]\n",
-            w, h, format, type, dx, dy, W, H);
+    mach64_unpack_state(&align, &u_rowlen, &u_skippix, &u_skiprows, &u_swap, &u_lsb);
+    l = u_rowlen > 0 ? u_rowlen : w;      /* GL_UNPACK_ROW_LENGTH overrides the image width */
+    rowstride = (elem >= align) ? (l * bpp_in)
+                                : (align * ((l * bpp_in + align - 1) / align));
+    src += u_skiprows * rowstride + u_skippix * bpp_in;   /* GL_UNPACK_SKIP_ROWS/PIXELS */
+    gld_log("glDrawPixels: %dx%d fmt=0x%x type=0x%x -> (%d,%d) [W=%d H=%d unpack a=%d rl=%d sp=%d sr=%d]\n",
+            w, h, format, type, dx, dy, W, H, align, u_rowlen, u_skippix, u_skiprows);
+    mach64_frame_start(c);                /* deferred glClear -> clear before this upload */
     mach64_flush_batch(c);                /* pending geometry before the upload */
     for (row = 0; row < h; row++) {
         int fbrow = H - 1 - (dy + row);   /* image row 0 = bottom = raster y -> VRAM row */
@@ -692,6 +721,7 @@ int mach64_ctl0c(gld_context *c, uint32_t a, uint32_t b, uint32_t d,
                  * component in the MSB, _REV in the LSB.  c0..c3 = FORMAT-order components.
                  * (TODO: GL_UNPACK_SWAP_BYTES would byte-reverse v; default off.) */
                 uint32_t v = *(const uint32_t *)s, c0, c1, c2, c3;
+                if (u_swap) v = (v>>24) | ((v>>8)&0xff00u) | ((v<<8)&0xff0000u) | (v<<24);
                 if (pk == 1) { c0=(v>>24)&0xffu; c1=(v>>16)&0xffu; c2=(v>>8)&0xffu; c3=v&0xffu; }
                 else         { c0=v&0xffu; c1=(v>>8)&0xffu; c2=(v>>16)&0xffu; c3=(v>>24)&0xffu; }
                 if (is_bgr) { B=(unsigned char)c0; G=(unsigned char)c1; R=(unsigned char)c2; }
@@ -741,6 +771,7 @@ int mach64_ctl10(gld_context *c, uint32_t a, uint32_t b, uint32_t d,
         sx + w > W || dx + w > W || svy + h > H || dvy + h > H)
         return 0;                     /* out of bounds -> skip (first-cut clipping) */
     gld_log("glCopyPixels: (%d,%d) %dx%d -> (%d,%d) [W=%d H=%d]\n", sx, sy, w, h, dx, dy, W, H);
+    mach64_frame_start(c);            /* deferred glClear -> clear before this copy */
     mach64_flush_batch(c);            /* pending geometry before the copy */
     mach64_blit_surface(c, p->target_off, p->target_off,
                         (uint32_t)sx, (uint32_t)svy, (uint32_t)dx, (uint32_t)dvy,
@@ -751,9 +782,9 @@ int mach64_ctl10(gld_context *c, uint32_t a, uint32_t b, uint32_t d,
  * hook (dispatch table[0x14] = gc+0x78bc) with (raster_dst{x,y,z} float*, width, height, _, _, bitmap).
  * The bitmap is a 1-bpp MASK: MSB-first within each byte, rows bottom-to-top, each row padded to the
  * GL_UNPACK_ALIGNMENT.  SET bits are drawn in the current raster colour (GL_CURRENT_RASTER_COLOR --
- * read from the GLEngine gc, as readback reads GL_PACK_* state); CLEAR bits are skipped.  First cut:
- * UNPACK alignment 1 (TODO: read gc UNPACK alignment), bitmap origin folded into raster_dst by
- * GLEngine. */
+ * read from the GLEngine gc, as readback reads GL_PACK_* state); CLEAR bits are skipped.  Honours
+ * GL_UNPACK_ALIGNMENT/ROW_LENGTH/SKIP_ROWS/SKIP_PIXELS/LSB_FIRST (mach64_unpack_state).  Bitmap origin
+ * folded into raster_dst by GLEngine; the xmove/ymove raster advance is GLEngine's, not ours. */
 int mach64_ctl14(gld_context *c, uint32_t a, uint32_t b, uint32_t d,
                  uint32_t e, uint32_t f, uint32_t g)
 {
@@ -762,6 +793,7 @@ int mach64_ctl14(gld_context *c, uint32_t a, uint32_t b, uint32_t d,
     const unsigned char *bm = (const unsigned char *)(uintptr_t)g;
     int w = (int)b, h = (int)d;
     int dx, dy, W, H, row, col, rowbytes;
+    int u_align, u_rowlen, u_skippix, u_skiprows, u_swap, u_lsb, lbits;
     unsigned char R, G, B, A;
     volatile unsigned char *vram;
     uint32_t pitch_b;
@@ -788,9 +820,14 @@ int mach64_ctl14(gld_context *c, uint32_t a, uint32_t b, uint32_t d,
     dx = (int)(rp[0] + 0.5f);
     dy = (int)(rp[1] + 0.5f);
     pitch_b = p->target_pitch * 4u;
-    rowbytes = (w + 7) / 8;                /* UNPACK alignment 1 (first cut) */
-    gld_log("glBitmap: %dx%d -> (%d,%d) colour=%d,%d,%d,%d [W=%d H=%d]\n",
-            w, h, dx, dy, R, G, B, A, W, H);
+    mach64_unpack_state(&u_align, &u_rowlen, &u_skippix, &u_skiprows, &u_swap, &u_lsb);
+    (void)u_swap;                          /* SWAP_BYTES is a no-op for 1-bpp */
+    lbits = u_rowlen > 0 ? u_rowlen : w;   /* GL_UNPACK_ROW_LENGTH (pixels/row) */
+    rowbytes = (((lbits + 7) / 8 + u_align - 1) / u_align) * u_align;   /* row bytes padded to alignment */
+    bm += u_skiprows * rowbytes;           /* GL_UNPACK_SKIP_ROWS */
+    gld_log("glBitmap: %dx%d -> (%d,%d) colour=%d,%d,%d,%d [W=%d H=%d unpack a=%d rl=%d lsb=%d]\n",
+            w, h, dx, dy, R, G, B, A, W, H, u_align, u_rowlen, u_lsb);
+    mach64_frame_start(c);            /* deferred glClear -> clear before this bitmap */
     mach64_flush_batch(c);
     for (row = 0; row < h; row++) {
         int fbrow = H - 1 - (dy + row);   /* bitmap row 0 = bottom = raster y -> VRAM row */
@@ -800,7 +837,11 @@ int mach64_ctl14(gld_context *c, uint32_t a, uint32_t b, uint32_t d,
             int gx = dx + col;
             volatile unsigned char *o;
             if (gx < 0 || gx >= W) continue;
-            if (!(brow[col >> 3] & (0x80u >> (col & 7)))) continue;   /* clear bit -> skip */
+            {   int bitidx = u_skippix + col;   /* GL_UNPACK_SKIP_PIXELS shifts the start bit */
+                int bpos = bitidx & 7;
+                unsigned char mask = u_lsb ? (unsigned char)(1u << bpos) : (unsigned char)(0x80u >> bpos);
+                if (!(brow[bitidx >> 3] & mask)) continue;   /* clear bit -> skip (MSB/LSB-first) */
+            }
             o = vram + p->target_off + (uint32_t)fbrow * pitch_b + (uint32_t)gx * 4u;
             o[0] = B; o[1] = G; o[2] = R; o[3] = A;   /* native LE ARGB8888 */
         }
