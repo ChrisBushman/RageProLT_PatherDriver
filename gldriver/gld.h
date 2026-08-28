@@ -212,7 +212,6 @@ void mach64_apple_bind_surface(unsigned int cn, uint32_t surface_id,
 void mach64_render_points     (gld_context *, const void *, uint32_t);
 void mach64_render_lines      (gld_context *, const void *, uint32_t);
 void mach64_render_line_strip (gld_context *, const void *, uint32_t);
-void mach64_render_line_loop  (gld_context *, const void *, uint32_t);
 void mach64_render_triangles  (gld_context *, const void *, uint32_t);
 void mach64_render_elt_tris   (gld_context *, const void *, uint32_t);  /* clipped convex polygons */
 void mach64_render_elt_points (gld_context *, const void *, uint32_t);  /* clipped points          */

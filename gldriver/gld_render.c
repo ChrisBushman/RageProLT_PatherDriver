@@ -463,11 +463,11 @@ int mach64_ctl00(gld_context *c,uint32_t a,uint32_t b,uint32_t d,uint32_t e,uint
 
 /* table[0x08] = GLEngine's per-renderer glReadPixels READBACK hook.  glReadPixels validation
  * (GLEngine+0x2dc4c, verified via tools/mach64_rpdisp) tail-calls [gc+0x78b0] = this, as
- * (rb_ctx, x, y, w, h, format, type, pixels).  It was a no-op stub (7-arg ctl shape that also
- * dropped `pixels` in r10) -> glReadPixels silently did nothing, glGetError==0, px untouched.
- * STEP 1: real 8-arg signature + log the args (confirm the mechanism).  STEP 2 (TODO): read our
- * back-buffer VRAM (g_gld_readback_ctx render_off) at (x,y,w,h), Y-flip, convert to format/type,
- * write `pixels`. */
+ * (rb_ctx, x, y, w, h, format, type, pixels).  It began as a no-op stub (7-arg ctl shape that
+ * dropped `pixels` in r10) -> glReadPixels silently did nothing.  Now fully implemented in
+ * mach64_ctl08 below: reads the back-buffer VRAM (g_gld_readback_ctx render_off) for colour, or the
+ * 16-bit Z buffer for GL_DEPTH_COMPONENT, at (x,y,w,h), Y-flips, converts to format/type, and writes
+ * `pixels`. */
 gld_context *g_gld_readback_ctx = 0;
 unsigned char *g_gld_gc = 0;   /* GLEngine's gc (dispatch table - 0x78a8); holds GL_PACK_* state */
 

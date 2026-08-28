@@ -8,8 +8,13 @@
  * pre-packed to hardware format (recovered from ATIRage128GLDriver, slot 0x28 --
  * see docs/re-notes/gld-layer.md), so mach64_read_vertex is mostly a field copy.
  *
- * The mach64 setup engine is triangle-oriented: the triangle family is the
- * validated path; points/lines need sprite/quad expansion and are TODO.
+ * The mach64 setup engine is triangle-oriented, so every primitive is decomposed
+ * to triangles: strips/fans/quads/polygons tessellate directly, and the point/line
+ * family expands to quads (draw_point -> size x size quad, draw_line -> width-2
+ * quad) fed through the same mach64_draw_triangle path.  ALL GL primitive modes are
+ * implemented and wired (gld_dispatch.c): POINTS/LINES/LINE_STRIP/LINE_LOOP and the
+ * clipped elt_points/elt_lines/elt_tris vectors, in addition to the triangle family.
+ * (Point size / line width come from the gli -- GLI_POINT_SIZE / GLI_LINE_WIDTH.)
  */
 #include "gld.h"
 
@@ -402,15 +407,6 @@ void mach64_render_line_strip(gld_context *ctx, const void *v, uint32_t n)
     mach64_sync_depth_from_gli(ctx);
     mach64_bind_texture(ctx);
     for (i = 1; i < n; i++) draw_line(ctx, VTX(v, i-1), VTX(v, i), fb_h, w);
-}
-void mach64_render_line_loop(gld_context *ctx, const void *v, uint32_t n)
-{
-    float fb_h = FB_H(ctx), w = gli_size(ctx, GLI_LINE_WIDTH) * 0.5f; uint32_t i;
-    PRIM_SANE(n);
-    mach64_sync_depth_from_gli(ctx);
-    mach64_bind_texture(ctx);
-    for (i = 1; i < n; i++) draw_line(ctx, VTX(v, i-1), VTX(v, i), fb_h, w);
-    if (n > 2) draw_line(ctx, VTX(v, n-1), VTX(v, 0), fb_h, w);   /* close the loop */
 }
 
 /* ---- element (clipped) point/line vectors, slots 0x40 / 0x44 -------------
