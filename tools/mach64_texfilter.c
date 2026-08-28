@@ -31,8 +31,11 @@ int main(void)
     /* texel (col,row), row 0 = bottom: (0,0)=red (1,0)=green (0,1)=blue (1,1)=white */
     tex[0]=255;tex[1]=0;tex[2]=0;tex[3]=255;         tex[4]=0;tex[5]=255;tex[6]=0;tex[7]=255;
     tex[8]=0;tex[9]=0;tex[10]=255;tex[11]=255;       tex[12]=255;tex[13]=255;tex[14]=255;tex[15]=255;
-    v1[0]=400;v1[1]=300; v1[2]=600;v1[3]=300; v1[4]=600;v1[5]=500; v1[6]=400;v1[7]=500;   /* LINEAR quad */
-    v2[0]=400;v2[1]= 40; v2[2]=600;v2[3]= 40; v2[4]=600;v2[5]=240; v2[6]=400;v2[7]=240;   /* NEAREST quad */
+    /* two big side-by-side 400x400 quads: LEFT = bilinear (GL_LINEAR), RIGHT = nearest (GL_NEAREST).
+     * A 2x2 texture magnified 200x -> LEFT shows a smooth 4-corner colour gradient, RIGHT shows 4
+     * hard-edged colour quadrants -- the visual difference between the filters. */
+    v1[0]= 80;v1[1]=180; v1[2]=480;v1[3]=180; v1[4]=480;v1[5]=580; v1[6]= 80;v1[7]=580;   /* LEFT  linear  */
+    v2[0]=544;v2[1]=180; v2[2]=944;v2[3]=180; v2[4]=944;v2[5]=580; v2[6]=544;v2[7]=580;   /* RIGHT nearest */
     tc[0]=0;tc[1]=0; tc[2]=1;tc[3]=0; tc[4]=1;tc[5]=1; tc[6]=0;tc[7]=1;
 
     if (!pf) { printf("no pf\n"); return 1; }
@@ -66,11 +69,12 @@ int main(void)
     glDrawArrays(GL_QUADS, 0, 4);
     glFinish();
 
-    rd(500, 400, "LINEAR ctr");    /* bilinear -> ~128,128,128 gray */
-    rd(500, 140, "NEAREST ctr");   /* nearest  -> a pure texel colour */
-    printf("LINEAR gray(~128,128,128) + NEAREST pure = conditional bilinear WORKS\n");
+    rd(280, 380, "LEFT(linear)");   /* centre of left quad  -> bilinear ~128,128,128 gray */
+    rd(744, 380, "RIGHT(nearest)"); /* centre of right quad -> nearest, a pure texel colour */
+    printf("LEFT = bilinear (smooth gradient), RIGHT = nearest (4 hard blocks)\n");
     printf("glGetError = 0x%x\n", (unsigned)glGetError());
-    fflush(stdout); sleep(3);
+    fflush(stdout);
+    sleep(15);                      /* hold on screen so you can look / screenshot */
 
     aglSetCurrentContext(NULL); aglSetDrawable(ctx, NULL);
     aglDestroyContext(ctx); aglDestroyPixelFormat(pf);
