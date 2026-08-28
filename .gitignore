@@ -7,10 +7,16 @@ build/
 # macOS
 .DS_Store
 
-# compiled userspace tools (PPC-only; build on the Lombard)
-tools/mach64_peek
-tools/mach64_poke
-tools/mach64_fill
-tools/mach64_tri
-tools/mach64_gouraud
-tools/mach64_dmatest
+# compiled userspace tools (PPC-only; build on the Lombard) -- ignore every built
+# mach64_* binary while keeping the sources/runners tracked
+tools/mach64_*
+!tools/mach64_*.c
+!tools/mach64_*.h
+!tools/mach64_*.sh
+
+# test / probe run output (regenerated on the Lombard, not source)
+*-out.txt
+*-log.txt
+*-result.txt
+*-frames.txt
+*.log
