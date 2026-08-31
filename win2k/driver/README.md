@@ -62,10 +62,19 @@ DMA a `common/mach64_emit` stream), reg + VRAM read/write. Proven by
 `mach64_winsys_test` on the Armada (triangle: 276 px, inside=ff8040) -- the same
 hardware triangle, now via the reusable library. Build: `./build-winsys.sh`.
 
-**NEXT:** stand up a minimal Mesa "mach64" context (classic driver init minus DRI)
-that installs tnl render hooks emitting via `common/mach64_emit` -> `m64ws_submit`,
-and `Driver.Clear` via a `m64ws` fill -- first hardware triangle through the full
-Mesa GL pipeline. Then state/tex, then present (WGL SwapBuffers -> m64ws blit/flip).
+**FIRST HW TRIANGLE THROUGH MESA -- DONE (2026-08-31):** `mach64_gl.c` reuses the
+OSMesa context for the GL front-end + T&L, then overrides `tnl->Driver.Render.
+{Start,Finish,Triangle,BuildVertices}` to emit transformed triangles via
+`common/mach64_emit` -> `m64ws_submit`. A GL triangle (glBegin/glVertex/glColor ->
+Mesa transform+viewport -> our hooks -> mach64 setup engine -> VRAM) renders on the
+Armada: 276 color px, inside=ff8040, corner=0 (readback-verified). Build:
+`../mesa/build-mach64gl.sh`. The hook re-validation problem is dodged by validating
+state once (warm-up glFinish) then overriding hooks with no further state changes.
+
+**NEXT:** move these hooks into a proper mach64 Mesa context (survives state changes
+via the DDInitState/InvalidateState path); wire `Driver.Clear` to a hw fill; add
+depth/texture state (cross-check re-notes); then T3 present (WGL SwapBuffers ->
+m64ws blit/flip to the visible framebuffer) + Laser Arena.
 
 ---
 _Original T2 note:_ **T2 — wire the mach64 backend.** Replace swrast with the mach64 render backend →

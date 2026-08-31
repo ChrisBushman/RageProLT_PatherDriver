@@ -141,7 +141,8 @@ and other QuakeGL games; fix by observed failure.
 | Win2000 CRT toolchain (msvcrt cross-link + `dllcrt0` full-CRT DLL) | ✅ 2026-08-31 — `toolchain/` (T0: DLL ctors+DllMain+heap proven on HW) |
 | Mesa OSMesa software render on Win2000 (T1a) | ✅ 2026-08-31 — full Mesa builds+renders (`mesa/`) |
 | Mesa `opengl32.dll` builds+loads, WGL contract works on Win2000 (T1b) | ✅ 2026-08-31 — `mesa/build-icd.sh` |
-| Wire mach64 hardware backend into Mesa (T2) | ⬜ next |
+| **GL triangle via mach64 HARDWARE through Mesa pipeline (T2 core)** | ✅ 2026-08-31 — `mesa/build-mach64gl.sh` (276 px, inside=ff8040) |
+| Full mach64 Mesa context / present / Laser Arena (T2/T3) | ⬜ next |
 | mach64 backend wired to DMA (T2) | ⬜ |
 | Laser Arena root cause (ATI ICD `atioglxx` NULL-deref) | ✅ 2026-08-31 — Dr. Watson; validates the port |
 | Mesa core building as opengl32 ICD (swrast) | ⬜ |
