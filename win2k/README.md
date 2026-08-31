@@ -136,7 +136,9 @@ and other QuakeGL games; fix by observed failure.
 | `kmd/` kernel helper (MMIO first light) | ✅ 2026-08-31 — `mach64kmd.sys` (MinGW cross-built, loads unsigned on Win2000) read `CONFIG_CHIP_ID=0x64004c4d` ("LM", rev 0x64) via `MmMapIoSpace(0x81000000)` |
 | VRAM block I/O + combined FB/reg map; VRAM=8MB | ✅ 2026-08-31 |
 | **Off-screen 2D engine fill** (readback-verified, coexists w/ ati2mpab) | ✅ 2026-08-31 — `kmd/engine-proof.md` (1024/1024 px) |
-| MMIO-mode off-screen 3D triangle on Rage Mobility P | ⬜ next |
+| **Off-screen 3D triangle via `common/mach64_emit`** (pseudo-DMA, readback-verified) | ✅ 2026-08-31 — `kmd/engine-proof.md` (276 tri px + clean bg) |
+| Bus-master DMA ring | ⬜ next |
+| Mesa winsys integration | ⬜ |
 | Mesa core building as opengl32 ICD (swrast) | ⬜ |
 | mach64 hardware backend wired | ⬜ |
 | Present / double buffer | ⬜ |

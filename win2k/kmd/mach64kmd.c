@@ -32,6 +32,10 @@
 #define IOCTL_MACH64_RDBLK  CTL_CODE(MACH64_TYPE, 0x804, METHOD_BUFFERED, FILE_ANY_ACCESS)
 #define IOCTL_MACH64_WRBLK  CTL_CODE(MACH64_TYPE, 0x805, METHOD_BUFFERED, FILE_ANY_ACCESS)
 #define IOCTL_MACH64_WRREGS CTL_CODE(MACH64_TYPE, 0x806, METHOD_BUFFERED, FILE_ANY_ACCESS)
+/* pseudo-DMA submit: feed a decoded (mapoffset,value) stream to the engine with
+ * FIFO flow control (drain every 16 writes) + idle waits -- for >16-write batches
+ * like a 3D triangle. Input: count, gui_stat_mapoff, fifo_stat_mapoff, then pairs. */
+#define IOCTL_MACH64_SUBMIT CTL_CODE(MACH64_TYPE, 0x807, METHOD_BUFFERED, FILE_ANY_ACCESS)
 
 #define MACH64_MAXBLK  0x10000u   /* 64KB per block IOCTL */
 #define MACH64_MAXREGS 256u       /* pairs per WRREGS      */
@@ -152,6 +156,50 @@ static NTSTATUS NTAPI DispIoctl(PDEVICE_OBJECT dev, PIRP irp)
                 ULONG v  = *(ULONG UNALIGNED *)(pairs + i * 8 + 4);
                 WRITE_REGISTER_ULONG((PULONG)((PUCHAR)ex->mapped + ro), v);
             }
+            KeLowerIrql(old);
+        }
+        st = STATUS_SUCCESS;
+        break;
+    }
+    case IOCTL_MACH64_SUBMIT: {
+        if (inlen < 12) { st = STATUS_BUFFER_TOO_SMALL; break; }
+        ULONG count    = *(ULONG UNALIGNED *)(buf + 0);
+        ULONG gui_off  = *(ULONG UNALIGNED *)(buf + 4);
+        ULONG fifo_off = *(ULONG UNALIGNED *)(buf + 8);
+        if (count == 0 || count > MACH64_MAXREGS || inlen < 12 + count * 8) { st = STATUS_INVALID_PARAMETER; break; }
+        if (!ex->mapped || gui_off + 4 > ex->mapsize || fifo_off + 4 > ex->mapsize) { st = STATUS_INVALID_PARAMETER; break; }
+        PUCHAR pairs = buf + 12;
+        ULONG i; int bad = 0;
+        for (i = 0; i < count; i++) {
+            ULONG ro = *(ULONG UNALIGNED *)(pairs + i * 8);
+            if (ro + 4 > ex->mapsize || (ro & 3)) { bad = 1; break; }
+        }
+        if (bad) { st = STATUS_INVALID_PARAMETER; break; }
+        {
+            PUCHAR m = (PUCHAR)ex->mapped;
+            PULONG fifo = (PULONG)(m + fifo_off);
+            PULONG gui  = (PULONG)(m + gui_off);
+            ULONG t; int fifoleft = 0;
+            KIRQL old;
+            KeRaiseIrql(DISPATCH_LEVEL, &old);
+            /* wait engine idle first: FIFO empty (==0), then GUI not active */
+            for (t = 0; t < 100000 && (READ_REGISTER_ULONG(fifo) & 0xffff); t++) KeStallExecutionProcessor(1);
+            for (t = 0; t < 100000 && (READ_REGISTER_ULONG(gui) & 1);      t++) KeStallExecutionProcessor(1);
+            for (i = 0; i < count; i++) {
+                if (fifoleft == 0) {                  /* drain FIFO every 16 writes */
+                    for (t = 0; t < 100000 && (READ_REGISTER_ULONG(fifo) & 0xffff); t++) KeStallExecutionProcessor(1);
+                    fifoleft = 16;
+                }
+                {
+                    ULONG ro = *(ULONG UNALIGNED *)(pairs + i * 8 + 0);
+                    ULONG v  = *(ULONG UNALIGNED *)(pairs + i * 8 + 4);
+                    WRITE_REGISTER_ULONG((PULONG)(m + ro), v);
+                }
+                fifoleft--;
+            }
+            /* wait for the drawn primitive to complete before we return */
+            for (t = 0; t < 100000 && (READ_REGISTER_ULONG(fifo) & 0xffff); t++) KeStallExecutionProcessor(1);
+            for (t = 0; t < 100000 && (READ_REGISTER_ULONG(gui) & 1);      t++) KeStallExecutionProcessor(1);
             KeLowerIrql(old);
         }
         st = STATUS_SUCCESS;

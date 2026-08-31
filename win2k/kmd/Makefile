@@ -20,8 +20,10 @@ DRV_LDFLAGS := -Wl,--subsystem,native -Wl,--entry,_DriverEntry@8 \
                -Wl,--image-base,0x10000 -shared -nostdlib
 DRV_LIBS := -lntoskrnl -lhal
 
-# --- user tool: CRT-free so it loads on Win2000 (no EncodePointer import) ---
-TOOL_CFLAGS := -O2 -Wall -D_WIN32_WINNT=0x0500 -nostartfiles -nodefaultlibs -e _mainstart
+# --- user tool: CRT-free so it loads on Win2000 (no EncodePointer import).
+# Builds in the shared common/mach64_emit.c so the ICD/test share one emission core. ---
+COMMON  := ../../common
+TOOL_CFLAGS := -O2 -Wall -D_WIN32_WINNT=0x0500 -nostartfiles -nodefaultlibs -e _mainstart -I$(COMMON)
 TOOL_LIBS := -lkernel32 -ladvapi32 -luser32
 
 HOST    := armada
@@ -33,8 +35,8 @@ mach64kmd.sys: mach64kmd.c
 	$(CC) $(DRV_CFLAGS) $(DRV_LDFLAGS) -o $@ $< $(DRV_LIBS)
 	@$(OBJDUMP) -p $@ | grep -iE 'Subsystem|DLL Name' || true
 
-kmdtest.exe: kmdtest.c
-	$(CC) $(TOOL_CFLAGS) -o $@ $< $(TOOL_LIBS)
+kmdtest.exe: kmdtest.c $(COMMON)/mach64_emit.c $(COMMON)/mach64_emit.h $(COMMON)/mach64_regs.h
+	$(CC) $(TOOL_CFLAGS) -o $@ kmdtest.c $(COMMON)/mach64_emit.c $(TOOL_LIBS)
 
 deploy: all
 	scp mach64kmd.sys $(HOST):/cygdrive/c/mach64kmd.sys

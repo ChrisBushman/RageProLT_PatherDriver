@@ -51,8 +51,37 @@ which is safe for occasional off-screen tests on this single-CPU box. Sustained
 rendering (the real ICD) will need a firmer arrangement — either a cooperative
 engine-lock or taking the device — decided when we drive the visible framebuffer.
 
+## Off-screen 3D triangle — via the shared common/mach64_emit (2026-08-31)
+
+The mach64 **3D setup engine** rasterizes a triangle built by the *shared*
+`common/mach64_emit.c` (compiled into `kmdtest.exe` — the same code the OS X driver
+uses), submitted via **DRI-style pseudo-DMA**: decode the ADRINDEX packet stream
+back to consecutive register writes (`mmselect`) and feed them with FIFO flow
+control (drain every 16 writes) through `IOCTL_MACH64_SUBMIT`.
+
+`kmdtest tri`: 32x32 gouraud (single-colour) triangle at VRAM 0x400000, pixels
+(4,4)-(28,4)-(4,28), colour 0xFF8040. Result:
+```
+emit: 52 dwords -> 35 register writes (via common/mach64_emit)
+tri: 276 px=color  748 px=bg  inside(10,10)=0xff8040  corner(28,28)=0x000000
+```
+276 interior + 748 background = full 1024 px: a real triangle, interior = vertex
+colour, exterior = clean background. **common/ validated end-to-end on Mobility-P.**
+
+Proven here: (1) the shared emission core ports unchanged; (2) pseudo-DMA MMIO
+submission with FIFO/idle sync works; (3) ADRINDEX<->register decode (`mmselect`)
+matches the DRI reference.
+
+## Known limitation to fix
+
+`RDBLK`/`WRBLK` (METHOD_BUFFERED block VRAM I/O) **fault above ~4 KB** — the 64x64
+(16 KB) triangle target crashed in the preclear; 32x32 (4 KB) works. Fine for these
+proofs but must be fixed for textures/larger surfaces (switch big transfers to
+`METHOD_OUT_DIRECT`/MDL, or chunk at 4 KB). Tracked for the DMA/texture phase.
+
 ## Next rung
 
-Off-screen **3D triangle** via `common/mach64_emit` (flat, then gouraud),
-readback-verified — reusing the exact emission core the OS X side proved. Then the
-bus-master DMA ring (replacing MMIO submission), then Mesa winsys integration.
+Bus-master **DMA ring** (replacing pseudo-DMA MMIO submission) — the real path
+`common/mach64_emit` + `m64_cb_write_le` are designed for; needs contiguous DMA
+memory (`MmAllocateContiguousMemory`) + the descriptor ring
+(`docs/re-notes/bus-master-ring.md`). Then Mesa winsys integration.
