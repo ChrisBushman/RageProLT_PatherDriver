@@ -22,6 +22,12 @@ $GCC -c -O2 -w -fpermissive -D_WIN32_WINNT=0x0500 -DBUILD_GL32 $INC "$GDI/wmesa.
 $GCC -c -O2 -w -D_WIN32_WINNT=0x0500 ../toolchain/dllcrt0.c     -o "$OBJ/dllcrt0.o"
 $GCC -c -O2 -w -D_WIN32_WINNT=0x0500 ../toolchain/win2kcompat.c -o "$OBJ/win2kcompat.o"
 
+# mach64 HARDWARE backend for the DLL (win2k/driver/mach64_icd.c) + its winsys/emit deps.
+HWINC="-I../../common -I../driver"
+$GCC -c -O2 -w -D_WIN32_WINNT=0x0500 -DBUILD_GL32 $INC $HWINC ../driver/mach64_icd.c    -o "$OBJ/mach64_icd.o"
+$GCC -c -O2 -w -D_WIN32_WINNT=0x0500 $HWINC ../driver/mach64_winsys.c  -o "$OBJ/icd_winsys.o"
+$GCC -c -O2 -w -D_WIN32_WINNT=0x0500 $HWINC ../../common/mach64_emit.c -o "$OBJ/icd_emit.o"
+
 CB=$($GCC -print-file-name=crtbegin.o)
 CE=$($GCC -print-file-name=crtend.o)
 
@@ -30,13 +36,16 @@ rm -f icd-objs.tmp
 for o in "$OBJ"/*.o; do
   case "$o" in
     */crt0exe.o|*/test_osmesa.o|*/osmesa.o|*/dllcrt0.o|*/win2kcompat.o|*/wgl.o|*/wmesa.o) continue;;
-    */mach64_gl.o|*/mach64_emit_c.o|*/mach64_winsys.o) continue;;  # EXE/hw-backend objs, not the sw DLL
+    */mach64_gl.o|*/mach64_emit_c.o|*/mach64_winsys.o) continue;;   # EXE + stale hw objs
+    */mach64_icd.o|*/icd_winsys.o|*/icd_emit.o) continue;;          # hw backend, linked explicitly
   esac
   printf '%s\n' "$o" >> icd-objs.tmp
 done
 
 $GCC -shared -nostartfiles -nodefaultlibs -Wl,-e,_DllMainCRTStartup@12 -o opengl32.dll \
-  "$CB" "$OBJ/dllcrt0.o" "$OBJ/wgl.o" "$OBJ/wmesa.o" $(cat icd-objs.tmp) "$OBJ/win2kcompat.o" "$CE" \
+  "$CB" "$OBJ/dllcrt0.o" "$OBJ/wgl.o" "$OBJ/wmesa.o" \
+  "$OBJ/mach64_icd.o" "$OBJ/icd_winsys.o" "$OBJ/icd_emit.o" \
+  $(cat icd-objs.tmp) "$OBJ/win2kcompat.o" "$CE" \
   "$GDI/mesa.def" \
   libmsvcrt_win2k.a -lgcc -lgdi32 -luser32 -lkernel32 2>build-icd-errors.log
 rc=$?

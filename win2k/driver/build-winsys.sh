@@ -29,3 +29,9 @@ i686-w64-mingw32-gcc -O2 -w -D_WIN32_WINNT=0x0500 -nostartfiles -nodefaultlibs -
   -o wgltest.exe wgltest.c \
   -lkernel32 -luser32 -lgdi32 -lgcc
 echo "built wgltest.exe"
+# Hardware-ICD test: verifies the mach64 render target through the DLL's debug
+# exports (needs mach64kmd.sys started; else the DLL reports software-only).
+i686-w64-mingw32-gcc -O2 -w -D_WIN32_WINNT=0x0500 -nostartfiles -nodefaultlibs -e _mainstart \
+  -o hwicdtest.exe hwicdtest.c \
+  -lkernel32 -luser32 -lgdi32 -lgcc
+echo "built hwicdtest.exe"
