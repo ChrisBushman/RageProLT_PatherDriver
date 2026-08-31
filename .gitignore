@@ -29,3 +29,4 @@ win2k/**/*.a
 win2k/**/*.def
 win2k/mesa/Mesa-7.0.4/
 win2k/mesa/*.tar.gz
+win2k/mesa/obj/

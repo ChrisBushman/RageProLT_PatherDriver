@@ -139,7 +139,8 @@ and other QuakeGL games; fix by observed failure.
 | **Off-screen 3D triangle via `common/mach64_emit`** (pseudo-DMA, readback-verified) | ✅ 2026-08-31 — `kmd/engine-proof.md` (276 tri px + clean bg) |
 | **Bus-master DMA ring** (PAT proof + 3D triangle via DMA) | ✅ 2026-08-31 — `kmd/dma-ring.md` |
 | Win2000 CRT toolchain (msvcrt cross-link + `dllcrt0` full-CRT DLL) | ✅ 2026-08-31 — `toolchain/` (T0: DLL ctors+DllMain+heap proven on HW) |
-| Mesa core as swrast ICD (T1) | 🟡 started — Mesa 7.0.4 vendored, compile recipe proven (`mesa/`) |
+| Mesa OSMesa software render on Win2000 (T1a) | ✅ 2026-08-31 — full Mesa builds+renders (`mesa/`) |
+| DrvXxx ICD shim / opengl32 (T1b) | ⬜ next |
 | mach64 backend wired to DMA (T2) | ⬜ |
 | Laser Arena root cause (ATI ICD `atioglxx` NULL-deref) | ✅ 2026-08-31 — Dr. Watson; validates the port |
 | Mesa core building as opengl32 ICD (swrast) | ⬜ |

@@ -47,5 +47,9 @@ see `../toolchain/README.md`.
 
 ## Status
 
-- ✅ Mesa 7.0.4 fetched; structure mapped; compile recipe established (imports.c OK).
-- ⬜ T1a full OSMesa build + off-screen render proof on Win2000 (next).
+- ✅ Mesa 7.0.4 fetched; structure mapped; compile recipe established.
+- ✅ **T1a DONE (2026-08-31):** full OSMesa build (173 C files) links to a 2.4MB EXE
+  importing only msvcrt.dll + KERNEL32; renders a triangle off-screen on the Armada
+  (`inside=ff8040, corner=000000, tri~=1128`). Mesa's GL pipeline works on Win2000.
+  Build+link+deploy: `./build-osmesa.sh` (needs libmsvcrt_win2k.a; see toolchain/).
+- ⬜ T1b: the DrvXxx ICD shim as an opengl32-loadable DLL (next).
