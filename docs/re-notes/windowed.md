@@ -74,6 +74,45 @@ REMAINING POLISH: multi-window disambiguation (currently first-window-with-surfa
 window apps -- could match by render size later); the [cgs] enumerate probe lives in
 tools/mach64_cgstest.c + mach64_wintest.c.  See [[rageprolt-windowed]] / [[rageprolt-pathb-commit]].
 
+## INTERMITTENT WHITE-OUT — root cause CONFIRMED (2026-08-28), fix in progress
+
+Live-front blit-present flickers to all-white under real apps (Chess: Pictures 6/8 at the same minute —
+identical instance, one all-white, one perfect board). Instrumented `mach64_dispatch_render_ctl` +
+`gld_cgs`; findings:
+- Presents that go white DID draw geometry (`frame_new=0`), and `mach64_submit` waits-for-idle so the
+  board is genuinely in `back` before the blit. So it is NOT a clear-only present nor a geometry race.
+- The CGS resolver returns a DIFFERENT screen position every call for the SAME window (win 153/surf 0x10a):
+  (85,74)→(115,103)→(88,96)→(116,102)→(543,157)→… — it tracks a window being dragged, but our live-front
+  blit chases it a frame behind, so the board smears across the desktop during a move.
+- Even STATIC (chess4: 2 presents, no interaction) can end white.
+
+**Mechanism:** our windowed present blits the rendered board straight into the LIVE front (scanout) at the
+resolved window rect. But WindowServer ALSO paints that window — and because our GL region is NOT registered
+with WindowServer as an accelerator-owned surface, WS composites the window's EMPTY Quartz/GL backing
+(white) over the SAME front pixels. Whoever writes last before scanout wins: WS repaint → white, our blit →
+board. Static idle windows keep our last blit (WS doesn't recomposite an unchanged window) — which is why
+simple probe apps looked solved — but Chess's continuous redraw + drags + the startup activate make WS
+recomposite, exposing the race.
+
+**Why Apple doesn't race (from apple-glcontext-protocol.md):** Apple's present is ALSO a PIO 2D blit to the
+front, but the surface is REGISTERED with WindowServer via `IOATIRProSurface::set_id_mode(cgs_id, mode)` —
+that marks the window's content region as accelerator-owned so WS STOPS painting it (punch-through) and the
+driver's `surface_flush` blit is the sole writer. No registration on our side => WS overpaints => white.
+
+**Fix = surface-backed present (user-chosen):** make our content BE the window's registered, WS-composited
+surface so WS never overpaints it. The crux is registering the window's existing CGS surface region as
+accelerator-owned. Two implementation paths:
+- (Y-win) our Mach64Accelerator.kext implements the IOAccelSurface user-client protocol WS binds to (single
+  accelerator, no coexistence; larger kernel work).
+- (B-win) drive Apple's already-implemented `IOATIRProSurface` (ATIRagePro.kext) JUST for surface
+  register+present — `set_id_mode`+`set_shape`+`surface_write_lock`+`surface_flush` are PROVEN on HW
+  (mach64_writetest/fspresent put our pixels on the real scanout, engine-independent PIO). Reintroduces the
+  two-accelerator coexistence concern, mitigated by serializing our-3D-DMA → idle → Apple-PIO-flush.
+FIRST RE STEP: determine whether a LIVE window's existing CGS surface id (the drawable's d[2], e.g. 0x10a)
+can be marked accelerator-owned so WS stops painting it — via Apple's set_id_mode on that id, or a pure-CGS
+SPI. That decides Y-win vs B-win. (Diagnostic present/resolver instrumentation has been removed; the render
+path is back to the plain blit.)
+
 ## What the full device takeover is (still) for
 A formal `IOFramebuffer` driver that fully owns the LT Pro is NO LONGER a windowed
 prerequisite.  It remains valuable for: fixing the intermittent FULLSCREEN page-flip hard-lock,
