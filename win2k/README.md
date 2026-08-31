@@ -147,7 +147,9 @@ and other QuakeGL games; fix by observed failure.
 | **Textured GL quad via mach64 hardware through Mesa** | ✅ 2026-08-31 |
 | **Depth test (Z-buffer)** — standalone + through Mesa (occlusion) | ✅ 2026-08-31 |
 | **Present to the VISIBLE scanout** (1024x768 16bpp, top-left of screen) | ✅ 2026-08-31 |
-| opengl32 integration; Laser Arena | ⬜ next |
+| WGL smoke test through our `opengl32.dll` on HW (`driver/wgltest`) | ✅ 2026-08-31 — clear+triangle+readback, center red / corner blue |
+| **Laser Arena runs on our Mesa ICD — ATI crash GONE, reaches main menu** | ✅ 2026-08-31 — software `opengl32.dll` dropped in beside LA_GL.exe; Dr. Watson CLEAN (headline milestone) |
+| opengl32 integration; Laser Arena | ✅ 2026-08-31 (software) — hardware backend + display-fit are the remaining polish |
 | mach64 backend wired to DMA (T2) | ⬜ |
 | Laser Arena root cause (ATI ICD `atioglxx` NULL-deref) | ✅ 2026-08-31 — Dr. Watson; validates the port |
 | Mesa core building as opengl32 ICD (swrast) | ⬜ |
