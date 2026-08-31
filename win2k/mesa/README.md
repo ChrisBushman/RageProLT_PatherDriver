@@ -52,4 +52,5 @@ see `../toolchain/README.md`.
   importing only msvcrt.dll + KERNEL32; renders a triangle off-screen on the Armada
   (`inside=ff8040, corner=000000, tri~=1128`). Mesa's GL pipeline works on Win2000.
   Build+link+deploy: `./build-osmesa.sh` (needs libmsvcrt_win2k.a; see toolchain/).
-- ⬜ T1b: the DrvXxx ICD shim as an opengl32-loadable DLL (next).
+- ✅ **T1b (2026-08-31):** Mesa built as a drop-in `opengl32.dll` (WGL+WMesa, `build-icd.sh`) — 2.49MB, imports only GDI32/USER32/KERNEL32/msvcrt, exports the undecorated gl*/wgl* ABI. On the Armada it LOADS and the full WGL path runs (wglChoosePixelFormat/SetPixelFormat/CreateContext/MakeCurrent + GL dispatch + glReadPixels, no crash). NOTE: the WMesa *software* GDI readback comes back white (a framebuffer-binding quirk in the throwaway software path); not chased because T2 replaces the backend with mach64 hardware and T1a already proved Mesa's swrast renders correctly (OSMesa).
+- ⬜ T2: wire the mach64 hardware backend (next).

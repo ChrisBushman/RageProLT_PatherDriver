@@ -13,7 +13,7 @@ INC="-I$MESA/include -I$MESA/src/mesa -I$MESA/src/mesa/main -I$MESA/src/mesa/gla
 # pure-C software build; map the Unix ffs to the gcc builtin; quiet warnings.
 # BUILD_GL32: make Mesa's GLAPI symbols plain/dllexport (consistent static linkage)
 # instead of the mingw-default dllimport. ffs: Unix-ism -> gcc builtin.
-DEF="-D_WIN32_WINNT=0x0500 -Dffs=__builtin_ffs -DBUILD_GL32"
+DEF="-D_WIN32_WINNT=0x0500 -DBUILD_GL32 -Dffs=__builtin_ffs"
 CFLAGS="-O2 -w -fno-stack-protector $DEF $INC"
 
 # osmesa.c ships Windows-style backslash #include paths; normalize to '/' so the

@@ -140,7 +140,8 @@ and other QuakeGL games; fix by observed failure.
 | **Bus-master DMA ring** (PAT proof + 3D triangle via DMA) | ✅ 2026-08-31 — `kmd/dma-ring.md` |
 | Win2000 CRT toolchain (msvcrt cross-link + `dllcrt0` full-CRT DLL) | ✅ 2026-08-31 — `toolchain/` (T0: DLL ctors+DllMain+heap proven on HW) |
 | Mesa OSMesa software render on Win2000 (T1a) | ✅ 2026-08-31 — full Mesa builds+renders (`mesa/`) |
-| DrvXxx ICD shim / opengl32 (T1b) | ⬜ next |
+| Mesa `opengl32.dll` builds+loads, WGL contract works on Win2000 (T1b) | ✅ 2026-08-31 — `mesa/build-icd.sh` |
+| Wire mach64 hardware backend into Mesa (T2) | ⬜ next |
 | mach64 backend wired to DMA (T2) | ⬜ |
 | Laser Arena root cause (ATI ICD `atioglxx` NULL-deref) | ✅ 2026-08-31 — Dr. Watson; validates the port |
 | Mesa core building as opengl32 ICD (swrast) | ⬜ |

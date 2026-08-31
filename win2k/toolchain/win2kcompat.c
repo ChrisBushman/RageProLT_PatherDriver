@@ -12,6 +12,10 @@
  * pulling more UCRT inlines.
  */
 
+/* ffs() is a Unix-ism Mesa's imports.c uses; msvcrt lacks it. Provide it as a real
+ * function (a global -Dffs=__builtin_ffs macro collides with <windows.h>). */
+int ffs(int i) { return __builtin_ffs(i); }
+
 /* --- msvcrt double-precision math (from msvcrt.dll via libmsvcrt_win2k.a) --- */
 extern double floor(double), ceil(double), sqrt(double), sin(double), cos(double),
               tan(double), fabs(double), pow(double, double), log(double), exp(double),
