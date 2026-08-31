@@ -24,3 +24,8 @@ i686-w64-mingw32-gcc -O2 -w -D_WIN32_WINNT=0x0500 -nostartfiles -nodefaultlibs -
   -o mach64_present.exe mach64_present.c mach64_winsys.c ../../common/mach64_emit.c \
   -lkernel32 -luser32 -lgcc
 echo "built mach64_present.exe"
+# WGL smoke test for the drop-in opengl32.dll (LoadLibrary's it; deploy the DLL beside it).
+i686-w64-mingw32-gcc -O2 -w -D_WIN32_WINNT=0x0500 -nostartfiles -nodefaultlibs -e _mainstart \
+  -o wgltest.exe wgltest.c \
+  -lkernel32 -luser32 -lgdi32 -lgcc
+echo "built wgltest.exe"
