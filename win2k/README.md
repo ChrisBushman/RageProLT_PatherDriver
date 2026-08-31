@@ -144,7 +144,8 @@ and other QuakeGL games; fix by observed failure.
 | **GL triangle via mach64 HARDWARE through Mesa pipeline (T2 core)** | ✅ 2026-08-31 — `mesa/build-mach64gl.sh` (276 px, inside=ff8040) |
 | Hardware `glClear` + state-robust hooks + **gouraud** (T2) | ✅ 2026-08-31 |
 | **Hardware texturing** (8x8 ARGB8888 mapped, readback-verified) | ✅ 2026-08-31 — `driver/mach64_texproof` |
-| Wire textures into Mesa; present; Laser Arena | ⬜ next |
+| **Textured GL quad via mach64 hardware through Mesa** | ✅ 2026-08-31 |
+| Depth buffer; present to screen; opengl32 integration; Laser Arena | ⬜ next |
 | mach64 backend wired to DMA (T2) | ⬜ |
 | Laser Arena root cause (ATI ICD `atioglxx` NULL-deref) | ✅ 2026-08-31 — Dr. Watson; validates the port |
 | Mesa core building as opengl32 ICD (swrast) | ⬜ |

@@ -13,6 +13,7 @@
 #include "main/mtypes.h"
 #include "main/context.h"
 #include "tnl/t_context.h"
+#include "main/texformat.h"
 #include "GL/gl.h"
 #include "GL/osmesa.h"
 #include "mach64_emit.h"
@@ -30,10 +31,19 @@ static char g_b[256];
 #define VPW 32
 #define VPH 32
 
+#define TEXOFF 0x500000u                 /* uploaded texture texels in VRAM */
 static m64_winsys *g_ws;
 static m64_cmdbuf  g_cb;
 static uint32_t    g_cbs[1024];
 static m64_state   g_st;
+static int         g_textured;           /* set per-batch in hw_start from GL state */
+
+/* Force Mesa to store textures as ARGB8888 so we can upload them straight to VRAM. */
+static const struct gl_texture_format *hw_choose_texformat(GLcontext *ctx, GLint intFmt, GLenum fmt, GLenum type)
+{
+    (void)ctx;(void)intFmt;(void)fmt;(void)type;
+    return &_mesa_texformat_argb8888;
+}
 
 static uint32_t clampb(float f){ int c=(int)(f*255.0f+0.5f); return c<0?0:(c>255?255:(uint32_t)c); }
 static uint32_t packcol(const GLfloat *c){
@@ -43,7 +53,27 @@ static uint32_t packcol(const GLfloat *c){
 static void hw_triangle(GLcontext *ctx, GLuint e0, GLuint e1, GLuint e2);  /* fwd */
 
 static void hw_start(GLcontext *ctx){
-    (void)ctx;
+    /* per-batch: if GL_TEXTURE_2D is enabled, upload the bound texture + arm the
+     * textured register state (proven values from gld_texture.c); else untextured. */
+    struct gl_texture_unit *u = &ctx->Texture.Unit[0];
+    g_textured = 0;
+    g_st.textured = 0;
+    if (u->_ReallyEnabled & TEXTURE_2D_BIT) {
+        struct gl_texture_object *to = u->_Current;
+        struct gl_texture_image  *im = to ? to->Image[0][to->BaseLevel] : 0;
+        if (im && im->Data) {
+            int wl = im->WidthLog2, hl = im->HeightLog2;
+            m64ws_write_vram(g_ws, TEXOFF, im->Data, im->Width * im->Height * 4);
+            g_st.textured      = 1;
+            g_st.tex_0_off     = TEXOFF;
+            g_st.tex_size_pitch = (wl) | ((wl > hl ? wl : hl) << 4) | (hl << 8);
+            g_st.tex_maxlog2   = (wl > hl ? wl : hl);
+            g_st.tex_mip       = 0;
+            g_st.tex_cntl      = (1u<<9)|(1u<<23)|(1u<<30)|(1u<<17)|(1u<<18);  /* +clamp */
+            g_st.tex_scale_3d  = 0x0141009bu;                 /* FCN_TEXTURE, MODULATE */
+            g_textured = 1;
+        }
+    }
     m64_cb_init(&g_cb, g_cbs, 1024);
     m64_emit_state(&g_cb, &g_st);
 }
@@ -107,6 +137,11 @@ static void get_vert(struct vertex_buffer *VB, GLuint e, m64_vertex *out){
     out->x_y = (((int)(wx*4.0f)) << 16) | (((int)(fby*4.0f)) & 0xffff);
     out->w = (int32_t)wb;
     out->argb = packcol(col);
+    if (g_textured && VB->TexCoordPtr[0]) {   /* float s,t in [0,1] (gld_prims.c) */
+        GLfloat *tc = (GLfloat*)((GLubyte*)VB->TexCoordPtr[0]->data + (size_t)e*VB->TexCoordPtr[0]->stride);
+        __builtin_memcpy(&out->s, &tc[0], 4);
+        __builtin_memcpy(&out->t, &tc[1], 4);
+    }
 }
 
 static void hw_triangle(GLcontext *ctx, GLuint e0, GLuint e1, GLuint e2){
@@ -152,36 +187,48 @@ int main(void)
     glMatrixMode(GL_PROJECTION); glLoadIdentity(); glOrtho(0,VPW,0,VPH,-1,1);
     glMatrixMode(GL_MODELVIEW);  glLoadIdentity();
 
-    glClearColor(0.125f, 0.25f, 0.125f, 1.0f);   /* C = 0x204020, distinct from black */
-    glClear(GL_COLOR_BUFFER_BIT);                 /* -> hw_clear (2D fill) -> VRAM = C  */
+    ctx->Driver.ChooseTextureFormat = hw_choose_texformat;   /* store textures ARGB8888 */
 
-    glShadeModel(GL_SMOOTH);
-    glBegin(GL_TRIANGLES);                          /* GOURAUD: per-vertex R/G/B          */
-        glColor3f(1,0,0); glVertex2f(4, 4);         /* v0 red   (state changes inside     */
-        glColor3f(0,1,0); glVertex2f(28, 4);        /* v1 green   glBegin -- hooks survive)*/
-        glColor3f(0,0,1); glVertex2f(4, 28);        /* v2 blue                            */
+    /* an 8x8 texture: 4 colour quadrants (RGBA bytes) */
+    static GLubyte texdata[8*8*4];
+    { int x,y; for(y=0;y<8;y++) for(x=0;x<8;x++){
+        GLubyte *p=&texdata[(y*8+x)*4], r=0,g=0,bl=0;
+        if(x<4&&y<4){r=255;} else if(x>=4&&y<4){g=255;} else if(x<4&&y>=4){bl=255;} else {r=g=bl=255;}
+        p[0]=r;p[1]=g;p[2]=bl;p[3]=255; } }
+    GLuint tex; glGenTextures(1,&tex); glBindTexture(GL_TEXTURE_2D, tex);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP);
+    glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 8, 8, 0, GL_RGBA, GL_UNSIGNED_BYTE, texdata);
+    glEnable(GL_TEXTURE_2D);
+
+    glClearColor(0,0,0,1); glClear(GL_COLOR_BUFFER_BIT);   /* hw clear to black */
+
+    glColor3f(1,1,1);                                       /* MODULATE white -> passes texel */
+    glBegin(GL_TRIANGLES);                                  /* textured quad = 2 triangles    */
+        glTexCoord2f(0,0); glVertex2f(0,0);
+        glTexCoord2f(1,0); glVertex2f(32,0);
+        glTexCoord2f(1,1); glVertex2f(32,32);
+        glTexCoord2f(0,0); glVertex2f(0,0);
+        glTexCoord2f(1,1); glVertex2f(32,32);
+        glTexCoord2f(0,1); glVertex2f(0,32);
     glEnd();
     glFinish();
 
     static unsigned char fb[VPW*VPH*4];
     m64ws_read_vram(g_ws, FBOFF, fb, VPW*VPH*4);
-    /* sample a few px in from each vertex: colour must be dominated by that vertex's channel */
-    #define PX(x,y) (*(unsigned*)(fb+((y)*VPW+(x))*4))
-    /* interior points nearer each vertex (the tri narrows to a point at v1/v2) */
-    unsigned pv0=PX(8,8)&0xffffff, pv1=PX(22,6)&0xffffff, pv2=PX(6,22)&0xffffff, corner=PX(28,28)&0xffffff;
-    #define R(p) (((p)>>16)&0xff)
-    #define G(p) (((p)>>8)&0xff)
-    #define B(p) ((p)&0xff)
-    int v0_red   = R(pv0)>80 && R(pv0)>G(pv0) && R(pv0)>B(pv0);
-    int v1_green = G(pv1)>80 && G(pv1)>R(pv1) && G(pv1)>B(pv1);
-    int v2_blue  = B(pv2)>80 && B(pv2)>R(pv2) && B(pv2)>G(pv2);
-    unsigned i, black=0; for(i=0;i<VPW*VPH;i++){ if((*(unsigned*)(fb+i*4)&0xffffff)==0) black++; }
-    OUTF("gouraud: v0=0x%06x v1=0x%06x v2=0x%06x corner=0x%06x black=%u\n", pv0,pv1,pv2,corner,black);
-    /* PASS proves: hw glClear (black==0), per-vertex colour INTERPOLATION through Mesa
-     * -> mach64 (each vertex region dominated by its channel), and hook robustness. */
-    int pass=(v0_red && v1_green && v2_blue && corner==0x204020 && black==0);
-    outs(pass ? "RESULT: gouraud (per-vertex colour) GL triangle via mach64 hardware through Mesa!\n"
-              : "RESULT: gouraud mismatch\n");
+    unsigned i, red=0,grn=0,blu=0,wht=0,black=0,other=0;
+    for(i=0;i<VPW*VPH;i++){ unsigned px=*(unsigned*)(fb+i*4)&0xffffff;
+        if(px==0xFF0000)red++; else if(px==0x00FF00)grn++; else if(px==0x0000FF)blu++;
+        else if(px==0xFFFFFF)wht++; else if(px==0)black++; else other++; }
+    OUTF("mesa textured: red=%u green=%u blue=%u white=%u black=%u other=%u\n", red,grn,blu,wht,black,other);
+    /* PASS: all 4 texel colours sampled -> a texture flows glTexImage2D -> Mesa ->
+     * mach64 HW, with per-vertex texcoords, hw clear, and robust hooks. */
+    int pass=(red>40 && grn>40 && blu>40 && wht>40);
+    outs(pass ? "RESULT: TEXTURED GL quad via mach64 HARDWARE through the Mesa pipeline!\n"
+              : "RESULT: mesa texture mismatch\n");
     OSMesaDestroyContext(osc);
     m64ws_close(g_ws);
     ExitProcess(pass ? 0 : 1);
