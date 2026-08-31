@@ -1,0 +1,51 @@
+--- wgl.c	2007-11-27 19:18:40
++++ wgl.c	2026-08-31 09:39:19
+@@ -176,7 +176,12 @@
+ 
+ static HDC CurrentHDC = 0;
+ 
++/* mach64 hardware backend (win2k/driver/mach64_icd.c). No-ops that leave the
++ * software WMesa path in charge when the kmd helper is absent. */
++extern void m64icd_make_current(void *hdc);
++extern int  m64icd_swap(void *hdc);
+ 
++
+ WINGDIAPI HGLRC GLAPIENTRY wglCreateContext(HDC hdc)
+ {
+     int i = 0;
+@@ -240,13 +245,15 @@
+ 
+     if (!hdc || !hglrc) {
+ 	WMesaMakeCurrent(NULL, NULL);
++	m64icd_make_current(NULL);
+ 	ctx_current = -1;
+ 	return TRUE;
+     }
+-    
++
+     for ( i = 0; i < MESAWGL_CTX_MAX_COUNT; i++ ) {
+ 	if ( wgl_ctx[i].ctx == (WMesaContext) hglrc ) {
+ 	    WMesaMakeCurrent( (WMesaContext) hglrc, hdc );
++	    m64icd_make_current(hdc);   /* install hw hooks on this ctx (if hw present) */
+ 	    ctx_current = i;
+ 	    return TRUE;
+ 	}
+@@ -371,7 +378,8 @@
+ 
+ WINGDIAPI BOOL GLAPIENTRY wglSwapBuffers(HDC hdc)
+ {
+-    WMesaSwapBuffers(hdc);
++    if (!m64icd_swap(hdc))      /* hardware present; 0 => fall back to software */
++        WMesaSwapBuffers(hdc);
+     return TRUE;
+ }
+ 
+--- mesa.def	2007-06-21 17:10:54
++++ mesa.def	2026-08-31 09:41:42
+@@ -996,3 +996,6 @@
+ 	_tnl_InvalidateState
+ 	_tnl_run_pipeline
+ 	_tnl_program_string
++	m64icd_read_vram
++	m64icd_target
++	m64icd_available
