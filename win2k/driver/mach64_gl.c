@@ -239,6 +239,16 @@ int main(void)
     int pass=(center==0x00FF00 && redonly==0xFF0000 && grn>40 && red>40);
     outs(pass ? "RESULT: DEPTH-TESTED GL via mach64 HARDWARE through Mesa (near occludes far)!\n"
               : "RESULT: mesa depth mismatch\n");
+
+    /* PRESENT: convert the 32bpp GL render to 565 and copy to the VISIBLE scanout
+     * (top-left, 1024x768 16bpp) -- the Mesa-rendered frame appears on the display. */
+    { int x,y; static unsigned short prow[VPW];
+      for(y=0;y<VPH;y++){
+        for(x=0;x<VPW;x++){ unsigned p=*(unsigned*)(fb+(y*VPW+x)*4);
+            unsigned r=(p>>16)&0xff,g=(p>>8)&0xff,bb=p&0xff;
+            prow[x]=(unsigned short)(((r>>3)<<11)|((g>>2)<<5)|(bb>>3)); }
+        m64ws_write_vram(g_ws, (unsigned)y*2048u, prow, VPW*2); } }
+    outs("(GL frame presented to the top-left of the physical screen)\n");
     OSMesaDestroyContext(osc);
     m64ws_close(g_ws);
     ExitProcess(pass ? 0 : 1);
