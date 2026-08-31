@@ -40,6 +40,8 @@ static uint32_t packcol(const GLfloat *c){
     return (clampb(c[3])<<24)|(clampb(c[0])<<16)|(clampb(c[1])<<8)|clampb(c[2]);
 }
 
+static void hw_triangle(GLcontext *ctx, GLuint e0, GLuint e1, GLuint e2);  /* fwd */
+
 static void hw_start(GLcontext *ctx){
     (void)ctx;
     m64_cb_init(&g_cb, g_cbs, 1024);
@@ -51,6 +53,47 @@ static void hw_finish(GLcontext *ctx){
     m64ws_submit(g_ws, &g_cb);
 }
 static void hw_build(GLcontext *ctx, GLuint s, GLuint c, GLuint f){ (void)ctx;(void)s;(void)c;(void)f; }
+
+/* Hardware glClear: 2D solid fill of the render target (the proven fill sequence). */
+static void hw_clear(GLcontext *ctx, GLbitfield buffers)
+{
+    (void)buffers;
+    uint32_t col = packcol(ctx->Color.ClearColor);
+    m64_cmdbuf cb; static uint32_t cbs2[64]; m64_cb_init(&cb, cbs2, 64);
+    m64_reg(&cb, 0x054c, 0);                    /* Z_CNTL          */
+    m64_reg(&cb, 0x05fc, 0);                    /* SCALE_3D_CNTL   */
+    m64_reg(&cb, 0x0730, 0x3);                  /* GUI_TRAJ_CNTL   */
+    m64_reg(&cb, 0x06d0, 0x60060666u);          /* DP_PIX_WIDTH    */
+    m64_reg(&cb, 0x06c4, col & 0xffffff);       /* DP_FRGD_CLR     */
+    m64_reg(&cb, 0x06c8, 0xffffffffu);          /* DP_WRITE_MASK   */
+    m64_reg(&cb, 0x06d4, 0x00070003u);          /* DP_MIX          */
+    m64_reg(&cb, 0x06d8, 0x00000101u);          /* DP_SRC          */
+    m64_reg(&cb, 0x06a8, 0x1fff0000u);          /* SC_LEFT_RIGHT   */
+    m64_reg(&cb, 0x06b4, 0x1fff0000u);          /* SC_TOP_BOTTOM   */
+    m64_reg(&cb, 0x0708, 0);                    /* CLR_CMP_CNTL    */
+    m64_reg(&cb, 0x0500, ((32/8)<<22)|(FBOFF>>3)); /* DST_OFF_PITCH */
+    m64_reg(&cb, 0x06e8, 0);                    /* DST_X_Y         */
+    m64_reg(&cb, 0x06ec, (32<<16)|32);          /* DST_WIDTH_HEIGHT (trigger) */
+    m64_emit_terminator(&cb);
+    m64ws_submit(g_ws, &cb);
+}
+
+/* Wrap Driver.UpdateState so our render hooks survive Mesa's per-validation
+ * re-selection (swsetup resets tnl->Driver.Render.* on every state change). */
+static void (*g_orig_update)(GLcontext *, GLbitfield);
+static void install_render_hooks(GLcontext *ctx)
+{
+    TNLcontext *tnl = TNL_CONTEXT(ctx);
+    tnl->Driver.Render.Start         = hw_start;
+    tnl->Driver.Render.Finish        = hw_finish;
+    tnl->Driver.Render.Triangle      = hw_triangle;
+    tnl->Driver.Render.BuildVertices = hw_build;
+}
+static void hw_update_state(GLcontext *ctx, GLbitfield new_state)
+{
+    if (g_orig_update) g_orig_update(ctx, new_state);
+    install_render_hooks(ctx);      /* reinstall after swsetup clobbers them */
+}
 
 static void get_vert(struct vertex_buffer *VB, GLuint e, m64_vertex *out){
     GLfloat *clip = (GLfloat*)((GLubyte*)VB->ClipPtr->data + (size_t)e*VB->ClipPtr->stride);
@@ -97,38 +140,39 @@ int main(void)
     OSMesaContext osc = OSMesaCreateContext(OSMESA_RGBA, 0);
     if (!osc || !OSMesaMakeCurrent(osc, osbuf, GL_UNSIGNED_BYTE, VPW, VPH)) { outs("OSMesa setup failed\n"); ExitProcess(3); }
 
+    /* install the hardware backend: robust render hooks (via UpdateState wrap) +
+     * hardware glClear. No warm-up/freeze trick -- hooks survive state changes. */
+    GLcontext *ctx = _mesa_get_current_context();
+    g_orig_update = ctx->Driver.UpdateState;
+    ctx->Driver.UpdateState = hw_update_state;
+    ctx->Driver.Clear       = hw_clear;
+    install_render_hooks(ctx);
+
     glViewport(0,0,VPW,VPH);
     glMatrixMode(GL_PROJECTION); glLoadIdentity(); glOrtho(0,VPW,0,VPH,-1,1);
     glMatrixMode(GL_MODELVIEW);  glLoadIdentity();
-    glColor3f(1.0f, 0.5f, 0.25f);
-    glShadeModel(GL_FLAT);
-    glClear(GL_COLOR_BUFFER_BIT);
-    glFinish();                          /* warm up: validate state before we override hooks */
 
-    /* pre-clear the VRAM target so a pass proves OUR hardware triangle */
-    { static unsigned char z[VPW*VPH*4]; unsigned i; for(i=0;i<sizeof(z);i++) z[i]=0; m64ws_write_vram(g_ws, FBOFF, z, VPW*VPH*4); }
+    glClearColor(0.125f, 0.25f, 0.125f, 1.0f);   /* C = 0x204020, distinct from black */
+    glClear(GL_COLOR_BUFFER_BIT);                 /* -> hw_clear (2D fill) -> VRAM = C  */
 
-    /* override tnl render hooks -> hardware (no GL state changes follow, so Mesa
-     * won't re-validate and clobber them before the flush) */
-    TNLcontext *tnl = TNL_CONTEXT(_mesa_get_current_context());
-    tnl->Driver.Render.Start         = hw_start;
-    tnl->Driver.Render.Finish        = hw_finish;
-    tnl->Driver.Render.Triangle      = hw_triangle;
-    tnl->Driver.Render.BuildVertices = hw_build;
-
-    glBegin(GL_TRIANGLES);
+    glColor3f(1.0f, 0.5f, 0.25f);                 /* A = 0xff8040; a STATE CHANGE       */
+    glBegin(GL_TRIANGLES);                         /* if hooks survive it, tri renders   */
         glVertex2f(4, 4); glVertex2f(28, 4); glVertex2f(4, 28);
     glEnd();
-    glFinish();                          /* -> hw_start/hw_triangle/hw_finish -> DMA */
+    glFinish();
 
     static unsigned char fb[VPW*VPH*4];
     m64ws_read_vram(g_ws, FBOFF, fb, VPW*VPH*4);
-    unsigned i, match=0, bg=0;
-    for (i=0;i<VPW*VPH;i++){ unsigned px=*(unsigned*)(fb+i*4)&0xffffff; if(px==0xFF8040)match++; else if(px==0)bg++; }
+    unsigned i, mA=0, mC=0, black=0;
+    for (i=0;i<VPW*VPH;i++){ unsigned px=*(unsigned*)(fb+i*4)&0xffffff;
+        if(px==0xFF8040)mA++; else if(px==0x204020)mC++; else if(px==0)black++; }
     unsigned inside=*(unsigned*)(fb+(10*VPW+10)*4)&0xffffff, corner=*(unsigned*)(fb+(28*VPW+28)*4)&0xffffff;
-    OUTF("mesa->hw tri: %u px=color %u px=bg inside=0x%06x corner=0x%06x\n", match,bg,inside,corner);
-    int pass=(match>60 && bg>60 && inside==0xFF8040 && corner==0);
-    outs(pass ? "RESULT: GL triangle rendered by mach64 HARDWARE via Mesa pipeline!\n"
+    OUTF("mesa->hw: tri(A)=%u px  clear(C)=%u px  black=%u  inside=0x%06x corner=0x%06x\n",
+         mA, mC, black, inside, corner);
+    /* PASS proves: hw glClear filled the target (no black left), the triangle rendered,
+     * AND the hooks survived the glColor state change (no warm-up freeze). */
+    int pass=(mA>60 && mC>60 && black==0 && inside==0xFF8040 && corner==0x204020);
+    outs(pass ? "RESULT: hw glClear + state-robust GL triangle via mach64 through Mesa!\n"
               : "RESULT: mesa->hw mismatch\n");
     OSMesaDestroyContext(osc);
     m64ws_close(g_ws);
