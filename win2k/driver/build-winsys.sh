@@ -19,3 +19,8 @@ i686-w64-mingw32-gcc -O2 -w -D_WIN32_WINNT=0x0500 -nostartfiles -nodefaultlibs -
   -o mach64_depthproof.exe mach64_depthproof.c mach64_winsys.c ../../common/mach64_emit.c \
   -lkernel32 -luser32 -lgcc
 echo "built mach64_depthproof.exe"
+i686-w64-mingw32-gcc -O2 -w -D_WIN32_WINNT=0x0500 -nostartfiles -nodefaultlibs -e _mainstart \
+  -I../../common -I. \
+  -o mach64_present.exe mach64_present.c mach64_winsys.c ../../common/mach64_emit.c \
+  -lkernel32 -luser32 -lgcc
+echo "built mach64_present.exe"
