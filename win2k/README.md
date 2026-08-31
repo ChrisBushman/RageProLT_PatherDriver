@@ -134,7 +134,9 @@ and other QuakeGL games; fix by observed failure.
 | Architecture + reuse boundary | ✅ this doc |
 | Phase 0 target intel (e500 chip ID / apertures) | ✅ `phase0-target-intel.md` — DEV_4C4D "LM" Rage Mobility-P; FB 16MB@0x80000000, MMIO 4KB@0x81000000, IO 0x3000, IRQ11 |
 | `kmd/` kernel helper (MMIO first light) | ✅ 2026-08-31 — `mach64kmd.sys` (MinGW cross-built, loads unsigned on Win2000) read `CONFIG_CHIP_ID=0x64004c4d` ("LM", rev 0x64) via `MmMapIoSpace(0x81000000)` |
-| MMIO-mode first triangle on Rage Mobility P | ⬜ |
+| VRAM block I/O + combined FB/reg map; VRAM=8MB | ✅ 2026-08-31 |
+| **Off-screen 2D engine fill** (readback-verified, coexists w/ ati2mpab) | ✅ 2026-08-31 — `kmd/engine-proof.md` (1024/1024 px) |
+| MMIO-mode off-screen 3D triangle on Rage Mobility P | ⬜ next |
 | Mesa core building as opengl32 ICD (swrast) | ⬜ |
 | mach64 hardware backend wired | ⬜ |
 | Present / double buffer | ⬜ |
