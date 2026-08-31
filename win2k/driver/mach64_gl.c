@@ -155,25 +155,33 @@ int main(void)
     glClearColor(0.125f, 0.25f, 0.125f, 1.0f);   /* C = 0x204020, distinct from black */
     glClear(GL_COLOR_BUFFER_BIT);                 /* -> hw_clear (2D fill) -> VRAM = C  */
 
-    glColor3f(1.0f, 0.5f, 0.25f);                 /* A = 0xff8040; a STATE CHANGE       */
-    glBegin(GL_TRIANGLES);                         /* if hooks survive it, tri renders   */
-        glVertex2f(4, 4); glVertex2f(28, 4); glVertex2f(4, 28);
+    glShadeModel(GL_SMOOTH);
+    glBegin(GL_TRIANGLES);                          /* GOURAUD: per-vertex R/G/B          */
+        glColor3f(1,0,0); glVertex2f(4, 4);         /* v0 red   (state changes inside     */
+        glColor3f(0,1,0); glVertex2f(28, 4);        /* v1 green   glBegin -- hooks survive)*/
+        glColor3f(0,0,1); glVertex2f(4, 28);        /* v2 blue                            */
     glEnd();
     glFinish();
 
     static unsigned char fb[VPW*VPH*4];
     m64ws_read_vram(g_ws, FBOFF, fb, VPW*VPH*4);
-    unsigned i, mA=0, mC=0, black=0;
-    for (i=0;i<VPW*VPH;i++){ unsigned px=*(unsigned*)(fb+i*4)&0xffffff;
-        if(px==0xFF8040)mA++; else if(px==0x204020)mC++; else if(px==0)black++; }
-    unsigned inside=*(unsigned*)(fb+(10*VPW+10)*4)&0xffffff, corner=*(unsigned*)(fb+(28*VPW+28)*4)&0xffffff;
-    OUTF("mesa->hw: tri(A)=%u px  clear(C)=%u px  black=%u  inside=0x%06x corner=0x%06x\n",
-         mA, mC, black, inside, corner);
-    /* PASS proves: hw glClear filled the target (no black left), the triangle rendered,
-     * AND the hooks survived the glColor state change (no warm-up freeze). */
-    int pass=(mA>60 && mC>60 && black==0 && inside==0xFF8040 && corner==0x204020);
-    outs(pass ? "RESULT: hw glClear + state-robust GL triangle via mach64 through Mesa!\n"
-              : "RESULT: mesa->hw mismatch\n");
+    /* sample a few px in from each vertex: colour must be dominated by that vertex's channel */
+    #define PX(x,y) (*(unsigned*)(fb+((y)*VPW+(x))*4))
+    /* interior points nearer each vertex (the tri narrows to a point at v1/v2) */
+    unsigned pv0=PX(8,8)&0xffffff, pv1=PX(22,6)&0xffffff, pv2=PX(6,22)&0xffffff, corner=PX(28,28)&0xffffff;
+    #define R(p) (((p)>>16)&0xff)
+    #define G(p) (((p)>>8)&0xff)
+    #define B(p) ((p)&0xff)
+    int v0_red   = R(pv0)>80 && R(pv0)>G(pv0) && R(pv0)>B(pv0);
+    int v1_green = G(pv1)>80 && G(pv1)>R(pv1) && G(pv1)>B(pv1);
+    int v2_blue  = B(pv2)>80 && B(pv2)>R(pv2) && B(pv2)>G(pv2);
+    unsigned i, black=0; for(i=0;i<VPW*VPH;i++){ if((*(unsigned*)(fb+i*4)&0xffffff)==0) black++; }
+    OUTF("gouraud: v0=0x%06x v1=0x%06x v2=0x%06x corner=0x%06x black=%u\n", pv0,pv1,pv2,corner,black);
+    /* PASS proves: hw glClear (black==0), per-vertex colour INTERPOLATION through Mesa
+     * -> mach64 (each vertex region dominated by its channel), and hook robustness. */
+    int pass=(v0_red && v1_green && v2_blue && corner==0x204020 && black==0);
+    outs(pass ? "RESULT: gouraud (per-vertex colour) GL triangle via mach64 hardware through Mesa!\n"
+              : "RESULT: gouraud mismatch\n");
     OSMesaDestroyContext(osc);
     m64ws_close(g_ws);
     ExitProcess(pass ? 0 : 1);
