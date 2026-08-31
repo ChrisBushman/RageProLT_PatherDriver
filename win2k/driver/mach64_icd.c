@@ -153,6 +153,9 @@ static void hw_triangle(GLcontext *ctx, GLuint e0, GLuint e1, GLuint e2)
     m64_emit_triangle(&g_cb,&v[0],&v[1],&v[2]);
 }
 
+static void hw_quad(GLcontext *ctx, GLuint e0, GLuint e1, GLuint e2, GLuint e3)
+{ hw_triangle(ctx,e0,e1,e2); hw_triangle(ctx,e0,e2,e3); }
+
 /* Hardware glClear.  NOTE: Driver.Clear's mask uses Mesa's internal BUFFER_BIT_*
  * flags, NOT the GL_*_BUFFER_BIT tokens (that mismatch silently no-op'd the colour
  * clear in mach64_gl.c -- masked there because clear-black == stale-black). */
@@ -180,6 +183,7 @@ static void install_render_hooks(GLcontext *ctx)
     tnl->Driver.Render.Start         = hw_start;
     tnl->Driver.Render.Finish        = hw_finish;
     tnl->Driver.Render.Triangle      = hw_triangle;
+    tnl->Driver.Render.Quad          = hw_quad;      /* UI often uses GL_QUADS */
     tnl->Driver.Render.BuildVertices = hw_build;
 }
 static void hw_update_state(GLcontext *ctx, GLbitfield new_state)
