@@ -41,7 +41,34 @@ dllcrt0). Compile recipe established (imports.c builds; `-Dffs=__builtin_ffs` et
     app selects our software pixelformat, before hardware. (ATI's stock ICD
     atioglxx.dll is what we replace — it NULL-derefs; see the Laser Arena finding.)
 
-**T2 — wire the mach64 backend.** Replace swrast with the mach64 render backend →
+**T2 — wire the mach64 backend. IN PROGRESS (2026-08-31).**
+
+Port model (Mesa's mach64 DRI driver is the blueprint; it uses the standard classic
+hw-driver pattern: `_swrast/_tnl/_swsetup_CreateContext` + `mach64InitTriFuncs` /
+`mach64DDInitStateFuncs` / `mach64DDInitSpanFuncs` / `mach64DDInitState`). We keep the
+device-independent render logic and swap the DRI device layer for our kmd winsys:
+
+| Mesa `drivers/dri/mach64/` file | T2 disposition |
+|---|---|
+| mach64_tris.c, mach64_vb.c, mach64_native_vb.c (+ *tmp.h) | KEEP — vertex build + tnl render hooks (emit to a buffer) |
+| mach64_state.c, mach64_tex*.c, mach64_dd.c | KEEP — GL state -> mach64 registers (cross-check re-notes) |
+| mach64_ioctl.c (DRM DMA submit) | REPLACE with `mach64_winsys.c` (`m64ws_submit` -> kmd bus-master DMA) |
+| mach64_span.c (framebuffer read/write) | REPLACE with `m64ws_read_vram/m64ws_write_vram` |
+| mach64_screen.c, mach64_lock.c, DRI context init | REPLACE with a WGL/kmd context (no DRI/DRM/SAREA/X) |
+
+**DONE:** `mach64_winsys.{c,h}` — the user-mode device layer (the kmd client) the
+ported driver calls: open `\\.\Mach64Kmd`, map FB+regs, `m64ws_submit` (bus-master
+DMA a `common/mach64_emit` stream), reg + VRAM read/write. Proven by
+`mach64_winsys_test` on the Armada (triangle: 276 px, inside=ff8040) -- the same
+hardware triangle, now via the reusable library. Build: `./build-winsys.sh`.
+
+**NEXT:** stand up a minimal Mesa "mach64" context (classic driver init minus DRI)
+that installs tnl render hooks emitting via `common/mach64_emit` -> `m64ws_submit`,
+and `Driver.Clear` via a `m64ws` fill -- first hardware triangle through the full
+Mesa GL pipeline. Then state/tex, then present (WGL SwapBuffers -> m64ws blit/flip).
+
+---
+_Original T2 note:_ **T2 — wire the mach64 backend.** Replace swrast with the mach64 render backend →
 `common/mach64_emit` → `IOCTL_MACH64_DMASUBMIT`. Off-screen before on-screen. Apply
 the `docs/re-notes/` fixes (Z_CNTL, SETUP_CNTL gouraud, texture-blend audit) as each
 path lights up — most are already encoded in `common/`.
