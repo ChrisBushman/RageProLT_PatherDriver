@@ -21,6 +21,7 @@
 #include "main/texformat.h"
 #include "tnl/t_context.h"
 #include "GL/gl.h"
+#include "wmesadef.h"      /* struct wmesa_framebuffer: back-buffer DIB (pbPixels) */
 #include "mach64_emit.h"
 #include "mach64_winsys.h"
 
@@ -32,6 +33,21 @@ int m64icd_available(void)
 {
     if (!g_probed) { g_probed = 1; g_ws = m64ws_open(); g_have = g_ws ? 1 : 0; }
     return g_have;
+}
+
+/* --- crash-forensic log (append+flush per line so it survives a fault) --- */
+__declspec(dllimport) int WINAPIV wsprintfA(char*,const char*,...);
+static int g_logn;
+static void icdlog(const char *fmt, unsigned a, unsigned b, unsigned c, unsigned d)
+{
+    char buf[160]; DWORD wr;
+    HANDLE h = CreateFileA("C:\\m64icd.log", GENERIC_WRITE, FILE_SHARE_READ|FILE_SHARE_WRITE,
+                           0, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, 0);
+    if (h==INVALID_HANDLE_VALUE) return;
+    SetFilePointer(h, 0, 0, FILE_END);
+    wsprintfA(buf, fmt, a, b, c, d);
+    WriteFile(h, buf, lstrlenA(buf), &wr, 0);
+    CloseHandle(h);
 }
 
 /* --- debug exports (for hwicdtest): read VRAM / query the target via the DLL's
@@ -231,49 +247,51 @@ void m64icd_make_current(void *hdc_v)
     ctx->Driver.ChooseTextureFormat = hw_choose_texformat;
     install_render_hooks(ctx);
     g_active = 1;
+    g_logn = 0;
+    icdlog("MC W=%u H=%u pitch=%u fboff=0x%x\n", (unsigned)g_W,(unsigned)g_H,g_pitch,g_fboff);
 }
 
-/* Present the 32bpp VRAM target to the window's screen rect on the RGB565 scanout.
- * Returns 1 if it presented via hardware, 0 to let wgl.c fall back to WMesa. */
-#define MACH64_CRTC_OFF_PITCH 0x0414
+/* Present: copy the hardware VRAM target into WMesa's back-buffer DIB, then
+ * return 0 so wgl.c calls WMesaSwapBuffers -- its BitBlt(DIB->window) is the
+ * proven present path (respects the game's window/flip management).  This avoids
+ * writing the live scanout directly (which fought the game's double-buffering and
+ * risked out-of-bounds VRAM writes).  Both target and DIB are TOP-DOWN.
+ * DIB format (WMesa, BI_RGB): 32bpp = XRGB8888, 16bpp = 5-5-5 (BGR16). */
+static unsigned char g_rb[1280*1024*4];            /* readback (<=~1.3M px) */
 int m64icd_swap(void *hdc_v)
 {
-    HDC hdc=(HDC)hdc_v;
+    (void)hdc_v;
     if (!g_active || !g_have) return 0;
+    GLcontext *ctx = _mesa_get_current_context();
+    if (!ctx || !ctx->DrawBuffer) return 0;
+    struct wmesa_framebuffer *fb = (struct wmesa_framebuffer *)ctx->DrawBuffer;
+    unsigned char *dib = fb->pbPixels;
+    if (!dib) return 0;                            /* single-buffered: nothing to blit */
 
-    /* live scanout geometry */
-    unsigned op=m64ws_reg_read(g_ws, MACH64_CRTC_OFF_PITCH);
-    unsigned sc_pitch_px=((op>>22)&0x3ff)*8u;      /* pixels */
-    unsigned sc_base=(op&0x3fffffu)*8u;            /* bytes  */
-    if (sc_pitch_px==0) return 0;
-    unsigned sc_pitch_b=sc_pitch_px*2u;            /* 16bpp */
-    int scrW=GetSystemMetrics(SM_CXSCREEN), scrH=GetSystemMetrics(SM_CYSCREEN);
+    int W = fb->Base.Width, H = fb->Base.Height;
+    if (g_logn < 8) { g_logn++;
+        icdlog("SWAP bpp=%u stride=%u W=%u H=%u\n",
+               (unsigned)fb->cColorBits,(unsigned)fb->ScanWidth,(unsigned)W,(unsigned)H); }
+    if (W > g_W) W = g_W;  if (H > g_H) H = g_H;
+    unsigned rows = (unsigned)H;
+    if (g_pitch*rows*4u > sizeof(g_rb)) rows = sizeof(g_rb)/(g_pitch*4u);
+    m64ws_read_vram(g_ws, g_fboff, g_rb, g_pitch*rows*4u);   /* whole target, one call */
 
-    /* window origin on screen */
-    int ox=0, oy=0;
-    HWND hwnd=hdc?WindowFromDC(hdc):0;
-    if (hwnd){ POINT p; p.x=0; p.y=0; if (ClientToScreen(hwnd,&p)){ ox=p.x; oy=p.y; } }
-
-    static unsigned char  srow[2048*4];            /* one target row, 32bpp */
-    static unsigned short drow[2048];              /* one screen row, 565   */
-    int y;
-    for (y=0; y<g_H; y++) {
-        int sy=oy+y; if (sy<0||sy>=scrH) continue;
-        m64ws_read_vram(g_ws, g_fboff + (unsigned)y*g_pitch*4u, srow, (unsigned)g_W*4u);
-        int x, n=g_W;
-        for (x=0; x<n; x++){ unsigned px=*(unsigned*)(srow+x*4);
-            unsigned r=(px>>16)&0xff,gg=(px>>8)&0xff,b=px&0xff;
-            drow[x]=(unsigned short)(((r>>3)<<11)|((gg>>2)<<5)|(b>>3)); }
-        /* horizontal clip to the screen */
-        int startx=ox; int cnt=n;
-        if (startx<0){ int skip=-startx; if(skip>=cnt){continue;} startx=0; }
-        if (startx+cnt>scrW) cnt=scrW-startx;
-        if (cnt<=0) continue;
-        unsigned src_x = (ox<0)? (unsigned)(-ox):0;
-        m64ws_write_vram(g_ws, sc_base + (unsigned)sy*sc_pitch_b + (unsigned)startx*2u,
-                         drow+src_x, (unsigned)cnt*2u);
+    unsigned stride = fb->ScanWidth; int bpp = fb->cColorBits;
+    unsigned y; int x;
+    for (y=0; y<rows; y++) {
+        unsigned char *s = g_rb + y*g_pitch*4u;
+        unsigned char *d = dib + y*stride;
+        if (bpp == 32) {
+            for (x=0; x<W; x++) *(unsigned*)(d+x*4) = *(unsigned*)(s+x*4) & 0xffffff;
+        } else {                                   /* 16bpp, 5-5-5 to match BGR16 */
+            unsigned short *dw = (unsigned short*)d;
+            for (x=0; x<W; x++){ unsigned px=*(unsigned*)(s+x*4);
+                unsigned r=(px>>16)&0xff,gg=(px>>8)&0xff,b=px&0xff;
+                dw[x]=(unsigned short)(((r>>3)<<10)|((gg>>3)<<5)|(b>>3)); }
+        }
     }
-    return 1;
+    return 0;   /* wgl.c now calls WMesaSwapBuffers -> BitBlt DIB to the window */
 }
 
 /* debug export: current target layout (for hwicdtest) */
