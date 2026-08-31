@@ -32,6 +32,14 @@ static char g_b[256];
 #define VPH 32
 
 #define TEXOFF 0x500000u                 /* uploaded texture texels in VRAM */
+#define ZOFF   0x600000u                 /* 16-bit Z buffer (32x32x2)       */
+#define Z_EN (1u<<0)
+#define Z_MASK_EN (1u<<8)
+static unsigned z_testfunc(GLenum f){   /* GL depth func -> Z_CNTL test field [6:4] */
+    switch(f){ case GL_NEVER:return 0u<<4; case GL_LESS:return 1u<<4; case GL_LEQUAL:return 2u<<4;
+    case GL_EQUAL:return 3u<<4; case GL_GEQUAL:return 4u<<4; case GL_GREATER:return 5u<<4;
+    case GL_NOTEQUAL:return 6u<<4; default:return 7u<<4; }  /* GL_ALWAYS */
+}
 static m64_winsys *g_ws;
 static m64_cmdbuf  g_cb;
 static uint32_t    g_cbs[1024];
@@ -74,6 +82,11 @@ static void hw_start(GLcontext *ctx){
             g_textured = 1;
         }
     }
+    /* depth state from GL */
+    if (ctx->Depth.Test) {
+        g_st.z_cntl = Z_EN | z_testfunc(ctx->Depth.Func) | (ctx->Depth.Mask ? Z_MASK_EN : 0);
+        g_st.z_off_pitch = ((32/8)<<22)|(ZOFF>>3);
+    } else { g_st.z_cntl = 0; g_st.z_off_pitch = 0; }
     m64_cb_init(&g_cb, g_cbs, 1024);
     m64_emit_state(&g_cb, &g_st);
 }
@@ -87,7 +100,14 @@ static void hw_build(GLcontext *ctx, GLuint s, GLuint c, GLuint f){ (void)ctx;(v
 /* Hardware glClear: 2D solid fill of the render target (the proven fill sequence). */
 static void hw_clear(GLcontext *ctx, GLbitfield buffers)
 {
-    (void)buffers;
+    /* Z clear: CPU-fill the 16-bit Z buffer to the GL clear-depth value. */
+    if (buffers & GL_DEPTH_BUFFER_BIT) {
+        static unsigned short zb[32*32]; unsigned i;
+        unsigned short zc = (unsigned short)(ctx->Depth.Clear * 65535.0 + 0.5);
+        for (i=0;i<32*32;i++) zb[i]=zc;
+        m64ws_write_vram(g_ws, ZOFF, zb, sizeof(zb));
+    }
+    if (!(buffers & GL_COLOR_BUFFER_BIT)) return;
     uint32_t col = packcol(ctx->Color.ClearColor);
     m64_cmdbuf cb; static uint32_t cbs2[64]; m64_cb_init(&cb, cbs2, 64);
     m64_reg(&cb, 0x054c, 0);                    /* Z_CNTL          */
@@ -137,6 +157,9 @@ static void get_vert(struct vertex_buffer *VB, GLuint e, m64_vertex *out){
     out->x_y = (((int)(wx*4.0f)) << 16) | (((int)(fby*4.0f)) & 0xffff);
     out->w = (int32_t)wb;
     out->argb = packcol(col);
+    { float wz = clip[2]*iw*0.5f + 0.5f;               /* clip z -> window z [0,1] */
+      int zi; if(wz<0)wz=0; if(wz>1)wz=1; zi=(int)(wz*65535.0f+0.5f);
+      out->z = (int32_t)((uint32_t)zi << 15); }        /* 17.15 (harmless if Z off) */
     if (g_textured && VB->TexCoordPtr[0]) {   /* float s,t in [0,1] (gld_prims.c) */
         GLfloat *tc = (GLfloat*)((GLubyte*)VB->TexCoordPtr[0]->data + (size_t)e*VB->TexCoordPtr[0]->stride);
         __builtin_memcpy(&out->s, &tc[0], 4);
@@ -187,48 +210,35 @@ int main(void)
     glMatrixMode(GL_PROJECTION); glLoadIdentity(); glOrtho(0,VPW,0,VPH,-1,1);
     glMatrixMode(GL_MODELVIEW);  glLoadIdentity();
 
-    ctx->Driver.ChooseTextureFormat = hw_choose_texformat;   /* store textures ARGB8888 */
+    glEnable(GL_DEPTH_TEST); glDepthFunc(GL_LESS);
+    glClearColor(0,0,0,1);
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);    /* hw clear colour + Z */
 
-    /* an 8x8 texture: 4 colour quadrants (RGBA bytes) */
-    static GLubyte texdata[8*8*4];
-    { int x,y; for(y=0;y<8;y++) for(x=0;x<8;x++){
-        GLubyte *p=&texdata[(y*8+x)*4], r=0,g=0,bl=0;
-        if(x<4&&y<4){r=255;} else if(x>=4&&y<4){g=255;} else if(x<4&&y>=4){bl=255;} else {r=g=bl=255;}
-        p[0]=r;p[1]=g;p[2]=bl;p[3]=255; } }
-    GLuint tex; glGenTextures(1,&tex); glBindTexture(GL_TEXTURE_2D, tex);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP);
-    glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 8, 8, 0, GL_RGBA, GL_UNSIGNED_BYTE, texdata);
-    glEnable(GL_TEXTURE_2D);
-
-    glClearColor(0,0,0,1); glClear(GL_COLOR_BUFFER_BIT);   /* hw clear to black */
-
-    glColor3f(1,1,1);                                       /* MODULATE white -> passes texel */
-    glBegin(GL_TRIANGLES);                                  /* textured quad = 2 triangles    */
-        glTexCoord2f(0,0); glVertex2f(0,0);
-        glTexCoord2f(1,0); glVertex2f(32,0);
-        glTexCoord2f(1,1); glVertex2f(32,32);
-        glTexCoord2f(0,0); glVertex2f(0,0);
-        glTexCoord2f(1,1); glVertex2f(32,32);
-        glTexCoord2f(0,1); glVertex2f(0,32);
+    /* NEAR green triangle (window z 0.3 <- object z 0.4 under this ortho), then FAR red
+     * (window z 0.7 <- object z -0.4) overlapping it. GL_LESS must keep the near green
+     * where they overlap, even though red is drawn second. */
+    glColor3f(0,1,0);
+    glBegin(GL_TRIANGLES);
+        glVertex3f(8,10,0.4f); glVertex3f(24,10,0.4f); glVertex3f(16,26,0.4f);
+    glEnd();
+    glColor3f(1,0,0);
+    glBegin(GL_TRIANGLES);
+        glVertex3f(2,2,-0.4f); glVertex3f(30,2,-0.4f); glVertex3f(16,30,-0.4f);
     glEnd();
     glFinish();
 
     static unsigned char fb[VPW*VPH*4];
     m64ws_read_vram(g_ws, FBOFF, fb, VPW*VPH*4);
-    unsigned i, red=0,grn=0,blu=0,wht=0,black=0,other=0;
-    for(i=0;i<VPW*VPH;i++){ unsigned px=*(unsigned*)(fb+i*4)&0xffffff;
-        if(px==0xFF0000)red++; else if(px==0x00FF00)grn++; else if(px==0x0000FF)blu++;
-        else if(px==0xFFFFFF)wht++; else if(px==0)black++; else other++; }
-    OUTF("mesa textured: red=%u green=%u blue=%u white=%u black=%u other=%u\n", red,grn,blu,wht,black,other);
-    /* PASS: all 4 texel colours sampled -> a texture flows glTexImage2D -> Mesa ->
-     * mach64 HW, with per-vertex texcoords, hw clear, and robust hooks. */
-    int pass=(red>40 && grn>40 && blu>40 && wht>40);
-    outs(pass ? "RESULT: TEXTURED GL quad via mach64 HARDWARE through the Mesa pipeline!\n"
-              : "RESULT: mesa texture mismatch\n");
+    #define PX(x,y) (*(unsigned*)(fb+((y)*VPW+(x))*4)&0xffffff)
+    unsigned center=PX(16,16), redonly=PX(16,5);
+    unsigned i, grn=0, red=0; for(i=0;i<VPW*VPH;i++){ unsigned px=*(unsigned*)(fb+i*4)&0xffffff;
+        if(px==0x00FF00)grn++; else if(px==0xFF0000)red++; }
+    OUTF("mesa depth: center(16,16)=0x%06x  red-only(16,5)=0x%06x  green=%u red=%u\n", center,redonly,grn,red);
+    /* PASS: near green survives at the overlap (occludes the later far red) -> hardware
+     * depth testing driven by GL_DEPTH_TEST/glDepthFunc through the Mesa pipeline. */
+    int pass=(center==0x00FF00 && redonly==0xFF0000 && grn>40 && red>40);
+    outs(pass ? "RESULT: DEPTH-TESTED GL via mach64 HARDWARE through Mesa (near occludes far)!\n"
+              : "RESULT: mesa depth mismatch\n");
     OSMesaDestroyContext(osc);
     m64ws_close(g_ws);
     ExitProcess(pass ? 0 : 1);
