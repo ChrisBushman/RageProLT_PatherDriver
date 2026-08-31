@@ -24,3 +24,6 @@ tools/mach64_*
 # Windows cross-compiled output (rebuild via win2k/kmd/Makefile)
 win2k/**/*.exe
 win2k/**/*.sys
+win2k/**/*.dll
+win2k/**/*.a
+win2k/**/*.def
