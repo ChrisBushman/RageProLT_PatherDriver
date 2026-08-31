@@ -30,6 +30,7 @@ rm -f icd-objs.tmp
 for o in "$OBJ"/*.o; do
   case "$o" in
     */crt0exe.o|*/test_osmesa.o|*/osmesa.o|*/dllcrt0.o|*/win2kcompat.o|*/wgl.o|*/wmesa.o) continue;;
+    */mach64_gl.o|*/mach64_emit_c.o|*/mach64_winsys.o) continue;;  # EXE/hw-backend objs, not the sw DLL
   esac
   printf '%s\n' "$o" >> icd-objs.tmp
 done
