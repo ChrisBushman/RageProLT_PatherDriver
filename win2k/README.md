@@ -137,8 +137,8 @@ and other QuakeGL games; fix by observed failure.
 | VRAM block I/O + combined FB/reg map; VRAM=8MB | ✅ 2026-08-31 |
 | **Off-screen 2D engine fill** (readback-verified, coexists w/ ati2mpab) | ✅ 2026-08-31 — `kmd/engine-proof.md` (1024/1024 px) |
 | **Off-screen 3D triangle via `common/mach64_emit`** (pseudo-DMA, readback-verified) | ✅ 2026-08-31 — `kmd/engine-proof.md` (276 tri px + clean bg) |
-| Bus-master DMA ring | ⬜ next |
-| Mesa winsys integration | ⬜ |
+| **Bus-master DMA ring** (PAT proof + 3D triangle via DMA) | ✅ 2026-08-31 — `kmd/dma-ring.md` |
+| Mesa winsys integration | ⬜ next |
 | Mesa core building as opengl32 ICD (swrast) | ⬜ |
 | mach64 hardware backend wired | ⬜ |
 | Present / double buffer | ⬜ |

@@ -36,6 +36,26 @@
  * FIFO flow control (drain every 16 writes) + idle waits -- for >16-write batches
  * like a 3D triangle. Input: count, gui_stat_mapoff, fifo_stat_mapoff, then pairs. */
 #define IOCTL_MACH64_SUBMIT CTL_CODE(MACH64_TYPE, 0x807, METHOD_BUFFERED, FILE_ANY_ACCESS)
+/* bus-master DMA submit: copy an LE command stream into contiguous DMA memory,
+ * build the descriptor ring, activate bus-mastering, kick, wait, restore ATI's
+ * BUS_CNTL/SRC_CNTL. Input: reg_bias, stream_len, stream bytes (<=4092). */
+#define IOCTL_MACH64_DMASUBMIT CTL_CODE(MACH64_TYPE, 0x808, METHOD_BUFFERED, FILE_ANY_ACCESS)
+
+/* mach64 bus-master registers (common/mach64_regs.h) */
+#define M64_BUS_CNTL            0x04a0
+#define M64_BUS_MASTER_DIS      (1u << 6)
+#define M64_BUS_EXT_REG_EN      (1u << 27)
+#define M64_SRC_CNTL            0x05b4
+#define M64_SRC_BM_ENABLE       (1u << 8)
+#define M64_SRC_BM_SYNC         (1u << 9)
+#define M64_SRC_BM_OP_SYS_TO_REG (3u << 10)
+#define M64_BM_GUI_TABLE_CMD    0x064c
+#define M64_DST_HEIGHT_WIDTH    0x0518
+#define M64_FIFO_STAT           0x0710
+#define M64_GUI_STAT            0x0738
+#define M64_APERTURE_BM_ADDR    0x7ffe48u   /* APERTURE_OFFSET(0x7ff800)+BM_ADDR(0x648) */
+#define M64_DMA_HOLD_OFFSET     (1u << 30)
+#define M64_DMA_EOL             (1u << 31)
 
 #define MACH64_MAXBLK  0x10000u   /* 64KB per block IOCTL */
 #define MACH64_MAXREGS 256u       /* pairs per WRREGS      */
@@ -43,7 +63,12 @@
 
 /* IOCTL payloads (read fields individually to avoid aggregate-copy memcpy under
  * -nostdlib). MAP_IN: phys(8) + size(4). RD_IN: off(4)->out ULONG. WR_IN: off,val. */
-typedef struct _DEVEXT { PVOID mapped; ULONG mapsize; } DEVEXT;
+typedef struct _DEVEXT {
+    PVOID mapped; ULONG mapsize;
+    PVOID dma_va;  ULONG dma_size;         /* contiguous DMA block (cached; x86 snoops) */
+    PVOID ring_va; ULONG ring_phys;        /* 16KB-aligned descriptor ring             */
+    PVOID cmd_va;  ULONG cmd_phys;         /* command-stream buffer                     */
+} DEVEXT;
 
 static void mach64_unmap(DEVEXT *ex)
 {
@@ -205,6 +230,65 @@ static NTSTATUS NTAPI DispIoctl(PDEVICE_OBJECT dev, PIRP irp)
         st = STATUS_SUCCESS;
         break;
     }
+    case IOCTL_MACH64_DMASUBMIT: {
+        if (inlen < 8) { st = STATUS_BUFFER_TOO_SMALL; break; }
+        ULONG reg_bias = *(ULONG UNALIGNED *)(buf + 0);
+        ULONG slen     = *(ULONG UNALIGNED *)(buf + 4);
+        if (slen == 0 || (slen & 3) || slen > 4092 || inlen < 8 + slen) { st = STATUS_INVALID_PARAMETER; break; }
+        if (!ex->mapped || reg_bias + 0x1000 > ex->mapsize) { st = STATUS_INVALID_PARAMETER; break; }
+
+        /* lazily allocate the DMA block: 64KB contiguous, <4GB. Carve a 16KB-aligned
+         * ring + a command buffer. Cached is fine on x86 (bus-master snoops). */
+        if (!ex->dma_va) {
+            PHYSICAL_ADDRESS hi; hi.QuadPart = 0xFFFFFFFF;
+            ex->dma_va = MmAllocateContiguousMemory(0x10000, hi);
+            if (!ex->dma_va) { st = STATUS_INSUFFICIENT_RESOURCES; break; }
+            ex->dma_size = 0x10000;
+            PHYSICAL_ADDRESS pa = MmGetPhysicalAddress(ex->dma_va);
+            ULONG base = pa.LowPart;
+            ULONG ringoff = (0x4000 - (base & 0x3fff)) & 0x3fff;   /* 16KB-align the ring */
+            ex->ring_va   = (PUCHAR)ex->dma_va + ringoff;
+            ex->ring_phys = base + ringoff;
+            ex->cmd_va    = (PUCHAR)ex->ring_va + 0x4000;          /* cmdbuf after 16KB ring */
+            ex->cmd_phys  = ex->ring_phys + 0x4000;
+        }
+
+        {   /* copy stream -> cmdbuf, build the single EOL descriptor */
+            PUCHAR s = buf + 8, d = (PUCHAR)ex->cmd_va; ULONG i;
+            for (i = 0; i < slen; i++) d[i] = s[i];
+            PULONG r = (PULONG)ex->ring_va;
+            r[0] = M64_APERTURE_BM_ADDR;
+            r[1] = ex->cmd_phys;
+            r[2] = slen | M64_DMA_HOLD_OFFSET | M64_DMA_EOL;
+            r[3] = 0;
+        }
+        KeMemoryBarrier();      /* CPU stores globally visible before the kick (x86 WB) */
+
+        {
+            PUCHAR m = (PUCHAR)ex->mapped + reg_bias;
+            KIRQL old; ULONG t, bus_s, src_s;
+            KeRaiseIrql(DISPATCH_LEVEL, &old);
+            /* quiesce the shared engine */
+            for (t = 0; t < 100000 && (READ_REGISTER_ULONG((PULONG)(m + M64_FIFO_STAT)) & 0xffff); t++) KeStallExecutionProcessor(1);
+            for (t = 0; t < 100000 && (READ_REGISTER_ULONG((PULONG)(m + M64_GUI_STAT)) & 1);       t++) KeStallExecutionProcessor(1);
+            bus_s = READ_REGISTER_ULONG((PULONG)(m + M64_BUS_CNTL));
+            src_s = READ_REGISTER_ULONG((PULONG)(m + M64_SRC_CNTL));
+            /* activate bus-mastering, point at our ring, arm system->reg, kick */
+            WRITE_REGISTER_ULONG((PULONG)(m + M64_BUS_CNTL), (bus_s & ~M64_BUS_MASTER_DIS) | M64_BUS_EXT_REG_EN);
+            WRITE_REGISTER_ULONG((PULONG)(m + M64_BM_GUI_TABLE_CMD), ex->ring_phys);   /* CIRCULAR_BUF_SIZE_16KB = 0 */
+            WRITE_REGISTER_ULONG((PULONG)(m + M64_SRC_CNTL), M64_SRC_BM_ENABLE | M64_SRC_BM_SYNC | M64_SRC_BM_OP_SYS_TO_REG);
+            WRITE_REGISTER_ULONG((PULONG)(m + M64_DST_HEIGHT_WIDTH), 0);               /* kicks the transfer */
+            /* wait for completion */
+            for (t = 0; t < 300000 && (READ_REGISTER_ULONG((PULONG)(m + M64_FIFO_STAT)) & 0xffff); t++) KeStallExecutionProcessor(1);
+            for (t = 0; t < 300000 && (READ_REGISTER_ULONG((PULONG)(m + M64_GUI_STAT)) & 1);       t++) KeStallExecutionProcessor(1);
+            /* restore ATI's bus-master control so its next 2D op doesn't read our ring */
+            WRITE_REGISTER_ULONG((PULONG)(m + M64_SRC_CNTL), src_s);
+            WRITE_REGISTER_ULONG((PULONG)(m + M64_BUS_CNTL), bus_s);
+            KeLowerIrql(old);
+        }
+        st = STATUS_SUCCESS;
+        break;
+    }
     default:
         break;
     }
@@ -221,7 +305,9 @@ static VOID NTAPI DrvUnload(PDRIVER_OBJECT drv)
     RtlInitUnicodeString(&dos, DOS_DEVICE_NAME);
     IoDeleteSymbolicLink(&dos);
     if (drv->DeviceObject) {
-        mach64_unmap((DEVEXT *)drv->DeviceObject->DeviceExtension);
+        DEVEXT *ex = (DEVEXT *)drv->DeviceObject->DeviceExtension;
+        mach64_unmap(ex);
+        if (ex->dma_va) { MmFreeContiguousMemory(ex->dma_va); ex->dma_va = NULL; }
         IoDeleteDevice(drv->DeviceObject);
     }
 }

@@ -51,7 +51,10 @@ void *memset(void *d, int c, size_t n)
 #define IOCTL_MACH64_WRBLK CTL(0x805)
 #define IOCTL_MACH64_WRREGS CTL(0x806)
 #define IOCTL_MACH64_SUBMIT CTL(0x807)
+#define IOCTL_MACH64_DMASUBMIT CTL(0x808)
 #define R_FIFO_STAT        0x0710
+#define R_PAT_REG0         0x0680
+#define R_PAT_REG1         0x0684
 
 /* mach64 register offsets (docs/dri-reference/drm_mach64_drv.h) */
 #define CONFIG_CHIP_ID 0x04e0
@@ -259,6 +262,20 @@ static ULONG mmselect(ULONG idx)
     return (idx & 0x100) ? (((idx & 0xff) << 2)) : ((idx << 2) + 0x400);
 }
 
+/* stream = LE ADRINDEX command buffer (from m64_cb_write_le); kernel bus-masters it */
+static int dev_dmasubmit(HANDLE h, const void *stream, ULONG len)
+{
+    static unsigned char in[8 + 4096]; DWORD br; ULONG i;
+    if (len > 4092) { outs("dma stream too big\n"); return 1; }
+    *(ULONG *)(in + 0) = REG_BIAS;
+    *(ULONG *)(in + 4) = len;
+    for (i = 0; i < len; i++) in[8 + i] = ((const unsigned char *)stream)[i];
+    if (!DeviceIoControl(h, IOCTL_MACH64_DMASUBMIT, in, 8 + len, NULL, 0, &br, NULL)) {
+        OUTF("DMASUBMIT(%lu) failed %lu\n", len, GetLastError()); return 1;
+    }
+    return 0;
+}
+
 static int map_combined(HANDLE h) { return dev_map(h, COMBINED_PHYS, COMBINED_SIZE); }
 
 static void wait_idle(HANDLE h)
@@ -410,6 +427,89 @@ static int do_tri(void)
     return pass ? 0 : 1;
 }
 
+/* Sub-rung 4a: prove the bus-master DMA ring by DMA-writing PAT_REG0/1 (the DRI's
+ * canonical ring test -- SYSTEM_TO_REG reaches the GUI register block). */
+static int do_dma(void)
+{
+    HANDLE h = dev_open();
+    if (h == INVALID_HANDLE_VALUE) return 1;
+    if (map_combined(h)) { CloseHandle(h); return 1; }
+
+    dev_wr(h, REGOFF(R_PAT_REG0), 0x11111111);   /* seed via MMIO */
+    dev_wr(h, REGOFF(R_PAT_REG1), 0x11111111);
+    ULONG p0 = 0, p1 = 0;
+    dev_rd(h, REGOFF(R_PAT_REG0), &p0); dev_rd(h, REGOFF(R_PAT_REG1), &p1);
+    OUTF("before DMA: PAT0=0x%08lx PAT1=0x%08lx\n", p0, p1);
+
+    static uint32_t cbs[64]; m64_cmdbuf cb; m64_cb_init(&cb, cbs, 64);
+    m64_reg(&cb, R_PAT_REG0, 0x22222222);
+    m64_reg(&cb, R_PAT_REG1, 0xaaaaaaaa);
+    m64_emit_terminator(&cb);
+    static unsigned char strm[512]; ULONG n = (ULONG)m64_cb_write_le(&cb, strm);
+
+    if (dev_dmasubmit(h, strm, n)) { CloseHandle(h); return 1; }
+
+    dev_rd(h, REGOFF(R_PAT_REG0), &p0); dev_rd(h, REGOFF(R_PAT_REG1), &p1);
+    OUTF("after  DMA: PAT0=0x%08lx PAT1=0x%08lx\n", p0, p1);
+    int pass = (p0 == 0x22222222 && p1 == 0xaaaaaaaa);
+    outs(pass ? "RESULT: DMA RING VERIFIED (bus-master executed our stream)!\n"
+              : "RESULT: DMA ring did not update PAT regs\n");
+    CloseHandle(h);
+    return pass ? 0 : 1;
+}
+
+/* Sub-rung 4b: the off-screen 3D triangle, now via bus-master DMA (the real path
+ * common/mach64_emit + m64_cb_write_le were designed for). */
+static int do_tridma(void)
+{
+    HANDLE h = dev_open();
+    if (h == INVALID_HANDLE_VALUE) return 1;
+    if (map_combined(h)) { CloseHandle(h); return 1; }
+    ULONG chip = 0; dev_rd(h, REGOFF(CONFIG_CHIP_ID), &chip);
+    if (chip != 0x64004c4d) OUTF("warn: chip=0x%08lx\n", chip);
+
+    ULONG off = FBTEST_OFF, pitch = 32, W = 32, H = 32, color = 0xFFFF8040;
+    { static ULONG z[32 * 32]; ULONG i; for (i = 0; i < W * H; i++) z[i] = 0; dev_wrblk(h, off, z, W * H * 4); }
+
+    static uint32_t cbs[512]; m64_cmdbuf cb; m64_cb_init(&cb, cbs, 512);
+    m64_state st;
+    { unsigned char *p = (unsigned char *)&st; unsigned i; for (i = 0; i < sizeof(st); i++) p[i] = 0; }
+    st.scale_3d_cntl = 0x000100c1u; st.setup_cntl = 0; st.z_cntl = 0; st.z_off_pitch = 0;
+    st.dp_pix_width = 0x60060666u; st.dst_off_pitch = ((pitch / 8) << 22) | (off >> 3);
+    st.sc_left_right = (0x1fffu << 16); st.sc_top_bottom = (0x1fffu << 16);
+    st.dp_write_mask = 0xffffffffu; st.clr_cmp_cntl = 0;
+    st.dp_mix = 0x00070007u; st.dp_src = 0x00000505u; st.alpha_tst_cntl = 0;
+
+    float onef = 1.0f; uint32_t wb; memcpy(&wb, &onef, 4);
+    m64_vertex v0, v1, v2;
+    { unsigned char *p = (unsigned char *)&v0; unsigned i; for (i = 0; i < sizeof(v0); i++) p[i] = 0; }
+    v1 = v0; v2 = v0;
+    v0.x_y = (16 << 16) | 16;  v0.w = (int32_t)wb; v0.argb = color;
+    v1.x_y = (112 << 16) | 16; v1.w = (int32_t)wb; v1.argb = color;
+    v2.x_y = (16 << 16) | 112; v2.w = (int32_t)wb; v2.argb = color;
+
+    m64_emit_state(&cb, &st);
+    int okt = m64_emit_triangle(&cb, &v0, &v1, &v2);
+    m64_emit_terminator(&cb);
+    if (!okt || cb.overflow) { OUTF("emit failed (ok=%d ovf=%d)\n", okt, cb.overflow); CloseHandle(h); return 1; }
+
+    static unsigned char strm[2048]; ULONG n = (ULONG)m64_cb_write_le(&cb, strm);
+    OUTF("emit: %lu dwords -> %lu bytes; bus-master DMA submit...\n", (ULONG)cb.n, n);
+    if (dev_dmasubmit(h, strm, n)) { CloseHandle(h); return 1; }
+
+    static unsigned char fb[32 * 32 * 4];
+    if (dev_rdblk(h, off, fb, W * H * 4)) { CloseHandle(h); return 1; }
+    ULONG i, match = 0, bg = 0;
+    for (i = 0; i < W * H; i++) { ULONG px = *(ULONG *)(fb + i * 4) & 0xffffff; if (px == 0xFF8040) match++; else if (px == 0) bg++; }
+    ULONG inside = *(ULONG *)(fb + (10 * 32 + 10) * 4) & 0xffffff;
+    ULONG corner = *(ULONG *)(fb + (28 * 32 + 28) * 4) & 0xffffff;
+    OUTF("tridma: %lu px=color  %lu px=bg  inside(10,10)=0x%06lx  corner(28,28)=0x%06lx\n", match, bg, inside, corner);
+    int pass = (match > 100 && bg > 100 && inside == 0xFF8040 && corner == 0);
+    outs(pass ? "RESULT: 3D TRIANGLE via BUS-MASTER DMA VERIFIED!\n" : "RESULT: DMA triangle mismatch\n");
+    CloseHandle(h);
+    return pass ? 0 : 1;
+}
+
 static int do_peek(void)
 {
     HANDLE h = dev_open();
@@ -453,6 +553,8 @@ void _mainstart(void)
     else if (streq(argv[1], "vram"))                 rc = do_vram();
     else if (streq(argv[1], "fill"))                 rc = do_fill();
     else if (streq(argv[1], "tri"))                  rc = do_tri();
+    else if (streq(argv[1], "dma"))                  rc = do_dma();
+    else if (streq(argv[1], "tridma"))               rc = do_tridma();
     else if (streq(argv[1], "auto") && argc >= 3) {
         rc = svc_install(argv[2]); if (!rc) rc = svc_ctl(1, 0); if (!rc) rc = do_peek();
     }
