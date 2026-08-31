@@ -437,7 +437,33 @@ GLD_STUB(gldModifyPipelineProgram) GLD_STUB(gldRelatePipelineProgram)
 GLD_STUB(gldGetPipelineProgramInfo)
 GLD_STUB(gldCreateQuery)           GLD_STUB(gldDestroyQuery)
 GLD_STUB(gldGetQueryInfo)
-GLD_STUB(gldCreateShared)          GLD_STUB(gldDestroyShared)
+
+/* gldCreateShared / gldDestroyShared -- the context-level SHARED state object (the shared texture-name /
+ * display-list namespace that sibling GL contexts inherit).  These are REAL in the reference (ati128gld
+ * @0x4d00 / @0x4d60), not stubs: CreateShared allocs a 44-byte struct, zero-inits it, and writes the
+ * pointer to *out; DestroyShared frees it.  Our old GLD_STUB took void and NEVER wrote *out, so GLEngine
+ * kept an UNINITIALIZED driver shared-handle (garbage it may later dereference) -- a latent corruption
+ * source.  We don't share texture storage at the driver level (our VRAM heap is already process-global),
+ * so the struct is opaque bookkeeping GLEngine holds and hands back to us; matching the reference's
+ * alloc/free contract is what matters.  Signature per the reference: r3 = void **out (no ctx arg). */
+int gldCreateShared(void **out)
+{
+    void *s;
+    if (!out) { gld_log("gldCreateShared(out=NULL)\n"); return 0x271e; }  /* ref: error on NULL out */
+    *out = NULL;
+    s = calloc(1, 0x2c);                                    /* 44-byte shared struct, zero-inited (ref) */
+    if (!s) { gld_log("gldCreateShared: calloc failed\n"); return 0x2720; }
+    *out = s;
+    gld_log("gldCreateShared() -> shared=%p\n", s);
+    return 0;
+}
+int gldDestroyShared(void *shared)
+{
+    if (!shared) { gld_log("gldDestroyShared(NULL)\n"); return 0x2714; }  /* ref: error on NULL */
+    gld_log("gldDestroyShared(%p)\n", shared);
+    free(shared);
+    return 0;
+}
 /* ---- Texture path (INVESTIGATION) --------------------------------------
  * Return a valid 0x40-byte texture-object (faithful to the reference
  * gldCreateTexture, ati128gld 0x6838) so GLEngine sets up texturing and emits
@@ -476,8 +502,62 @@ int gldModifyTextureLevel(void *ctx, void *t, uint32_t a3, uint32_t lvl, uint32_
 { (void)ctx; gld_log("gldModifyTextureLevel(t=%p a3=0x%x lvl=%u a5=0x%x a6=0x%x a7=0x%x)\n", t,a3,lvl,a5,a6,a7); return 0; }
 int gldGetTextureLevel(void *ctx, void *t, uint32_t a3, uint32_t a4, uint32_t a5, uint32_t a6, uint32_t a7)
 { (void)ctx; gld_log("gldGetTextureLevel(t=%p a3=0x%x a4=0x%x a5=0x%x a6=0x%x a7=0x%x)\n", t,a3,a4,a5,a6,a7); return 0; }
+/* glGetTexLevelParameter for the driver.  a3=level, a5=pname (GL enum), a6=out (write the value here),
+ * a7=the candidate dimension for a proxy level.
+ *
+ * ROOT CAUSE of the Chess hang (HW-confirmed): the caller (gluBuild2DMipmaps' proxy probe) seeds *out=0
+ * and spins `while(width==0)` until we write a NONZERO width.  Unlike the reference @0x69f4 -- where
+ * GLEngine answers WIDTH/HEIGHT from its own bookkeeping and only forwards format/size pnames to the
+ * driver -- our GLEngine path forwards the WIDTH query to us AND does not route the proxy glTexImage2D
+ * through gldModifyTexture, so the level record (state+0x9c) reads w=h=0.  The candidate size is instead
+ * passed in a7 (observed a7=0x100=256 for Chess's 256x256 board texture; the state object holds no dims).
+ *   The earlier stub wrote *out=0 (width 0), so every proxy size looked "rejected" and the shrink-loop
+ * never terminated (1.07M identical GL_TEXTURE_WIDTH polls, app hung).  Fix: answer WIDTH/HEIGHT with the
+ * level record when populated, else the a7 candidate; reject (write 0) only a proxy level that exceeds the
+ * Rage Pro's 1024x1024 limit; answer INTERNAL_FORMAT / component sizes explicitly.
+ * Level record: t+0x30 -> state; rec at state+0x9c+(baseLOD[s+0x5e]+level)*0x14 (w@0x00 h@0x02 fmt@0x0c);
+ * proxy flag = bit 0x100 of *(u16*)state. */
 int gldGetTextureLevelInfo(void *ctx, void *t, uint32_t a3, uint32_t a4, uint32_t a5, uint32_t a6, uint32_t a7)
-{ (void)ctx; gld_log("gldGetTextureLevelInfo(t=%p a3=0x%x a4=0x%x a5=0x%x a6=0x%x a7=0x%x)\n", t,a3,a4,a5,a6,a7); return 0; }
+{
+    uint32_t state, w = 0, h = 0; uint16_t fmt = 0, flags = 0;
+    (void)ctx; (void)a4; (void)a7;
+    state = t ? *(const uint32_t *)((const unsigned char *)t + 0x30) : 0;
+    if (state >= 0x10000u && state < 0x40000000u) {
+        const unsigned char *s = (const unsigned char *)(uintptr_t)state;
+        const unsigned char *r = s + 0x9c + ((uint32_t)s[0x5e] + a3) * 0x14;
+        flags = *(const uint16_t *)s;                       /* proxy flag lives in bit 0x100 */
+        w     = *(const uint16_t *)(r + 0x00);
+        h     = *(const uint16_t *)(r + 0x02);
+        fmt   = *(const uint16_t *)(r + 0x0c);
+    }
+    if (a6 < 0x10000u) return 0;                            /* no out pointer -> nothing to do */
+
+    /* GLEngine seeds *out=0 and the caller (gluBuild2DMipmaps' proxy check) spins `while(width==0)`, so we
+     * MUST write a nonzero width.  For a PROXY query GLEngine does NOT route the glTexImage2D through our
+     * gldModifyTexture, so the level record is empty (w=h=0) and the candidate dimension is passed in a7. */
+    { uint32_t cand = a7 ? a7 : 1u;                          /* candidate size for a proxy level (lives in a7) */
+      uint32_t rw = w ? w : cand, rh = h ? h : cand;
+
+      /* Proxy fit reject: too big for the Rage Pro's 1024x1024 limit -> write 0 so the caller shrinks. */
+      if ((flags & 0x100u) && (rw > 1024u || rh > 1024u)) {
+          *(uint32_t *)(uintptr_t)a6 = 0;
+          return 0;
+      }
+      switch (a5) {
+      case 0x1000u: *(uint32_t *)(uintptr_t)a6 = rw; break;                   /* GL_TEXTURE_WIDTH  */
+      case 0x1001u: *(uint32_t *)(uintptr_t)a6 = rh; break;                   /* GL_TEXTURE_HEIGHT */
+      case 0x8071u: *(uint32_t *)(uintptr_t)a6 = 1u; break;                   /* GL_TEXTURE_DEPTH  */
+      case 0x1005u: *(uint32_t *)(uintptr_t)a6 = 0u; break;                   /* GL_TEXTURE_BORDER */
+      case 0x1003u: *(uint32_t *)(uintptr_t)a6 = fmt ? fmt : 0x1908u; break;  /* INTERNAL_FORMAT (dflt GL_RGBA) */
+      case 0x805cu: case 0x805du: case 0x805eu: case 0x805fu:                 /* R/G/B/A_SIZE = 8 bpp */
+          *(uint32_t *)(uintptr_t)a6 = 8u; break;
+      case 0x8060u: case 0x8061u:                                            /* LUMINANCE/INTENSITY_SIZE */
+          *(uint32_t *)(uintptr_t)a6 = 0u; break;
+      default: *(uint32_t *)(uintptr_t)a6 = 0u; break;
+      }
+    }
+    return 0;
+}
 int gldIsTextureResident(void *ctx, void *t)
 { (void)ctx; gld_log("gldIsTextureResident(%p)\n", t); return 1; }
 GLD_STUB(gldCreateVertexArray)     GLD_STUB(gldModifyVertexArray)
