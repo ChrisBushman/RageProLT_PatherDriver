@@ -27,3 +27,5 @@ win2k/**/*.sys
 win2k/**/*.dll
 win2k/**/*.a
 win2k/**/*.def
+win2k/mesa/Mesa-7.0.4/
+win2k/mesa/*.tar.gz

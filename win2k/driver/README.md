@@ -30,11 +30,16 @@ constructors + `DllMain` + msvcrt heap/math, proven by `LoadLibrary` on the Arma
 `../toolchain/README.md`. (Deferred: `atexit`/`_cexit` on detach; C99 fn shims — add
 when Mesa needs them.)
 
-**T1 — ICD load path (swrast first).** Stand up Mesa core as `opengl32`-compatible
-ICD with the **software** rasterizer (no hardware): implement the `DrvXxx` shim
-(`../icd/`), register the ICD (HKLM OpenGLDrivers), and get a real app (or a tiny
-wgl test) to select our pixel format and read back correct **software** pixels.
-Proves the whole load/negotiation path before hardware is involved.
+**T1 — ICD load path (swrast first). STARTED (2026-08-31).** Mesa **7.0.4** vendored
+(`../mesa/`, `fetch-mesa.sh`) — it ships OSMesa, the Windows `DrvXxx` ICD shim
+(`drivers/windows/icd/icd.c`), and the full mach64 driver in-tree. Custom build
+(compile the `src/mesa/sources` groups with our toolchain, link legacy-msvcrt +
+dllcrt0). Compile recipe established (imports.c builds; `-Dffs=__builtin_ffs` etc.).
+  - **T1a (in progress):** build OSMesa into a test EXE that renders a triangle
+    off-screen + verifies pixels, run on the Armada — proves Mesa core on Win2000.
+  - **T1b:** the `DrvXxx` ICD shim as an `opengl32`-loadable DLL, registered so a real
+    app selects our software pixelformat, before hardware. (ATI's stock ICD
+    atioglxx.dll is what we replace — it NULL-derefs; see the Laser Arena finding.)
 
 **T2 — wire the mach64 backend.** Replace swrast with the mach64 render backend →
 `common/mach64_emit` → `IOCTL_MACH64_DMASUBMIT`. Off-screen before on-screen. Apply
