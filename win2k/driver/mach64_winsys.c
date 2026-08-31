@@ -63,22 +63,34 @@ void m64ws_reg_write(m64_winsys *ws, unsigned reg, unsigned val)
     DeviceIoControl(ws->h, IOCTL_MACH64_WR32, in, 8, NULL, 0, &br, NULL);
 }
 
+/* Block VRAM I/O, chunked in 4KB pieces so any size (e.g. a texture) works safely. */
+#define WS_CHUNK 0x1000
+
 int m64ws_read_vram(m64_winsys *ws, unsigned off, void *dst, unsigned len)
 {
-    unsigned char in[8]; DWORD br;
-    *(ULONG *)(in + 0) = off; *(ULONG *)(in + 4) = len;
-    return DeviceIoControl(ws->h, IOCTL_MACH64_RDBLK, in, 8, dst, len, &br, NULL) ? 0 : 1;
+    unsigned char *d = (unsigned char *)dst; unsigned done = 0; DWORD br;
+    while (done < len) {
+        unsigned n = len - done; if (n > WS_CHUNK) n = WS_CHUNK;
+        unsigned char in[8];
+        *(ULONG *)(in + 0) = off + done; *(ULONG *)(in + 4) = n;
+        if (!DeviceIoControl(ws->h, IOCTL_MACH64_RDBLK, in, 8, d + done, n, &br, NULL)) return 1;
+        done += n;
+    }
+    return 0;
 }
 
 int m64ws_write_vram(m64_winsys *ws, unsigned off, const void *src, unsigned len)
 {
-    /* small helper buffer on the stack; callers keep len modest (<=4KB per the kmd
-     * block limit shakeout). Larger transfers should be chunked by the caller. */
-    static unsigned char in[8 + 0x1000]; DWORD br; unsigned i;
-    if (len > 0x1000) return 1;
-    *(ULONG *)(in + 0) = off; *(ULONG *)(in + 4) = len;
-    for (i = 0; i < len; i++) in[8 + i] = ((const unsigned char *)src)[i];
-    return DeviceIoControl(ws->h, IOCTL_MACH64_WRBLK, in, 8 + len, NULL, 0, &br, NULL) ? 0 : 1;
+    const unsigned char *s = (const unsigned char *)src; unsigned done = 0; DWORD br;
+    static unsigned char in[8 + WS_CHUNK];
+    while (done < len) {
+        unsigned n = len - done, i; if (n > WS_CHUNK) n = WS_CHUNK;
+        *(ULONG *)(in + 0) = off + done; *(ULONG *)(in + 4) = n;
+        for (i = 0; i < n; i++) in[8 + i] = s[done + i];
+        if (!DeviceIoControl(ws->h, IOCTL_MACH64_WRBLK, in, 8 + n, NULL, 0, &br, NULL)) return 1;
+        done += n;
+    }
+    return 0;
 }
 
 int m64ws_submit(m64_winsys *ws, const m64_cmdbuf *cb)
