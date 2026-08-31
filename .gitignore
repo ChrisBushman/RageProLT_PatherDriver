@@ -20,3 +20,7 @@ tools/mach64_*
 *-result.txt
 *-frames.txt
 *.log
+
+# Windows cross-compiled output (rebuild via win2k/kmd/Makefile)
+win2k/**/*.exe
+win2k/**/*.sys
