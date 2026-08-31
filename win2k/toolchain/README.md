@@ -37,12 +37,41 @@ Two ways we build Win2000-loadable binaries:
 `msvcrt.dll` (Microsoft's), `libmsvcrt_win2k.a`, `msvcrt.def`, `*.exe` are gitignored
 — regenerate with the script from a target `msvcrt.dll`.
 
-## Still to build (for Mesa, a real DLL with global ctors / atexit)
+## Full-CRT DLL startup (DONE — proven on Win2000)
 
-The smoketest uses a CRT-free entry and calls msvcrt directly (works because
-malloc/sprintf/math need no CRT init). A full Mesa **DLL** needs proper C-runtime
-startup: a small `crt0`/`dllcrt0` that runs global constructors (`_initterm` over the
-`.ctors`/CRT init list), wires `atexit`/`_cexit`, and (for the EXE test harness)
-`__getmainargs`. msvcrt.dll exports all of these (`_initterm`, `__getmainargs`,
-`_cexit`, `_onexit`). That startup shim is the next toolchain task — see
-`../driver/README.md`.
+`dllcrt0.c` is a tiny DLL entry point (`DllMainCRTStartup`) that runs gcc's global
+constructors (`__CTOR_LIST__`), calls the DLL's `DllMain`, and runs destructors on
+unload — replacing the stock mingw `dllcrt2.o` (which pulls the UCRT). Link it with
+`crtbegin.o`/`crtend.o` (for the `.ctors`/`.dtors` brackets) and the msvcrt import lib.
+
+**Proven** (`crtdll-test.c` + `dllload.c`, run on the Armada):
+```
+ctor_ran=YES  heap=YES  DllMain_alloc=005E2428  sqrt2*1000=1414
+RESULT: full-CRT DLL works on Win2000 (ctors + heap + DllMain)!
+```
+i.e. a `LoadLibrary`'d DLL with a global constructor, a heap-allocating `DllMain`, and
+msvcrt malloc/math — importing only `msvcrt.dll`.
+
+### DLL link recipe (for the Mesa ICD)
+
+```
+CRTBEGIN=$(i686-w64-mingw32-gcc -print-file-name=crtbegin.o)
+CRTEND=$(i686-w64-mingw32-gcc -print-file-name=crtend.o)
+i686-w64-mingw32-gcc -O2 -D_WIN32_WINNT=0x0500 -fno-stack-protector \
+    -shared -nostartfiles -nodefaultlibs -Wl,-e,_DllMainCRTStartup@12 \
+    -o foo.dll  "$CRTBEGIN" dllcrt0.c <your .c/.o...> "$CRTEND" \
+    libmsvcrt_win2k.a -lgcc -lkernel32
+```
+(crtbegin before objects, crtend after, then libs. Add -luser32/-ladvapi32 as needed.
+`dllload.c` shows the CRT-free loader/harness pattern.)
+
+## Files
+
+- `dllcrt0.c` — reusable DLL startup (used by every msvcrt-linked DLL, incl. the ICD).
+- `crtdll-test.c` / `dllload.c` — the T0 proof (test DLL + loader).
+
+## Remaining CRT gaps to watch (fill as Mesa needs them)
+
+`atexit`/`_cexit` flushing on DLL detach isn't wired yet (Mesa rarely needs it); some
+C99 fns (snprintf, roundf, ...) may be missing from Win2000's msvcrt and will need
+small compat shims when Mesa references them.

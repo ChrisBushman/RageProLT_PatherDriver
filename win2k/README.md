@@ -138,8 +138,9 @@ and other QuakeGL games; fix by observed failure.
 | **Off-screen 2D engine fill** (readback-verified, coexists w/ ati2mpab) | ✅ 2026-08-31 — `kmd/engine-proof.md` (1024/1024 px) |
 | **Off-screen 3D triangle via `common/mach64_emit`** (pseudo-DMA, readback-verified) | ✅ 2026-08-31 — `kmd/engine-proof.md` (276 tri px + clean bg) |
 | **Bus-master DMA ring** (PAT proof + 3D triangle via DMA) | ✅ 2026-08-31 — `kmd/dma-ring.md` |
-| Win2000 CRT toolchain (msvcrt cross-link) | ✅ 2026-08-31 — `toolchain/` (UCRT→msvcrt.dll solved) |
-| Mesa winsys + ICD (`driver/`, `icd/`) | 🟡 started — plan in `driver/README.md` |
+| Win2000 CRT toolchain (msvcrt cross-link + `dllcrt0` full-CRT DLL) | ✅ 2026-08-31 — `toolchain/` (T0: DLL ctors+DllMain+heap proven on HW) |
+| Mesa core as swrast ICD (T1) | ⬜ next — needs Mesa version decision |
+| mach64 backend wired to DMA (T2) | ⬜ |
 | Mesa core building as opengl32 ICD (swrast) | ⬜ |
 | mach64 hardware backend wired | ⬜ |
 | Present / double buffer | ⬜ |

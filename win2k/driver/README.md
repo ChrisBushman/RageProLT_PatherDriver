@@ -23,11 +23,12 @@ the `kmd` bus-master DMA ring. No DRI, no DRM, no X.
 
 ## Bring-up ladder (mirrors the hardware bring-up discipline)
 
-**T0 — CRT startup shim (toolchain).** DONE: proved Win2000 `msvcrt.dll` is linkable
-(`../toolchain/`). NEXT: a `dllcrt0` that runs global ctors (`_initterm`) + wires
-`atexit`/`_cexit` so a real **DLL** with C (and any C++) init works, and a matching
-EXE `crt0` (`__getmainargs`) for test harnesses. Prove with a DLL that `malloc`s in
-`DllMain`/a ctor and is `LoadLibrary`'d on Win2000.
+**T0 — CRT startup shim (toolchain). DONE (2026-08-31).** Win2000 `msvcrt.dll` is
+linkable (`../toolchain/`), AND `dllcrt0.c` gives a real DLL proper startup: global
+constructors + `DllMain` + msvcrt heap/math, proven by `LoadLibrary` on the Armada
+(`ctor_ran=YES heap=YES DllMain_alloc=... sqrt2*1000=1414`). DLL link recipe is in
+`../toolchain/README.md`. (Deferred: `atexit`/`_cexit` on detach; C99 fn shims — add
+when Mesa needs them.)
 
 **T1 — ICD load path (swrast first).** Stand up Mesa core as `opengl32`-compatible
 ICD with the **software** rasterizer (no hardware): implement the `DrvXxx` shim
