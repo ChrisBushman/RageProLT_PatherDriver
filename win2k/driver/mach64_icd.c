@@ -73,6 +73,7 @@ static int      g_W, g_H;               /* target (window client) size */
 static unsigned g_pitch;                /* target pitch in pixels (8-aligned) */
 static unsigned g_fboff, g_zoff;        /* VRAM byte offsets */
 static int      g_textured;
+static unsigned g_clearcol;             /* last glClear colour, 0xRRGGBB (composite key) */
 /* viewport captured per-batch from the GL context */
 static float    g_vpx, g_vpy, g_vpw, g_vph;
 
@@ -185,12 +186,27 @@ static void hw_clear(GLcontext *ctx, GLbitfield buffers)
         for(i=0;i<rows;i++) m64ws_write_vram(g_ws, g_zoff + i*g_pitch*2, zb, g_pitch*2);
     }
     if (!(buffers & COLOR_BITS)) return;
-    /* CPU fill of the ARGB8888 target (robust; the 2D-engine fill is a later perf
-     * optimisation).  packcol -> 0xAARRGGBB, stored as-is; readback masks 0xffffff. */
+    uint32_t col = packcol(ctx->Color.ClearColor);
+    g_clearcol = col & 0xffffffu;
+    /* (1) clear the hardware VRAM target (CPU fill; ARGB8888) */
     { static uint32_t crow[2048]; unsigned i, rows=(unsigned)g_H;
-      uint32_t col = packcol(ctx->Color.ClearColor);
       for(i=0;i<g_pitch;i++) crow[i]=col;
       for(i=0;i<rows;i++) m64ws_write_vram(g_ws, g_fboff + i*g_pitch*4u, crow, g_pitch*4u); }
+    /* (2) clear WMesa's DIB to the same colour, so swrast 2D (DrawPixels/Bitmap)
+     * starts on a known background and the composite key matches everywhere the
+     * hardware didn't draw geometry. */
+    if (ctx->DrawBuffer) {
+        struct wmesa_framebuffer *fb = (struct wmesa_framebuffer *)ctx->DrawBuffer;
+        unsigned char *dib = fb->pbPixels;
+        if (dib) {
+            int W=fb->Base.Width, H=fb->Base.Height, x; unsigned y, stride=fb->ScanWidth;
+            unsigned r=(col>>16)&0xff, gg=(col>>8)&0xff, b=col&0xff;
+            unsigned short c16 = (unsigned short)(((r>>3)<<10)|((gg>>3)<<5)|(b>>3));
+            for (y=0;y<(unsigned)H;y++){ unsigned char *d=dib+y*stride;
+                if (fb->cColorBits==32){ for(x=0;x<W;x++) *(unsigned*)(d+x*4)=col&0xffffff; }
+                else { unsigned short *dw=(unsigned short*)d; for(x=0;x<W;x++) dw[x]=c16; } }
+        }
+    }
 }
 
 static void install_render_hooks(GLcontext *ctx)
@@ -272,26 +288,27 @@ int m64icd_swap(void *hdc_v)
     if (W > g_W) W = g_W;  if (H > g_H) H = g_H;
     unsigned rows = (unsigned)H;
     if (g_pitch*rows*4u > sizeof(g_rb)) rows = sizeof(g_rb)/(g_pitch*4u);
+    if (g_logn < 3) { g_logn++;
+        icdlog("SWAP bpp=%u stride=%u W=%u H=%u\n",
+               (unsigned)fb->cColorBits,(unsigned)fb->ScanWidth,(unsigned)W,(unsigned)H); }
     m64ws_read_vram(g_ws, g_fboff, g_rb, g_pitch*rows*4u);   /* whole target, one call */
 
-    if (g_logn < 40) { g_logn++;
-        unsigned cen = *(unsigned*)(g_rb + (rows/2)*g_pitch*4u + ((unsigned)W/2)*4u) & 0xffffff;
-        unsigned tl  = *(unsigned*)(g_rb + 0) & 0xffffff;
-        unsigned nz=0,i; for(i=0;i<rows*g_pitch;i++) if((*(unsigned*)(g_rb+i*4u)&0xffffff)) nz++;
-        icdlog("SW#%u cen=%06x tl=%06x nz=%u\n", g_logn, cen, tl, nz); }
-
+    /* Composite: copy ONLY hardware-drawn (non-clear-colour) pixels over the DIB,
+     * so swrast 2D (menu/HUD) shows through wherever no geometry was drawn. */
     unsigned stride = fb->ScanWidth; int bpp = fb->cColorBits;
+    unsigned key = g_clearcol;
     unsigned y; int x;
     for (y=0; y<rows; y++) {
         unsigned char *s = g_rb + y*g_pitch*4u;
         unsigned char *d = dib + y*stride;
         if (bpp == 32) {
-            for (x=0; x<W; x++) *(unsigned*)(d+x*4) = *(unsigned*)(s+x*4) & 0xffffff;
+            for (x=0; x<W; x++){ unsigned px=*(unsigned*)(s+x*4)&0xffffff;
+                if (px!=key) *(unsigned*)(d+x*4)=px; }
         } else {                                   /* 16bpp, 5-5-5 to match BGR16 */
             unsigned short *dw = (unsigned short*)d;
-            for (x=0; x<W; x++){ unsigned px=*(unsigned*)(s+x*4);
-                unsigned r=(px>>16)&0xff,gg=(px>>8)&0xff,b=px&0xff;
-                dw[x]=(unsigned short)(((r>>3)<<10)|((gg>>3)<<5)|(b>>3)); }
+            for (x=0; x<W; x++){ unsigned px=*(unsigned*)(s+x*4)&0xffffff;
+                if (px!=key){ unsigned r=(px>>16)&0xff,gg=(px>>8)&0xff,b=px&0xff;
+                    dw[x]=(unsigned short)(((r>>3)<<10)|((gg>>3)<<5)|(b>>3)); } }
         }
     }
     return 0;   /* wgl.c now calls WMesaSwapBuffers -> BitBlt DIB to the window */
