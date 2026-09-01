@@ -20,6 +20,7 @@
 #include "main/context.h"
 #include "main/texformat.h"
 #include "tnl/t_context.h"
+#include "tnl/t_vertex.h"  /* GET_VERTEX_STATE, _tnl_get_attr (read built vertices) */
 #include "GL/gl.h"
 #include "wmesadef.h"      /* struct wmesa_framebuffer: back-buffer DIB (pbPixels) */
 #include "mach64_emit.h"
@@ -38,14 +39,14 @@ int m64icd_available(void)
 /* --- crash-forensic log (append+flush per line so it survives a fault) --- */
 __declspec(dllimport) int WINAPIV wsprintfA(char*,const char*,...);
 static int g_logn;
-static void icdlog(const char *fmt, unsigned a, unsigned b, unsigned c, unsigned d)
+static void icdlog(const char *fmt, unsigned a, unsigned b, unsigned c, unsigned d, unsigned e, unsigned f)
 {
-    char buf[160]; DWORD wr;
+    char buf[192]; DWORD wr;
     HANDLE h = CreateFileA("C:\\m64icd.log", GENERIC_WRITE, FILE_SHARE_READ|FILE_SHARE_WRITE,
                            0, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, 0);
     if (h==INVALID_HANDLE_VALUE) return;
     SetFilePointer(h, 0, 0, FILE_END);
-    wsprintfA(buf, fmt, a, b, c, d);
+    wsprintfA(buf, fmt, a, b, c, d, e, f);
     WriteFile(h, buf, lstrlenA(buf), &wr, 0);
     CloseHandle(h);
 }
@@ -74,10 +75,13 @@ static unsigned g_pitch;                /* target pitch in pixels (8-aligned) */
 static unsigned g_fboff, g_zoff;        /* VRAM byte offsets */
 static int      g_textured;
 static unsigned g_clearcol;             /* last glClear colour, 0xRRGGBB (composite key) */
+static unsigned g_ntris, g_nquads, g_cleared;   /* per-frame diagnostics */
 /* viewport captured per-batch from the GL context */
 static float    g_vpx, g_vpy, g_vpw, g_vph;
 
 static void (*g_orig_update)(GLcontext *, GLbitfield);
+static void (*g_orig_start)(GLcontext *);      /* swsetup RenderStart (build/clip setup) */
+static void (*g_orig_finish)(GLcontext *);     /* swsetup RenderFinish */
 
 static uint32_t clampb(float f){ int c=(int)(f*255.0f+0.5f); return c<0?0:(c>255?255:(uint32_t)c); }
 static uint32_t packcol(const GLfloat *c){
@@ -93,8 +97,19 @@ static const struct gl_texture_format *hw_choose_texformat(GLcontext *ctx, GLint
 { (void)ctx;(void)i;(void)f;(void)t; return &_mesa_texformat_argb8888; }
 
 /* -------------------------------------------------------------- render hooks */
+static void hw_triangle(GLcontext *ctx, GLuint e0, GLuint e1, GLuint e2);  /* fwd */
+static void hw_quad(GLcontext *ctx, GLuint e0, GLuint e1, GLuint e2, GLuint e3);
+
 static void hw_start(GLcontext *ctx)
 {
+    /* Let swsetup build the clipspace vertex format + choose funcs first, so
+     * Mesa's clip/interp path is valid (fixes the __tnl_generic_interp NULL),
+     * then override the primitive emitters with ours. */
+    if (g_orig_start) g_orig_start(ctx);
+    { TNLcontext *tnl = TNL_CONTEXT(ctx);
+      tnl->Driver.Render.Triangle = hw_triangle;
+      tnl->Driver.Render.Quad     = hw_quad; }
+
     /* capture the app viewport for get_vert's NDC->window map */
     g_vpx=(float)ctx->Viewport.X;  g_vpy=(float)ctx->Viewport.Y;
     g_vpw=(float)ctx->Viewport.Width; g_vph=(float)ctx->Viewport.Height;
@@ -127,41 +142,45 @@ static void hw_start(GLcontext *ctx)
     m64_emit_state(&g_cb, &g_st);
 }
 static void hw_flush_batch(void){ m64_emit_terminator(&g_cb); m64ws_submit(g_ws,&g_cb); }
-static void hw_finish(GLcontext *ctx){ (void)ctx; hw_flush_batch(); }
-static void hw_build(GLcontext *ctx, GLuint s, GLuint c, GLuint f){ (void)ctx;(void)s;(void)c;(void)f; }
+static void hw_finish(GLcontext *ctx){ hw_flush_batch(); if (g_orig_finish) g_orig_finish(ctx); }
 
-static void get_vert(struct vertex_buffer *VB, GLuint e, m64_vertex *out)
+/* Read a BUILT clipspace vertex by index (valid for original AND clip-generated
+ * vertices, since Mesa builds+interpolates them).  _tnl_get_attr(POS) returns NDC
+ * x,y,z (viewport reversed) and pos[3]=w. */
+static void get_vert(GLcontext *ctx, GLuint e, m64_vertex *out)
 {
-    GLfloat *clip = (GLfloat*)((GLubyte*)VB->ClipPtr->data + (size_t)e*VB->ClipPtr->stride);
-    GLfloat *col  = (GLfloat*)((GLubyte*)VB->ColorPtr[0]->data + (size_t)e*VB->ColorPtr[0]->stride);
-    float w = clip[3], iw = (w!=0.0f)?1.0f/w:1.0f;
-    float ndcx=clip[0]*iw, ndcy=clip[1]*iw, ndcz=clip[2]*iw;
-    float wx = g_vpx + (ndcx*0.5f+0.5f)*g_vpw;
+    struct tnl_clipspace *vtx = GET_VERTEX_STATE(ctx);
+    const GLubyte *v = vtx->vertex_buf + (size_t)e * vtx->vertex_size;
+    GLfloat pos[4]={0,0,0,1}, col[4]={1,1,1,1}, tex[4]={0,0,0,1};
+    _tnl_get_attr(ctx, v, _TNL_ATTRIB_POS,    pos);
+    _tnl_get_attr(ctx, v, _TNL_ATTRIB_COLOR0, col);
+    float w = (pos[3]!=0.0f)?pos[3]:1.0f;
+    float wx = g_vpx + (pos[0]*0.5f+0.5f)*g_vpw;
     /* GL is bottom-up; store the target TOP-DOWN so present is a 1:1 screen copy. */
-    float wy = (float)g_H - (g_vpy + (ndcy*0.5f+0.5f)*g_vph);
+    float wy = (float)g_H - (g_vpy + (pos[1]*0.5f+0.5f)*g_vph);
     uint32_t wb; __builtin_memcpy(&wb,&w,4);
     out->s=out->t=out->z=out->spec_argb=0;
     out->x_y = (((int)(wx*4.0f))<<16) | (((int)(wy*4.0f))&0xffff);
     out->w = (int32_t)wb;
     out->argb = packcol(col);
-    { float wz=ndcz*0.5f+0.5f; int zi; if(wz<0)wz=0; if(wz>1)wz=1; zi=(int)(wz*65535.0f+0.5f);
+    { float wz=pos[2]*0.5f+0.5f; int zi; if(wz<0)wz=0; if(wz>1)wz=1; zi=(int)(wz*65535.0f+0.5f);
       out->z=(int32_t)((uint32_t)zi<<15); }
-    if (g_textured && VB->TexCoordPtr[0]) {
-        GLfloat *tc=(GLfloat*)((GLubyte*)VB->TexCoordPtr[0]->data + (size_t)e*VB->TexCoordPtr[0]->stride);
-        __builtin_memcpy(&out->s,&tc[0],4); __builtin_memcpy(&out->t,&tc[1],4);
+    if (g_textured) {
+        _tnl_get_attr(ctx, v, _TNL_ATTRIB_TEX0, tex);
+        __builtin_memcpy(&out->s,&tex[0],4); __builtin_memcpy(&out->t,&tex[1],4);
     }
 }
 
 static void hw_triangle(GLcontext *ctx, GLuint e0, GLuint e1, GLuint e2)
 {
-    struct vertex_buffer *VB = &TNL_CONTEXT(ctx)->vb;
     m64_vertex v[3];
     if (g_cb.n >= CB_FLUSH_AT) {                 /* submit fills up in a big batch */
         hw_flush_batch();
         m64_cb_init(&g_cb, g_cbs, 1024);
         m64_emit_state(&g_cb, &g_st);
     }
-    get_vert(VB,e0,&v[0]); get_vert(VB,e1,&v[1]); get_vert(VB,e2,&v[2]);
+    g_ntris++;
+    get_vert(ctx,e0,&v[0]); get_vert(ctx,e1,&v[1]); get_vert(ctx,e2,&v[2]);
     { int x0=(short)(v[0].x_y>>16),y0=(short)(v[0].x_y&0xffff);
       int x1=(short)(v[1].x_y>>16),y1=(short)(v[1].x_y&0xffff);
       int x2=(short)(v[2].x_y>>16),y2=(short)(v[2].x_y&0xffff);
@@ -171,7 +190,7 @@ static void hw_triangle(GLcontext *ctx, GLuint e0, GLuint e1, GLuint e2)
 }
 
 static void hw_quad(GLcontext *ctx, GLuint e0, GLuint e1, GLuint e2, GLuint e3)
-{ hw_triangle(ctx,e0,e1,e2); hw_triangle(ctx,e0,e2,e3); }
+{ g_nquads++; hw_triangle(ctx,e0,e1,e2); hw_triangle(ctx,e0,e2,e3); }
 
 /* Hardware glClear.  NOTE: Driver.Clear's mask uses Mesa's internal BUFFER_BIT_*
  * flags, NOT the GL_*_BUFFER_BIT tokens (that mismatch silently no-op'd the colour
@@ -188,6 +207,7 @@ static void hw_clear(GLcontext *ctx, GLbitfield buffers)
     if (!(buffers & COLOR_BITS)) return;
     uint32_t col = packcol(ctx->Color.ClearColor);
     g_clearcol = col & 0xffffffu;
+    g_cleared = 1;
     /* (1) clear the hardware VRAM target (CPU fill; ARGB8888) */
     { static uint32_t crow[2048]; unsigned i, rows=(unsigned)g_H;
       for(i=0;i<g_pitch;i++) crow[i]=col;
@@ -212,11 +232,14 @@ static void hw_clear(GLcontext *ctx, GLbitfield buffers)
 static void install_render_hooks(GLcontext *ctx)
 {
     TNLcontext *tnl = TNL_CONTEXT(ctx);
-    tnl->Driver.Render.Start         = hw_start;
-    tnl->Driver.Render.Finish        = hw_finish;
-    tnl->Driver.Render.Triangle      = hw_triangle;
-    tnl->Driver.Render.Quad          = hw_quad;      /* UI often uses GL_QUADS */
-    tnl->Driver.Render.BuildVertices = hw_build;
+    /* Wrap swsetup's Start/Finish (capture the originals once, not our wrappers)
+     * so its vertex-build + clip/interp setup keeps running; Triangle/Quad are
+     * overridden inside hw_start after swsetup chooses its funcs.  Leave
+     * BuildVertices/Interp/CopyPV/ClippedPolygon as swsetup installed them. */
+    if (tnl->Driver.Render.Start  != hw_start)  g_orig_start  = tnl->Driver.Render.Start;
+    if (tnl->Driver.Render.Finish != hw_finish) g_orig_finish = tnl->Driver.Render.Finish;
+    tnl->Driver.Render.Start  = hw_start;
+    tnl->Driver.Render.Finish = hw_finish;
 }
 static void hw_update_state(GLcontext *ctx, GLbitfield new_state)
 {
@@ -264,7 +287,7 @@ void m64icd_make_current(void *hdc_v)
     install_render_hooks(ctx);
     g_active = 1;
     g_logn = 0;
-    icdlog("MC W=%u H=%u pitch=%u fboff=0x%x\n", (unsigned)g_W,(unsigned)g_H,g_pitch,g_fboff);
+    icdlog("MC W=%u H=%u pitch=%u fboff=0x%x\n", (unsigned)g_W,(unsigned)g_H,g_pitch,g_fboff,0,0);
 }
 
 /* Present: copy the hardware VRAM target into WMesa's back-buffer DIB, then
@@ -288,9 +311,6 @@ int m64icd_swap(void *hdc_v)
     if (W > g_W) W = g_W;  if (H > g_H) H = g_H;
     unsigned rows = (unsigned)H;
     if (g_pitch*rows*4u > sizeof(g_rb)) rows = sizeof(g_rb)/(g_pitch*4u);
-    if (g_logn < 3) { g_logn++;
-        icdlog("SWAP bpp=%u stride=%u W=%u H=%u\n",
-               (unsigned)fb->cColorBits,(unsigned)fb->ScanWidth,(unsigned)W,(unsigned)H); }
     m64ws_read_vram(g_ws, g_fboff, g_rb, g_pitch*rows*4u);   /* whole target, one call */
 
     /* Composite: copy ONLY hardware-drawn (non-clear-colour) pixels over the DIB,
@@ -311,6 +331,16 @@ int m64icd_swap(void *hdc_v)
                     dw[x]=(unsigned short)(((r>>3)<<10)|((gg>>3)<<5)|(b>>3)); } }
         }
     }
+    if (g_logn < 30) { g_logn++;
+        unsigned ty=(unsigned)(H>1?H/2:0), tx=(unsigned)(W>1?W/2:0);
+        unsigned tgt = *(unsigned*)(g_rb + ty*g_pitch*4u + tx*4u) & 0xffffff;
+        unsigned dibc;
+        if (bpp==32) dibc = *(unsigned*)(dib + ty*stride + tx*4u) & 0xffffff;
+        else { unsigned short w=*(unsigned short*)(dib + ty*stride + tx*2u);
+               dibc=(w<<8); }   /* rough 555->show */
+        icdlog("F%u clr=%u tri=%u quad=%u tgt=%06x dib=%06x\n",
+               g_logn, g_cleared, g_ntris, g_nquads, tgt, (unsigned)dibc); }
+    g_cleared=0; g_ntris=0; g_nquads=0;
     return 0;   /* wgl.c now calls WMesaSwapBuffers -> BitBlt DIB to the window */
 }
 

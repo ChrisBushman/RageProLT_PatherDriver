@@ -85,9 +85,11 @@ void _mainstart(void)
     p_viewport(0,0,W,H);
     p_clearcol(0,0,1,1);            /* blue clear */
     p_clear(GL_COLOR_BUFFER_BIT);
-    p_col3f(1,0,0);                 /* red triangle, apex up */
+    p_col3f(1,0,0);                 /* red triangle that EXTENDS OFF-SCREEN so Mesa
+                                     * must CLIP it (generates new vertices) -- the
+                                     * path that used to garbage/crash. */
     p_begin(GL_TRIANGLES);
-      p_vtx2f(-0.8f,-0.8f); p_vtx2f(0.8f,-0.8f); p_vtx2f(0.0f,0.8f);
+      p_vtx2f(-1.6f,-1.6f); p_vtx2f(1.6f,-1.6f); p_vtx2f(0.0f,1.6f);
     p_end();
     p_finish();
     p_sb(hdc);                      /* hardware present to scanout top-left */
@@ -112,8 +114,10 @@ void _mainstart(void)
     }
     OUTF("hw target: center=0x%06x corner=0x%06x red=%u blue=%u black=%u other=%u\n",
          cen, cor, red, blue, black, other);
-    int pass=(cen==0xFF0000 && cor==0x0000FF && red>200 && blue>200);
-    outs(pass?"RESULT: HARDWARE opengl32.dll renders via mach64 (target verified) + presented!\n"
+    /* CLIP test: center red, and NO garbage (other/black==0). Broken clip-interp
+     * would leave garbage pixels or crash. */
+    int pass=(cen==0xFF0000 && red>200 && other==0 && black==0);
+    outs(pass?"RESULT: CLIPPED hardware render is CLEAN via mach64 (no garbage, no crash)!\n"
              :"RESULT: hw icd mismatch (see counts)\n");
     p_mc(0,0); p_dc(rc);
     ExitProcess(pass?0:1);
