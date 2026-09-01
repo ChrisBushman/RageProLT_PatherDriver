@@ -269,13 +269,16 @@ int m64icd_swap(void *hdc_v)
     if (!dib) return 0;                            /* single-buffered: nothing to blit */
 
     int W = fb->Base.Width, H = fb->Base.Height;
-    if (g_logn < 8) { g_logn++;
-        icdlog("SWAP bpp=%u stride=%u W=%u H=%u\n",
-               (unsigned)fb->cColorBits,(unsigned)fb->ScanWidth,(unsigned)W,(unsigned)H); }
     if (W > g_W) W = g_W;  if (H > g_H) H = g_H;
     unsigned rows = (unsigned)H;
     if (g_pitch*rows*4u > sizeof(g_rb)) rows = sizeof(g_rb)/(g_pitch*4u);
     m64ws_read_vram(g_ws, g_fboff, g_rb, g_pitch*rows*4u);   /* whole target, one call */
+
+    if (g_logn < 40) { g_logn++;
+        unsigned cen = *(unsigned*)(g_rb + (rows/2)*g_pitch*4u + ((unsigned)W/2)*4u) & 0xffffff;
+        unsigned tl  = *(unsigned*)(g_rb + 0) & 0xffffff;
+        unsigned nz=0,i; for(i=0;i<rows*g_pitch;i++) if((*(unsigned*)(g_rb+i*4u)&0xffffff)) nz++;
+        icdlog("SW#%u cen=%06x tl=%06x nz=%u\n", g_logn, cen, tl, nz); }
 
     unsigned stride = fb->ScanWidth; int bpp = fb->cColorBits;
     unsigned y; int x;
