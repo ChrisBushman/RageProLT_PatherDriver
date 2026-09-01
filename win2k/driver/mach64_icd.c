@@ -313,22 +313,23 @@ int m64icd_swap(void *hdc_v)
     if (g_pitch*rows*4u > sizeof(g_rb)) rows = sizeof(g_rb)/(g_pitch*4u);
     m64ws_read_vram(g_ws, g_fboff, g_rb, g_pitch*rows*4u);   /* whole target, one call */
 
-    /* Composite: copy ONLY hardware-drawn (non-clear-colour) pixels over the DIB,
-     * so swrast 2D (menu/HUD) shows through wherever no geometry was drawn. */
+    /* Present the FULL hardware target (the game renders its whole frame -- 3D
+     * world + textured-quad UI -- through our geometry hooks). No colour-keying:
+     * the game runs gl_clear=0 (never colour-clears), so a black pixel is a real
+     * scene colour, not "transparent" -- keying against it blacked out/flickered
+     * dark areas. Direct copy of the target into the DIB, then BitBlt. */
     unsigned stride = fb->ScanWidth; int bpp = fb->cColorBits;
-    unsigned key = g_clearcol;
     unsigned y; int x;
     for (y=0; y<rows; y++) {
         unsigned char *s = g_rb + y*g_pitch*4u;
         unsigned char *d = dib + y*stride;
         if (bpp == 32) {
-            for (x=0; x<W; x++){ unsigned px=*(unsigned*)(s+x*4)&0xffffff;
-                if (px!=key) *(unsigned*)(d+x*4)=px; }
+            for (x=0; x<W; x++) *(unsigned*)(d+x*4) = *(unsigned*)(s+x*4) & 0xffffff;
         } else {                                   /* 16bpp, 5-5-5 to match BGR16 */
             unsigned short *dw = (unsigned short*)d;
-            for (x=0; x<W; x++){ unsigned px=*(unsigned*)(s+x*4)&0xffffff;
-                if (px!=key){ unsigned r=(px>>16)&0xff,gg=(px>>8)&0xff,b=px&0xff;
-                    dw[x]=(unsigned short)(((r>>3)<<10)|((gg>>3)<<5)|(b>>3)); } }
+            for (x=0; x<W; x++){ unsigned px=*(unsigned*)(s+x*4);
+                unsigned r=(px>>16)&0xff,gg=(px>>8)&0xff,b=px&0xff;
+                dw[x]=(unsigned short)(((r>>3)<<10)|((gg>>3)<<5)|(b>>3)); }
         }
     }
     if (g_logn < 30) { g_logn++;
