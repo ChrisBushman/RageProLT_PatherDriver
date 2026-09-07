@@ -75,3 +75,19 @@ int mach64_cgs_resolve_bounds(uint32_t window_id, uint32_t surface_id,
             window_id, surface_id, nwin);
     return 0;
 }
+
+/* Main-display pixel size (public CoreGraphics).  A FULLSCREEN drawable descriptor carries no usable
+ * geometry (it is reused heap -- observed holding ASCII "fsprobe"), so its d[1]/d[2] are garbage and
+ * Apple's set_shape rejects them (0xe00002be) -> no render target.  Shape the fullscreen surface to
+ * the real display size instead.  Returns 1 + w/h on success (e.g. 1024x768 on the Lombard panel). */
+int mach64_display_size(int *w, int *h)
+{
+    CGDirectDisplayID d = CGMainDisplayID();
+    size_t pw = CGDisplayPixelsWide(d), ph = CGDisplayPixelsHigh(d);
+    if (pw > 0 && ph > 0 && pw <= 4096 && ph <= 4096) {
+        *w = (int)pw; *h = (int)ph;
+        gld_log("  [cgs] main display = %dx%d\n", *w, *h);
+        return 1;
+    }
+    return 0;
+}

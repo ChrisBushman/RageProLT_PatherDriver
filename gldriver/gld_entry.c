@@ -134,6 +134,19 @@ int gldAttachDrawable(gld_context *ctx, int type, void *drawable, uint32_t flags
                     crtc, base, pitch, hi);
             if (pitch) { base_bytes = base; width = pitch;
                          if (hi >= 16 && hi <= 4096) height = hi; }
+            else {
+                /* Apple's ATIRagePro sel-5 returns dims-only (0 here), and the FULLSCREEN drawable
+                 * descriptor is reused-heap GARBAGE (fsprobe: d[1]/d[2] = 67468 x 124154736, descdump
+                 * held ASCII "fsprobe"), so set_shape rejects those dims (0xe00002be) -> rt peek = 0 ->
+                 * nothing renders (the earlier fullscreen black/garbage).  Shape to the REAL main
+                 * display size instead so set_shape succeeds and the surface gets a valid render target. */
+                int dw = 0, dh = 0;
+                if (mach64_display_size(&dw, &dh)) {
+                    width = (uint32_t)dw; height = (uint32_t)dh;
+                    gld_log("  [pathb] fullscreen -> display size %ux%u (descriptor dims ignored)\n",
+                            width, height);
+                }
+            }
         }
         pitch_bytes = width * 4;
         fb_pitch_px = width;
