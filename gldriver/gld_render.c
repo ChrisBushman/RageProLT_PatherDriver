@@ -473,7 +473,14 @@ static void mach64_frame_start(gld_context *ctx)
 {
     mach64_priv *p = MACH64_PRIV(ctx);
     if (p->frame_new) {
-        mach64_clear_color(ctx);
+        /* Batch the colour clear into p->batch (NOT a separate mach64_submit) so the clear and the
+         * frame's triangles drain as ONE command stream -> ONE IOConnectMapMemory(type1) trigger ->
+         * ONE backing->buffer copy opportunity, in the correct order (clear first, geometry on top).
+         * With the clear as its OWN submit, each frame did multiple type-1 drains and the trailing
+         * copy could clobber the just-rendered geometry with the (black) system backing -> the black
+         * screen.  batch_clear_color marks state dirty so the following triangle re-emits full 3D
+         * state after the 2D clear regs. */
+        mach64_batch_clear_color(ctx);
         if (p->z_off && (p->hw.z_cntl & MACH64_Z_EN))
             mach64_clear_zbuffer(ctx);   /* separate submit; also marks state dirty */
         p->frame_new = 0;
@@ -1133,6 +1140,24 @@ void mach64_dispatch_render_ctl(gld_context *ctx, uint32_t a4, uint32_t a5,
              * clear-only app dispatches no triangle, so the lazy clear would otherwise never
              * fire and we'd present the uninitialised buffer -> upper-left garbage). */
             mach64_frame_start(ctx);
+            /* Flush THIS frame's pending triangles into the surface buffer BEFORE presenting.
+             * Without this the batch only drains at the NEXT frame's clear (fill_rect's implicit
+             * flush), so geometry lagged a frame and the clear/draw order was scrambled -> the
+             * spinning triangle left a trail (never-cleared accumulation into a jagged circle),
+             * and the mis-ordered per-frame 2D(clear)<->3D(tri) submits are the likely engine
+             * wedge behind the second-run panic.  Now each frame is a clean
+             * clear -> draw -> flush -> surface_flush. */
+            mach64_flush_batch(ctx);
+            /* FENCE before present: the triangle submit KICKS the setup/scaler engine and returns;
+             * surface_flush (build_swap) blits the surface buffer to scanout and can race ahead of
+             * the still-rasterizing 3D engine, capturing the cleared-but-triangle-less buffer (black
+             * screen).  finish (sel 8, drain+idle) waits for the engine to retire our geometry first.
+             * (The old flush-at-next-clear timing hid this: the triangle had a whole frame to finish
+             * before its present -- but then never cleared, hence the trail.) */
+            { kern_return_t fkr = IOConnectMethodScalarIStructureI(ctx->connect,
+                                      kATIRPro_finish, 0, 0, NULL);
+              static int flog = 0; if (flog < 3) {
+                  gld_log("  [pathb] finish-fence kr=0x%x\n", fkr); flog++; } }
             mach64_pathb_present(ctx);   /* surface_flush -> blit the rendered buffer to scanout */
             p->frame_new = 1;
             return;

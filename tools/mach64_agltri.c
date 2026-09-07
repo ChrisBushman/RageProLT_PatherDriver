@@ -52,16 +52,19 @@ int main(void)
     glDisable(GL_DEPTH_TEST);
     glShadeModel(GL_SMOOTH);
 
-    /* STATIC triangle, few frames: deterministic coords for clean log diagnosis after the
-     * 480x400 surface-size fix.  If the 3D SETUP/VERTEX PIO path is sound we get a big
-     * Gouraud triangle; if it panics, the persistent ~/mach64gld.log pinpoints the call. */
-    printf("rendering 40 frames (static Gouraud triangle)...\n"); fflush(stdout);
+    /* SPINNING Gouraud triangle: rotates about Z so the setup engine re-transforms and
+     * re-rasterizes fresh geometry (and both windings) every frame -- exercises the full
+     * 3D PIO path continuously, now that the static case is proven. */
+    printf("rendering 180 frames (spinning Gouraud triangle)...\n"); fflush(stdout);
     int i;
-    for (i = 0; i < 40; i++) {
+    for (i = 0; i < 180; i++) {
+        float a = (float)i * 2.0f;                   /* degrees/frame */
         glClearColor(0.10f, 0.10f, 0.15f, 1.0f);     /* dark slate background */
         glClear(GL_COLOR_BUFFER_BIT);
 
         glLoadIdentity();
+        glRotatef(a, 0.0f, 0.0f, 1.0f);              /* spin about Z */
+
         glBegin(GL_TRIANGLES);
             glColor3f(1.0f, 0.0f, 0.0f); glVertex2f( 0.0f,  0.8f);
             glColor3f(0.0f, 1.0f, 0.0f); glVertex2f(-0.8f, -0.6f);
@@ -69,9 +72,9 @@ int main(void)
         glEnd();
 
         aglSwapBuffers(ctx);                         /* -> gldFlushBuffer -> Path-B present */
-        usleep(25000);                               /* window stays up ~1s */
+        usleep(16000);                               /* ~60 Hz; window stays up ~3s */
     }
-    printf("done -- 40 triangle frames presented\n");
+    printf("done -- 180 spinning triangle frames presented\n");
 
     aglSetCurrentContext(NULL);
     aglSetDrawable(ctx, NULL);
