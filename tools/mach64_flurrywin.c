@@ -52,34 +52,49 @@ static GLuint make_glow(void)
 
 int main(int argc, char **argv)
 {
-    Rect bounds = { 40, 40, 640, 840 };   /* 800x600 normal window */
-    WindowRef win;
-    GLint attribs[] = { AGL_RGBA, AGL_ACCELERATED, AGL_DOUBLEBUFFER, AGL_DEPTH_SIZE, 16, AGL_NONE };
+    int fs = (getenv("MACH64_FS") != 0);        /* MACH64_FS=1 -> fullscreen instead of a window */
+    int W = fs ? 1024 : 800, H = fs ? 768 : 600;
+    Rect bounds = { 40, 40, 40 + H, 40 + W };   /* window: W x H at (40,40) */
+    WindowRef win = 0;
+    GLint attribs_win[] = { AGL_RGBA, AGL_ACCELERATED, AGL_DOUBLEBUFFER, AGL_DEPTH_SIZE, 16, AGL_NONE };
+    GLint attribs_fs[]  = { AGL_RGBA, AGL_ACCELERATED, AGL_FULLSCREEN, AGL_DOUBLEBUFFER, AGL_DEPTH_SIZE, 16, AGL_NONE };
     AGLPixelFormat pf; AGLContext ctx; int f, i;
     int NPART   = (argc > 1) ? atoi(argv[1]) : NPART_DEF;
     int NFRAMES = (argc > 2) ? atoi(argv[2]) : NFRAMES_DEF;
     if (NPART < 1) NPART = 1;
     if (NFRAMES < 1) NFRAMES = 1;
 
-    CreateNewWindow(kDocumentWindowClass, kWindowStandardDocumentAttributes, &bounds, &win);
-    SetWindowTitleWithCFString(win, CFSTR("mach64 Flurry-like windowed stress (400 colour quads)"));
-    ShowWindow(win);
-    pf = aglChoosePixelFormat(NULL, 0, attribs);
+    if (fs) {
+        GDHandle dev = GetMainDevice();
+        pf = aglChoosePixelFormat(&dev, 1, attribs_fs);
+    } else {
+        CreateNewWindow(kDocumentWindowClass, kWindowStandardDocumentAttributes, &bounds, &win);
+        SetWindowTitleWithCFString(win, CFSTR("mach64 Flurry-like stress"));
+        ShowWindow(win);
+        pf = aglChoosePixelFormat(NULL, 0, attribs_win);
+    }
     if (!pf) { printf("no pixfmt (err %d)\n", (int)aglGetError()); return 1; }
     ctx = aglCreateContext(pf, NULL);
     if (!ctx) { printf("no ctx (err %d)\n", (int)aglGetError()); return 1; }
-    aglSetDrawable(ctx, GetWindowPort(win));
+    if (fs) aglSetFullScreen(ctx, W, H, 0, 0);   /* (CGDisplayCapture didn't help: our surface is
+                                                  * non-display-owning, so it's not the scanout race) */
+    else    aglSetDrawable(ctx, GetWindowPort(win));
     aglSetCurrentContext(ctx);
-    printf("GL_RENDERER = %s\n", (const char*)glGetString(GL_RENDERER)); fflush(stdout);
+    printf("GL_RENDERER = %s  (%s %dx%d)\n", (const char*)glGetString(GL_RENDERER),
+           fs ? "FULLSCREEN" : "windowed", W, H); fflush(stdout);
 
-    glViewport(0, 0, 800, 600);
-    glMatrixMode(GL_PROJECTION); glLoadIdentity(); glOrtho(0, 800, 0, 600, -1, 1);
+    glViewport(0, 0, W, H);
+    glMatrixMode(GL_PROJECTION); glLoadIdentity(); glOrtho(0, W, 0, H, -1, 1);
     glMatrixMode(GL_MODELVIEW); glLoadIdentity();
-    glEnable(GL_TEXTURE_2D);
-    glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE);   /* additive, like Flurry */
-    make_glow();
+    int min = (getenv("MACH64_MIN") != 0);   /* minimal isolation mode: no texture/blend (no texheap) */
+    if (!min) {
+        glEnable(GL_TEXTURE_2D);
+        glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE);   /* additive, like Flurry */
+        make_glow();
+    }
 
-    printf("rendering %d frames of %d colour quads...\n", NFRAMES, NPART); fflush(stdout);
+    printf("rendering %d frames of %d colour quads (%s)...\n", NFRAMES, NPART,
+           min ? "MINIMAL: flat, no texture" : "textured"); fflush(stdout);
     for (f = 0; f < NFRAMES; f++) {
         double t = f * 0.04;
         glClearColor(0, 0, 0, 1); glClear(GL_COLOR_BUFFER_BIT);
@@ -87,7 +102,7 @@ int main(int argc, char **argv)
         for (i = 0; i < NPART; i++) {
             double a = t + i * (6.2831853 / NPART) * 7.0;
             double r = 60 + 200 * (0.5 + 0.5 * sin(t * 1.3 + i * 0.05));
-            double cx = 400 + r * cos(a), cy = 300 + r * sin(a);
+            double cx = W/2 + r * cos(a), cy = H/2 + r * sin(a);
             float s = 24.f;
             /* distinct colour per particle */
             float cr = 0.5f + 0.5f * (float)sin(i * 0.10 + 0.0);

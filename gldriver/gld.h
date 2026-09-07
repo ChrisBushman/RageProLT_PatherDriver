@@ -125,6 +125,9 @@ typedef struct {
     /* ---- Path B port (GLD_APPLE_PROBE): live connections to Apple's ATIRagePro kext ---- */
     unsigned int apple_cn;         /* io_connect_t to Apple's type-1 GL user client (0=none) */
     unsigned int apple_surf_cn;    /* io_connect_t to Apple's type-2 IOAccelSurface client (0=none) */
+    uint32_t   present_unsafe;     /* 1 = bound surface is display-associated (surf[0x178]!=0xffff) ->
+                                    * its present DST aliases the live scanout -> would race IONDRV ->
+                                    * skip prime + present (setup_target/render_ctl) to avoid a panic */
     /* ---- Path-B VRAM allocator records (from the sel-10 op=ALLOC kext path); opaque kernel handles,
      * freed on detach/destroy so VRAM isn't leaked.  0 = allocated via the small-window guess. */
     uint32_t   z_record;           /* Apple-allocator record for the Z buffer   */

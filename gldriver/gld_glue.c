@@ -106,9 +106,17 @@ void mach64_apple_bind_surface(unsigned int cn, uint32_t surface_id,
 {
     if (!cn) return;
     { uint32_t idx = surface_id & 0x7fffu, dummy = 0;
+      /* mode BIT 0x20 = present-by-2D-BLIT (the "windowed" present).  set_surface is the LAST writer
+       * of surf[0x154] (after set_id_mode's 0x24), and we used to pass 0 -> bit 0x20 CLEAR.  For a
+       * WINDOWED surface that was harmless (it never owns a display, so is_flip_allowed()=0 forces the
+       * blit anyway).  But a FULLSCREEN surface OWNS its display (set_id_mode), so with bit 0x20 clear
+       * the kext present takes the submit_flip_buffer CRTC PAGE-FLIP path (kext 0x5c28 tests
+       * surf[0x154]&0x20), which drives the mach64 CRTC scanout register and RACES Apple's IONDRV
+       * framebuffer driver -> HARD KERNEL PANIC (the fullscreen crash).  Setting bit 0x20 forces the
+       * safe 2D-blit present for ALL surfaces -- windowed unchanged, fullscreen no longer flips. */
       kern_return_t sr = IOConnectMethodScalarIStructureI((io_connect_t)cn, 0 /* set_surface */,
                              4 /*scalarIn*/, 0 /*structInSize*/,
-                             idx, 0u /*mode*/, 0u, 0u, &dummy);
+                             idx, 0x24u /*mode: 0x20=blit-present (no CRTC flip), 0x04=8888*/, 0u, 0u, &dummy);
       gld_log("[apple-probe] set_surface(id=0x%x) [ScalarIStructI] -> kr=0x%08x  %s\n", idx, sr,
               sr == KERN_SUCCESS ? "*** SURFACE BOUND -- port viable! ***" :
               (sr == 0xe00002c2 ? "0x2c2: not resolved" : "other error"));

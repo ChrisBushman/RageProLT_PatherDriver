@@ -426,12 +426,40 @@ void mach64_pathb_setup_target(gld_context *ctx)
     mach64_priv *p = MACH64_PRIV(ctx);
     io_connect_t sc = (io_connect_t)p->apple_surf_cn;
     io_connect_t gc = ctx->connect;
-    uint32_t surf = 0, desc = 0, rt = 0;
+    uint32_t surf = 0, desc = 0, rt = 0, mode154 = 0, d178 = 0, d12c = 0;
+    gld_log("[st] begin sc=0x%x gc=0x%x\n", (unsigned)sc, (unsigned)gc);   /* DIAG: fsync'd step markers */
+    /* PROBE (log-only, BEFORE the prime present): read the surface's display association.  Per RE, a
+     * surface with a VALID display index (surf[0x178] != 0xffff) has resetFullScreen repoint its present
+     * DST (surf[0x12c]) to the LIVE scanout (ignoring the 0x20 blit bit), which races Apple's IONDRV
+     * framebuffer -> panic.  surf[0x12c]==surf+0xcc means the DST is the private backing (safe). */
+    IOConnectMethodScalarIScalarO(gc, kATIRPro_scale_surface, 1, 1, 0x10cu, &surf);
+    if (surf > 0x10000u && surf < 0x40000000u) {
+        IOConnectMethodScalarIScalarO(gc, kATIRPro_scale_surface, 1, 1, 0x80000000u | (surf + 0x178u), &d178);
+        IOConnectMethodScalarIScalarO(gc, kATIRPro_scale_surface, 1, 1, 0x80000000u | (surf + 0x12cu), &d12c);
+        IOConnectMethodScalarIScalarO(gc, kATIRPro_scale_surface, 1, 1, 0x80000000u | (surf + 0x154u), &mode154);
+        gld_log("[st] PROBE surf=0x%x surf[0x178]=0x%x surf[0x12c]=0x%x surf[0x154]=0x%x\n",
+                surf, d178, d12c, mode154);
+        /* SAFETY BAIL: windowed (works) has surf[0x178]==0xffff (HW-confirmed).  A surface with a valid
+         * display index has its present DST repointed to the LIVE scanout -> races IONDRV -> panic.  So
+         * do NOT prime/present a display-associated surface: bail here (no prime), and render_ctl skips
+         * the present too (p->present_unsafe).  Renders nothing rather than panicking. */
+        if ((d178 & 0xffffu) != 0xffffu) {
+            p->present_unsafe = 1;
+            gld_log("[st] surf[0x178]=0x%x != 0xffff -> DISPLAY-ASSOCIATED (present races scanout); "
+                    "BAILING, no prime/present\n", d178);
+            return;
+        }
+        p->present_unsafe = 0;
+    }
     if (sc) {
         apple_surf_data sd; IOByteCount ol = sizeof sd; memset(&sd, 0, sizeof sd);
+        gld_log("[st] write_lock...\n");
         IOConnectMethodScalarIStructureO(sc, kATIRProSurf_surface_write_lock, 0, &ol, &sd);
+        gld_log("[st] write_unlock...\n");
         IOConnectMethodScalarIScalarO(sc, kATIRProSurf_surface_write_unlock, 0, 0);
+        gld_log("[st] surface_flush (prime present)...\n");
         IOConnectMethodScalarIScalarO(sc, kATIRProSurf_surface_flush, 2, 0, 1u, 0u);
+        gld_log("[st] primed OK\n");
     }
     /* KERNEL-PEEK HAZARD: these are absolute kernel reads (0x80000000 flag).  Dereferencing a
      * bogus pointer PANICS the machine (docs hazard).  VALIDATE each peeked pointer is in the
@@ -439,9 +467,17 @@ void mach64_pathb_setup_target(gld_context *ctx)
      * ~0, a userspace address) is skipped, leaving target_off 0 (caller renders nothing) rather
      * than panicking.  Observed-good: surf~0x1d84400, desc~0x1d8449c (kernel zalloc zone). */
 #define PEEK_OK(pp)  ((pp) > 0x10000u && (pp) < 0x40000000u)
+    gld_log("[st] peek ctx[0x10c]=surf...\n");
     IOConnectMethodScalarIScalarO(gc, kATIRPro_scale_surface, 1, 1, 0x10cu, &surf);
+    gld_log("[st] surf=0x%x %s\n", surf, PEEK_OK(surf) ? "ok" : "BAD-skip");
+    if (PEEK_OK(surf)) {   /* DIAG: read surf[0x154] mode -> confirm blit bit 0x20 (else CRTC flip -> panic) */
+        IOConnectMethodScalarIScalarO(gc, kATIRPro_scale_surface, 1, 1, 0x80000000u | (surf + 0x154u), &mode154);
+        gld_log("[st] surf[0x154] mode=0x%x  (blit-bit 0x20 %s)\n", mode154, (mode154 & 0x20) ? "SET" : "CLEAR!");
+    }
     if (PEEK_OK(surf)) IOConnectMethodScalarIScalarO(gc, kATIRPro_scale_surface, 1, 1, 0x80000000u | (surf + 0x12cu), &desc);
+    gld_log("[st] desc=0x%x %s\n", desc, PEEK_OK(desc) ? "ok" : "BAD-skip");
     if (PEEK_OK(desc)) IOConnectMethodScalarIScalarO(gc, kATIRPro_scale_surface, 1, 1, 0x80000000u | (desc + 0x28u), &rt);
+    gld_log("[st] rt=0x%x\n", rt);
 #undef PEEK_OK
     if (rt) {
         uint32_t toff   = (rt & 0x3fffffu) << 3;         /* VRAM byte offset */
@@ -474,7 +510,13 @@ void mach64_pathb_setup_target(gld_context *ctx)
              * accel[0x544] mutex (as the stock methods do), which should fix it -- but it still runs on
              * EVERY attach, so keep it gated until validated on hardware.  Without the env var, use the
              * proven small-window guessed placement. */
-            int use_alloc = (getenv("MACH64_VRAM_ALLOC") != 0);
+            /* Allocator ONLY for WINDOWED (win_mode): there Apple's best-fit heap knows the
+             * WindowServer's allocations and is collision-free (HW-proven: agltexbig).  At FULLSCREEN
+             * (win_mode==0) the same best-fit can return an offset overlapping the LIVE SCANOUT, and
+             * the texture upload into it corrupts the display -> KERNEL PANIC (HW-proven: flurryfs).
+             * So fullscreen uses NO allocator: Z falls back (depth off if it won't fit) and the texheap
+             * is placed manually in the tail past our own backing (below). */
+            int use_alloc = (getenv("MACH64_VRAM_ALLOC") != 0) && MACH64_PRIV(ctx)->win_mode;
             if (p->z_record)   { mach64_vram_free(ctx, p->z_record);   p->z_record = 0; }   /* re-attach: no leak */
             if (p->tex_record) { mach64_vram_free(ctx, p->tex_record); p->tex_record = 0; }
             if (vis_h && use_alloc) {
@@ -486,17 +528,36 @@ void mach64_pathb_setup_target(gld_context *ctx)
                 gld_log("[pathb] z-buffer -> off=0x%x pitch=%u (Apple allocator)\n", p->z_off, p->z_pitch);
             } else if (vis_h) {
                 /* FALLBACK: gap past the colour surface (small windows only -- see the historical
-                 * white-clobber note; writing Z inside the surface's tracked range clobbers present). */
-                mach64_set_zbuffer(ctx, toff + 2u * color_bytes, tpitch);
-                gld_log("[pathb] z-buffer -> off=0x%x pitch=%u (guessed gap; small window only)\n",
-                        p->z_off, p->z_pitch);
+                 * white-clobber note; writing Z inside the surface's tracked range clobbers present).
+                 * BOUNDS-GUARD: at fullscreen size this gap lands PAST 8MB VRAM (e.g. 1024x768 ->
+                 * 0xa78000) -- writing Z there is out-of-bounds and corrupts the machine.  Only use it
+                 * if it fits; otherwise skip Z (depth off) -- use MACH64_VRAM_ALLOC=1 for depth here. */
+                uint32_t zguess = toff + 2u * color_bytes;
+                if (zguess + zsize <= 0x800000u) {
+                    mach64_set_zbuffer(ctx, zguess, tpitch);
+                    gld_log("[pathb] z-buffer -> off=0x%x pitch=%u (guessed gap; small window only)\n",
+                            p->z_off, p->z_pitch);
+                } else {
+                    gld_log("[pathb] z-buffer SKIPPED: guess 0x%x+0x%x past 8MB VRAM -- depth off "
+                            "(set MACH64_VRAM_ALLOC=1 for depth at this size)\n", zguess, zsize);
+                }
             }
             if (theap) {
-                mach64_set_texheap(theap, theap + texsize);       /* Apple-allocated -> any size safe */
-            } else if (vis_h && p->z_off) {
-                uint32_t g = p->z_off + zsize;                    /* fallback: gap after Z, < 0x400000 */
+                mach64_set_texheap(theap, theap + texsize);       /* windowed: Apple-allocated -> safe */
+            } else if (vis_h && MACH64_PRIV(ctx)->win_mode) {
+                /* WINDOWED small-window fallback (no allocator): gap after Z, < 0x400000. */
+                uint32_t g = p->z_off ? p->z_off + zsize : (toff + 2u * color_bytes);
                 if (g < 0x3f0000u) mach64_set_texheap(g, 0x400000u);
-                else gld_log("[pathb] texheap: no safe room (0x%x) + no allocator -- textures unsafe\n", g);
+                else { mach64_set_texheap(0, 0);
+                       gld_log("[pathb] texheap: no safe room (0x%x) -- textures OFF\n", g); }
+            } else if (vis_h) {
+                /* FULLSCREEN: at screen size the VRAM is too cramped for a KNOWN-safe texheap -- the tail
+                 * past our backing collides with Apple's framebuffer/cursor (HW: black->panic), and the
+                 * allocator can hand back a scanout-colliding offset.  Mark the heap INVALID (0,0) so
+                 * texture uploads SKIP -> fullscreen renders UNTEXTURED but STABLE (HW-proven flat).
+                 * Textured fullscreen needs the Apple VRAM-layout RE to find a genuinely-free region. */
+                mach64_set_texheap(0, 0);
+                gld_log("[pathb] texheap: FULLSCREEN -> OFF (no known-safe region; untextured, stable)\n");
             }
         }
     }
@@ -1283,6 +1344,15 @@ void mach64_dispatch_render_ctl(gld_context *ctx, uint32_t a4, uint32_t a5,
          * hook.  Takes priority over the legacy VRAM back->front blit (which needs our-kext
          * buffers Path B doesn't allocate). */
         if (p && p->apple_surf_cn) {
+            /* A display-associated surface's present blits the LIVE scanout -> races IONDRV -> panic.
+             * setup_target flagged it (present_unsafe); skip the whole present here (render nothing this
+             * frame) rather than crash the machine.  The real fix is to keep the surface non-associated. */
+            if (p->present_unsafe) {
+                static int u = 0; if (u < 2) {
+                    gld_log("  [pathb] render_ctl: present_unsafe surface -> present SKIPPED (no scanout race)\n"); u++; }
+                p->frame_new = 1;
+                return;
+            }
             /* Render the frame's deferred glClear INTO the surface buffer with the engine (a
              * clear-only app dispatches no triangle, so the lazy clear would otherwise never
              * fire and we'd present the uninitialised buffer -> upper-left garbage). */

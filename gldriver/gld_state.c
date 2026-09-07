@@ -49,6 +49,15 @@ void mach64_init_state(mach64_priv *p)
 void mach64_set_render_target(gld_context *ctx, uint32_t off, uint32_t pitch_px)
 {
     mach64_priv *p = MACH64_PRIV(ctx);
+    /* OOB GUARD: VRAM is 8MB -- no valid render-target offset is ever >= 0x800000.  The legacy
+     * dbuf/winpool path computes back = base(0x600000) + colour surface, which OVERFLOWS at
+     * full-screen size (1024x768 -> 0x900000) and, if the engine ever renders there, PANICS the
+     * machine.  Reject it: keep the previous (in-bounds) target so setup_target's real surface rt is
+     * the one that sticks.  Legitimate offsets (< 8MB) pass through untouched -> windowed unaffected. */
+    if (off >= 0x800000u) {
+        gld_log("[state] set_render_target OOB off=0x%x REJECTED (>=8MB VRAM)\n", off);
+        return;
+    }
     p->target_off   = off;
     p->target_pitch = pitch_px;
     p->hw.dst_off_pitch = ((pitch_px / 8) << 22) | (off >> 3);
@@ -74,6 +83,13 @@ void mach64_set_shade_model(gld_context *ctx, int smooth)
 void mach64_set_zbuffer(gld_context *ctx, uint32_t off, uint32_t pitch_px)
 {
     mach64_priv *p = MACH64_PRIV(ctx);
+    /* OOB GUARD (same rationale as set_render_target): reject a depth-buffer offset >= 8MB VRAM.
+     * The legacy path's guessed/winpool Z lands past 8MB at full-screen size; writing/clearing Z
+     * there PANICS.  Reject -> keep the prior Z (setup_target's allocator sets the real one). */
+    if (off >= 0x800000u) {
+        gld_log("[state] set_zbuffer OOB off=0x%x REJECTED (>=8MB VRAM)\n", off);
+        return;
+    }
     p->z_off   = off;
     p->z_pitch = pitch_px;
     p->hw.z_off_pitch = ((pitch_px / 8) << 22) | (off >> 3);
