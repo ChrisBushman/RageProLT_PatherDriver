@@ -12,17 +12,26 @@ Status: **2D fill / clear / present pipeline is complete and hardware-verified.*
 ## 0. Audience and scope
 
 This document is for engineers writing an OpenGL renderer bundle (`GLDriver`) that drives Apple's
-*shipped, unmodified* `ATIRagePro.kext`, filling the empty GL socket that the kext's
-`IOGLBundleName` (`"ATIRageProGLDriver"`) points at. It is the ground-truth contract for how a
-user-space client submits register commands to the mach64 2D engine through Apple's IOKit
-accelerator and presents the result to the screen.
+*shipped* `ATIRagePro.kext`, filling the empty GL socket that the kext's `IOGLBundleName`
+(`"ATIRageProGLDriver"`) points at. It is the ground-truth contract for how a user-space client
+submits register commands to the mach64 2D/3D engine through Apple's IOKit accelerator and presents
+the result to the screen.
 
 Everything here was recovered by static disassembly (capstone/PPC) plus live probing on hardware;
 where a claim is hardware-verified it is marked **[HW]**. Register offsets are the canonical mach64
 (DRI `drm_mach64_drv.h`) offsets unless stated otherwise.
 
-Rendering requires **no kext patch**. (An RE-only patch was used to *observe* kernel state during
-reverse engineering; it is not part of the contract.)
+**Kext-patch status (be precise about this).** The whole *rendering and present pipeline* —
+register submission (§5), the 2D/3D/depth engine (§4, §10), and `surface_flush` present (§7) — runs
+on the **stock, unmodified** kext. There is exactly **one** stock-kext gap: obtaining the bound
+surface's render-target `OFF_PITCH` (`surf[0x12c][0x28]`, §6). No shipping selector returns it, so
+the current implementation reads that single value via a **temporary peek patch** — GL selector 14
+(`scale_surface`, otherwise unused) repurposed into a kernel-memory read. **This means the driver as
+built today DOES require the peek-patched kext to discover its render target.** The fix for a
+truly-unmodified deployment is one small kext addition: a `get_render_target` selector that returns
+`surf[0x12c][0x28]` (§6.1). Nothing else in the contract depends on a patch. Where this document says
+"unmodified kext," read it as "the pipeline needs no patch *given* the render-target offset" — that
+one lookup is the sole outstanding dependency.
 
 ---
 
@@ -80,7 +89,7 @@ dispatch type: `kIOUCScalarIScalarO=0`, `kIOUCScalarIStructO=2`, `kIOUCStructISt
 | 11| `delete_texture`      |                                                        |
 | 12| `become_global_shared`|                                                        |
 | 13| `pageoff_texture`     |                                                        |
-| 14| `scale_surface`       | (unused; repurposed as an RE hook during development)  |
+| 14| `scale_surface`       | stock: unused. **Currently repurposed by a peek patch into a kernel-memory read** — the driver uses it to fetch the render-target `OFF_PITCH` (§6.1). The sole kext-patch dependency; a shipping build replaces it with a `get_render_target` selector. |
 
 ### Surface (type 0) — 16 selectors (relevant subset)
 
@@ -163,7 +172,8 @@ the real base sits `0x400` *below* `MMIO_base`, still inside the mapping. For a 
 > **All registers are reachable via `submit_buffer` PIO. 2D fills/blits/clears AND 3D
 > SETUP/VERTEX/ONE_OVER_AREA geometry submit through the exact same path — no bus-master DMA or
 > vertex-buffer subsystem is required for hardware triangles.** [HW-PROVEN: a Gouraud triangle
-> rasterizes through Apple's unmodified kext, §10.]
+> rasterizes through Apple's kext via this stock PIO submit path, §10 — the engine needs no patch
+> (only the render-target offset lookup does, §0/§6.1).]
 
 > **Pitfall (cost the most).** An earlier revision special-cased block 0 as `reg < 0x400 ? reg : reg
 > − 0x400`, writing SETUP/VERTEX at `MMIO_base + 0x2xx/0x3xx = real 0x6xx/0x7xx` — the *wrong*
@@ -248,6 +258,16 @@ Apple's framebuffer driver.
 the dirty bit, and `flush_surface`/`clientMemoryForType` will then copy the (stale) *system* backing
 over the engine's VRAM render and clobber it.
 
+**[HW] Reset the engine to 2D state before `surface_flush`.** `build_swap` is itself a blit through
+the **shared** 2D/3D drawing engine, and it does **not** fully re-initialize engine state — it
+inherits whatever the last client submission left. If your frame rendered with `Z_EN` set (depth
+testing), `build_swap`'s buffer→scanout copy is then **depth-tested against your Z buffer** and drops
+pixels — the render buffer is correct but the screen shows holes/white where geometry was. Fix:
+append `Z_CNTL = 0` (and `SCALE_3D_CNTL = 0`) to the **tail of the frame's command batch** (keeping
+it one submit) so the engine is in plain 2D state at hand-off. General rule: **any Apple kext
+operation that uses the engine after your render inherits your leftover state — end each frame in a
+neutral 2D state before yielding to `build_swap`.**
+
 ---
 
 ## 8. The dirty bit and the backing copy
@@ -306,7 +326,8 @@ surface.flush(1,0)                                                            # 
 ```
 
 **[HW]** verified: full-screen red on a standalone test; a windowed AGL app's blue `glClear`
-rendered by the engine and presented — end to end, on the stock kext.
+rendered by the engine and presented — end to end, on the stock kext engine (the render-target
+offset it fills comes from §6.1, the one peek-patch dependency).
 
 ### 9.1 The one-line bug that cost the most
 
@@ -324,8 +345,9 @@ The setup engine (gouraud/textured triangles) is programmed through block-0 regi
 all `< 0x400`, but they are **fully reachable via `submit_buffer` PIO** through the uniform `R −
 0x400` offset and its 32-bit wrap (§4). No bus-master DMA, GART vertex buffer, or `build_swap`-style
 path is required: **the same `{reg,val}` command stream that does 2D fills also rasterizes
-triangles.** A red/green/blue Gouraud triangle renders correctly through Apple's unmodified
-`ATIRagePro.kext` on the Rage LT Pro.
+triangles.** A red/green/blue Gouraud triangle renders correctly through Apple's stock
+`ATIRagePro.kext` engine on the Rage LT Pro (the render path needs no patch; only the render-target
+offset lookup does — §0/§6.1).
 
 **Per-triangle command stream** (appended to the same command buffer, drained by the same map-type-1
 trigger):
