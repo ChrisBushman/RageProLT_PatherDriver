@@ -111,6 +111,13 @@ int main(void){
     /* read back the mach64 MMIO regs (accel[0x550]=MMIO base, per submit_buffer) to see if our
      * PIO {reg,val} actually landed in the engine.  NB peek does a native (BE) load; the LE regs
      * read byte-swapped -- red 0x00ff0000 shows as 0x0000ff00. */
+    { uint32_t eng2=p(0xb0), mm=p(ABS(eng2+0x550));
+      /* Confirm the register aperture is mapped BELOW this[0x550] (real 0x000-0x3ff) so the
+       * submit_buffer wrap (this[0x550]+(reg-0x400)) reaches the 3D SETUP/VERTEX regs.  Read the
+       * CRTC block at real 0x000/0x004/0x008 = mmio-0x400/-0x3fc/-0x3f8 (values are byte-swapped). */
+      printf("  APERTURE-BELOW test: CRTC[real000]=%08x [004]=%08x [008]=%08x  (nonzero+plausible => mapped)\n",
+             p(ABS(mm - 0x400u)), p(ABS(mm - 0x3FCu)), p(ABS(mm - 0x3F8u)));
+      printf("  SETUP_CNTL(real 0x304=mmio-0xFC)=%08x (may be write-only)\n", p(ABS(mm - 0xFCu))); }
     { printf("  APERTURE COMPARISON (both should hold our fill values if same regs):\n");
       printf("    via MMIO this[0x550]=0x%08x:  DP_FRGD_CLR[2c4]=%08x DST_OFF_PITCH[100]=%08x DP_WRITE_MASK[2c8]=%08x DST_WH[11c]=%08x GUI_STAT[338]=%08x\n",
              mmio, p(ABS(mmio+0x2c4)),p(ABS(mmio+0x100)),p(ABS(mmio+0x2c8)),p(ABS(mmio+0x11c)),p(ABS(mmio+0x338)));

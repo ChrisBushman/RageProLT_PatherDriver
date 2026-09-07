@@ -97,10 +97,13 @@ uint32_t mach64_submit(gld_context *ctx, m64_cmdbuf *cb)
                                        : (((adr & 0xffu) << 2) + 0x400u);
         for (k = 0; k < cnt && i < cb->n; k++) {
             uint32_t reg = base + k * 4u;               /* real mach64 (DRI) register offset */
-            /* Apple's PIO aperture only reaches regs >= 0x400 (offset reg-0x400 >= 0).  The 3D
-             * SETUP/VERTEX engine (0x240-0x304) is below that -> NOT reachable via this path;
-             * drop those pairs so we never PIO a bad offset (3D triangles need the DMA path -- TODO).
-             * 2D fills/blits/clears use only regs >= 0x400, so they submit correctly. */
+            /* Apple's submit_buffer writes MMIO[this[0x550]+off], this[0x550]==real_reg_base+0x400,
+             * so off = reg-0x400 reaches register `reg` -- but ONLY for reg >= 0x400.  Block 0
+             * (real 0x000-0x3ff: the 3D SETUP/VERTEX engine 0x240-0x304, CRTC, ...) is NOT mapped
+             * contiguously below this[0x550] (HW-verified: reads there are adjacent kernel memory,
+             * NOT registers -- writing would corrupt the kernel).  So we DROP reg < 0x400 here:
+             * 2D fills/blits/clears (all reg >= 0x400) submit correctly; 3D triangles need the
+             * DMA/ADRINDEX vertex-buffer path (IOATIRProShared::new_vertex_buffer) -- TODO. */
             if (reg < 0x400u) { i++; continue; }
             if (out + 2 > cap) { cb->overflow = 1; break; }   /* body full -> drop rest */
             body[out++] = reg - 0x400u;    /* Apple {reg,val} offset = real_reg - 0x400 */
