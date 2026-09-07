@@ -295,6 +295,9 @@ void mach64_render_triangles(gld_context *ctx, const void *v, uint32_t n)
                 *(const uint32_t *)(p + VOFF_ARGB),
                 *(const uint32_t *)(p + VOFF_Z));
     }
+    mach64_sync_depth_from_gli(ctx);     /* Z_CNTL follows the app's GL depth state (GL_TRIANGLES
+                                          * was missing this -- strip/fan/quad have it -- so a
+                                          * depth-tested glBegin(GL_TRIANGLES) never enabled Z). */
     mach64_bind_texture(ctx);            /* upload+program texture if bound */
     for (i = 0; i + 3 <= n; i += 3) emit_tri(ctx, v, i, i+1, i+2);
 }

@@ -241,6 +241,39 @@ void mach64_batch_clear_color(gld_context *ctx)
     p->dirty |= MACH64_DIRTY_STATE;
 }
 
+/* Batched Z-buffer clear (companion to mach64_batch_clear_color): append a 2D solid fill of the
+ * 16-bit depth buffer to 0xffff (far) INTO p->batch, so the colour clear + Z clear + geometry all
+ * drain as ONE command stream / ONE type-1 trigger.  (mach64_clear_zbuffer does its own submit --
+ * using it inside frame_start would split the frame into multiple submits and let the trailing
+ * backing copy clobber the render, the black-screen failure mode.)  The 16-bit Z is filled 32bpp
+ * as 0xffffffff (two 0xffff values), so the fill is z_pitch/2 wide. */
+void mach64_batch_clear_zbuffer(gld_context *ctx)
+{
+    mach64_priv *p = MACH64_PRIV(ctx);
+    uint32_t zoff = p->z_off;
+    uint32_t w32  = p->z_pitch / 2;                 /* 16-bit px -> 32-bit px */
+    uint32_t h    = *(const uint32_t *)((const char *)ctx + 0x1f4);
+    if (!zoff || !w32 || !h) return;
+    if (!p->batch.buf)
+        m64_cb_init(&p->batch, p->batchbuf,
+                    sizeof(p->batchbuf) / sizeof(p->batchbuf[0]));
+    m64_reg(&p->batch, MACH64_Z_CNTL,           0);            /* Z off for the fill itself */
+    m64_reg(&p->batch, MACH64_SCALE_3D_CNTL,    0);
+    m64_reg(&p->batch, MACH64_GUI_TRAJ_CNTL,    (1u<<0) | (1u<<1));
+    m64_reg(&p->batch, MACH64_DP_PIX_WIDTH,     0x60060666u);
+    m64_reg(&p->batch, MACH64_DP_FRGD_CLR,      0xffffffffu);  /* Z far */
+    m64_reg(&p->batch, MACH64_DP_WRITE_MASK,    0xffffffffu);
+    m64_reg(&p->batch, MACH64_DP_MIX,           (3u<<0) | (7u<<16));
+    m64_reg(&p->batch, MACH64_DP_SRC,           (1u<<0) | (1u<<8));
+    m64_reg(&p->batch, MACH64_SC_LEFT_RIGHT,    (0x1fffu<<16) | 0);
+    m64_reg(&p->batch, MACH64_SC_TOP_BOTTOM,    (0x1fffu<<16) | 0);
+    m64_reg(&p->batch, MACH64_CLR_CMP_CNTL,     0);
+    m64_reg(&p->batch, MACH64_DST_OFF_PITCH,    ((w32 / 8) << 22) | (zoff >> 3));
+    m64_reg(&p->batch, MACH64_DST_X_Y,          0);
+    m64_reg(&p->batch, MACH64_DST_WIDTH_HEIGHT, (h << 16) | w32);
+    p->dirty |= MACH64_DIRTY_STATE;
+}
+
 /* ---- solid-colour rectangle fill via the 2D GUI engine --------------
  * Fill a w x h pixel box at (x,y) in `off` (byte offset, pitch in 32-bit px) with
  * `color` (0x00RRGGBB).  Same engine setup as the Z clear but with a caller colour
@@ -369,9 +402,63 @@ void mach64_pathb_setup_target(gld_context *ctx)
          * the winpool set_render_target (0x6bb800) -- rendered into a buffer never presented,
          * so geometry was invisible while the clear showed. */
         mach64_set_render_target(ctx, toff, tpitch);
+        /* Depth buffer: place it in VRAM immediately AFTER our colour surface, overriding the
+         * winpool guess (0x6bb800+).  [HW] the card is 8MB (ATY,MEMSIZE=0x800000), but the winpool
+         * region collides with VRAM Apple actively uses (WindowServer backing / cursor) -> Z writes
+         * there corrupt the display.  The tail of OUR just-allocated colour surface is the region
+         * most likely free.  z = toff + (visible_h * pitch * 4); a 16-bit Z of the same pixel width.
+         * Keep the drawable SMALL so colour(0x301000..) + Z stay below Apple's desktop surfaces:
+         * a 320x240 window's colour(0x4b000)+Z(0x25800) end ~0x372000, well under 0x400000. */
+        {   uint32_t vis_h = *(const uint32_t *)((const char *)ctx + 0x1f4);
+            uint32_t color_bytes = tpitch * 4u * vis_h;
+            /* Place Z with a FULL colour-buffer GAP past the surface (toff + 2*color_bytes), not
+             * immediately after it.  Writing Z inside Apple's (possibly padded/back-buffered)
+             * surface allocation marks it dirty -> the present's backing->buffer copy clobbers our
+             * engine render with the uninitialised (white) system backing -> white triangles on
+             * screen though the buffer is correct.  A gap keeps Z outside the surface's tracked
+             * range.  (320x240: Z@~0x397000, ends ~0x3bc800, still < 0x400000.) */
+            if (vis_h)
+                mach64_set_zbuffer(ctx, toff + 2u * color_bytes, tpitch);
+            gld_log("[pathb] z-buffer -> off=0x%x pitch=%u (gap past colour %ux%u @ 0x%x)\n",
+                    p->z_off, p->z_pitch, tpitch, vis_h, toff);
+        }
     }
     gld_log("[pathb] setup target: surf=0x%x desc=0x%x rt=0x%08x -> off=0x%x pitch=%u\n",
             surf, desc, rt, p->target_off, p->target_pitch);
+}
+
+/* One-shot DIAGNOSTIC: read actual VRAM bytes at the colour and Z offsets (post-fence, engine idle)
+ * via the sel-14 kernel peek, to see whether the Z clear/writes land where the engine reads Z.
+ *   accel = ctx[0xb0]; LFB kernel VA = accel[0xe0] (getVRAMDescriptor's cached map, safe field);
+ *   then peek LFB + off for a few sample words.  Z should read 0xffff... after a clear (far); if it
+ *   reads colour-like data, z_off overlaps the colour surface.  Peeks are range-guarded. */
+void mach64_pathb_zdiag(gld_context *ctx)
+{
+    mach64_priv *p = MACH64_PRIV(ctx);
+    io_connect_t gc = ctx->connect;
+    uint32_t accel = 0, lfb = 0;
+    uint32_t zoff = p->z_off, toff = p->target_off, zp = p->z_pitch, tp = p->target_pitch;
+#define PK_REL(off,dst)  IOConnectMethodScalarIScalarO(gc, kATIRPro_scale_surface, 1,1, (off), (dst))
+#define PK_ABS(a,dst)    IOConnectMethodScalarIScalarO(gc, kATIRPro_scale_surface, 1,1, 0x80000000u|(a), (dst))
+#define VALID(x)         ((x) > 0x1000u && (x) < 0xff000000u)
+    PK_REL(0xb0u, &accel);
+    if (VALID(accel)) PK_ABS(accel + 0xe0u, &lfb);
+    if (!VALID(lfb)) { gld_log("[zdiag] accel=0x%x lfb=0x%x -- no VRAM VA, skip\n", accel, lfb); return; }
+    /* sample 3 points: top-left, and center (row h/2, col w/2) for colour(32bpp) and Z(16bpp) */
+    {   uint32_t w = *(const uint32_t *)((const char *)ctx + 0x1f0);
+        uint32_t h = *(const uint32_t *)((const char *)ctx + 0x1f4);
+        uint32_t cy = h/2, cx = w/2;
+        uint32_t c_tl=0, c_ctr=0, z_tl=0, z_ctr=0;
+        PK_ABS(lfb + toff, &c_tl);
+        PK_ABS(lfb + toff + cy*(tp*4u) + cx*4u, &c_ctr);
+        PK_ABS(lfb + zoff, &z_tl);
+        PK_ABS(lfb + zoff + cy*(zp*2u) + cx*2u, &z_ctr);
+        gld_log("[zdiag] lfb=0x%x  colour@0x%x tl=0x%08x ctr=0x%08x | Z@0x%x tl=0x%08x ctr=0x%08x (w%u h%u)\n",
+                lfb, toff, c_tl, c_ctr, zoff, z_tl, z_ctr, w, h);
+    }
+#undef PK_REL
+#undef PK_ABS
+#undef VALID
 }
 
 /* Page-flip: switch the CRTC scanout base to the colour buffer at byte offset `off`.
@@ -482,7 +569,8 @@ static void mach64_frame_start(gld_context *ctx)
          * state after the 2D clear regs. */
         mach64_batch_clear_color(ctx);
         if (p->z_off && (p->hw.z_cntl & MACH64_Z_EN))
-            mach64_clear_zbuffer(ctx);   /* separate submit; also marks state dirty */
+            mach64_batch_clear_zbuffer(ctx);   /* batched (NOT a separate submit): keep the frame
+                                                * a single drain so the backing copy can't clobber */
         p->frame_new = 0;
     }
 }
