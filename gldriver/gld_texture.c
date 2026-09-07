@@ -26,8 +26,10 @@
  */
 #include <stdlib.h>   /* getenv (GLD_TEXBLEND_PROBE gate) */
 #include <pthread.h>  /* g_tex_lock: the VRAM texture heap is process-shared across contexts */
+#include <IOKit/IOKitLib.h>   /* IOConnectMethodStructureIStructureO (Path-B selector upload) */
 #include "gld.h"
 #include "../common/mach64_regs.h"
+#include "../common/atiragepro_abi.h"   /* kATIRPro_new_texture (repurposed = VRAM upload) */
 
 /* The texture heap (g_slots / g_heap_next / g_free / g_pending below) is a single
  * process-wide VRAM allocator shared by every GL context.  An app driving multiple
@@ -273,6 +275,56 @@ static uint32_t ilog2u(uint32_t v) { uint32_t r = 0; while (v > 1) { v >>= 1; r+
  * textures are uploaded in several chunks (mach64_upload). */
 #define MACH64_BLIT_MAX  768u
 
+/* Convert texel `i` of `src` (in GLEngine's base fmt/type) to native ARGB8888. */
+static uint32_t tex_texel_argb(const unsigned char *src, uint32_t i, uint16_t fmt, uint16_t type)
+{
+    if (type == 0x8363u) {                       /* GL_UNSIGNED_SHORT_5_6_5 (BE u16) */
+        unsigned v  = ((unsigned)src[i*2] << 8) | src[i*2 + 1];
+        unsigned r5 = (v >> 11) & 0x1fu, g6 = (v >> 5) & 0x3fu, b5 = v & 0x1fu;
+        unsigned R  = (r5 << 3) | (r5 >> 2), G = (g6 << 2) | (g6 >> 4), B = (b5 << 3) | (b5 >> 2);
+        return 0xff000000u | (R << 16) | (G << 8) | B;
+    }
+    switch (fmt) {
+    case 0x1908u: { const unsigned char *px = src + i*4;   /* GL_RGBA */
+        return ((uint32_t)px[3]<<24)|((uint32_t)px[0]<<16)|((uint32_t)px[1]<<8)|px[2]; }
+    case 0x1909u: { unsigned L = src[i];                   /* GL_LUMINANCE */
+        return 0xff000000u|(L<<16)|(L<<8)|L; }
+    case 0x8049u: { unsigned I = src[i];                   /* GL_INTENSITY */
+        return (I<<24)|(I<<16)|(I<<8)|I; }
+    case 0x1906u: { unsigned A = src[i];                   /* GL_ALPHA */
+        return (A<<24); }
+    case 0x190Au: { const unsigned char *px = src + i*2;   /* GL_LUMINANCE_ALPHA */
+        unsigned L = px[0], A = px[1]; return (A<<24)|(L<<16)|(L<<8)|L; }
+    default:      { const unsigned char *px = src + i*3;   /* GL_RGB (and fallback) */
+        return 0xff000000u|((uint32_t)px[0]<<16)|((uint32_t)px[1]<<8)|px[2]; }
+    }
+}
+
+/* PATH B texel upload: the host-data blit (HOST_DATA0 FIFO feed) can't be expressed by Apple's PIO
+ * {reg,val} submit and WEDGES the engine (see the guard note in mach64_bind_texture).  Instead, hand
+ * the ARGB texels to the PATCHED new_texture selector (GL sel 10), which the kext turns into a plain
+ * VRAM memcpy: struct in = { u32 dst_off; u32 argb[] } -> lfb[dst_off..] = argb.  Chunked to keep the
+ * IOKit struct input a sane size.  REQUIRES the upload-patched kext (ATIRagePro.patched2). */
+static void mach64_upload_texels_pathb(gld_context *ctx, uint32_t dst_off,
+                                       const unsigned char *src, uint32_t first, uint32_t count,
+                                       uint16_t fmt, uint16_t type)
+{
+    io_connect_t gc = ctx->connect;
+    uint32_t i = first, end = first + count;
+#define TEX_CHUNK 2000u                     /* texels/call -> struct <= 4 + 8000 bytes */
+    while (i < end) {
+        uint32_t n = end - i; if (n > TEX_CHUNK) n = TEX_CHUNK;
+        uint32_t buf[1 + TEX_CHUNK];        /* [0]=dst byte offset, [1..]=ARGB texels */
+        uint32_t out[2] = {0,0}; IOByteCount osz = sizeof out;
+        uint32_t k;
+        buf[0] = dst_off + (i - first) * 4u;
+        for (k = 0; k < n; k++, i++) buf[1+k] = tex_texel_argb(src, i, fmt, type);
+        IOConnectMethodStructureIStructureO(gc, kATIRPro_new_texture,
+                                            (uint32_t)(4u + n*4u), &osz, buf, out);
+    }
+#undef TEX_CHUNK
+}
+
 /* One host-data DMA blit of `count` ARGB8888 texels (converted from src[first..])
  * into VRAM at byte offset `dst_off`, laid out `bw` wide x `bh` tall with row
  * pitch `pitch_units`*8 pixels.  count must be <= MACH64_BLIT_MAX. */
@@ -283,6 +335,10 @@ static void mach64_blit_texels(gld_context *ctx, uint32_t dst_off, uint32_t pitc
     mach64_priv *p = MACH64_PRIV(ctx);
     m64_cmdbuf cb;
     uint32_t i;
+    if (p->apple_surf_cn) {                 /* PATH B: host-data blit wedges -> use the kext selector */
+        mach64_upload_texels_pathb(ctx, dst_off, src, first, count, fmt, type);
+        return;
+    }
     m64_cb_init(&cb, p->scratch, sizeof(p->scratch) / sizeof(p->scratch[0]));
     m64_reg(&cb, MACH64_Z_CNTL,        0);
     m64_reg(&cb, MACH64_SCALE_3D_CNTL, 0);
@@ -670,27 +726,13 @@ int mach64_bind_texture(gld_context *ctx)
     mach64_tex_slot *bound;
     uint32_t wl, hl, tex_on, env, light_fcn, new_scale_3d, blend, lop_mix = 0;
     int changed, lop_on;
-    /* PATH-B TEXTURE GUARD: texture upload uses the mach64 host-data blit (a run of texels to the
-     * HOST_DATA0 FIFO port).  Apple's PIO {reg,val} submit CANNOT express a FIFO feed -- it expands
-     * a register run into CONSECUTIVE register pokes, which both overflows the 4KB command buffer
-     * (truncated blit -> engine waits for missing texels) and scribbles past HOST_DATA15 into other
-     * registers -> the GUI engine WEDGES (only a reboot clears it).  Until a Path-B-compatible upload
-     * exists (Apple new_texture selector, or a CPU-writable VRAM staging map), DISABLE texturing
-     * under Path B: skip the upload entirely and render untextured (vertex-colour) geometry.  Detect
-     * Path B by the bound Apple surface. */
-    int path_b = (p->apple_surf_cn != 0);
-
     /* Upload any image-dirtied textures (their state objects are populated by
      * draw time); each lands in its own VRAM slot.  Pop the queue under the lock,
      * then upload OUTSIDE it -- mach64_upload -> slot_alloc takes the lock itself,
      * so holding it across the DMA upload would both deadlock and needlessly
-     * serialise uploads. */
-    if (path_b) {
-        TEX_LOCK(); g_npending = 0; TEX_UNLOCK();   /* discard uploads -- the blit would wedge */
-        { static int warned = 0; if (!warned) {
-            gld_log("mach64 tex: PATH B -- texture upload disabled (host-data blit wedges Apple's "
-                    "PIO submit); rendering UNTEXTURED.\n"); warned = 1; } }
-    } else for (;;) {
+     * serialise uploads.  Under Path B the upload routes through the kext selector
+     * (mach64_blit_texels), NOT the host-data blit -- so texturing is fully enabled. */
+    for (;;) {
         void *pend = 0;
         TEX_LOCK();
         if (g_npending) pend = g_pending[--g_npending];
@@ -820,9 +862,8 @@ int mach64_bind_texture(gld_context *ctx)
     if (mach64_fog_on) p->dirty |= MACH64_DIRTY_STATE;
     else               st->dp_fog_clr = 0;   /* leave DP_FRGD_CLR to the 2D engine */
 
-    /* Follow the app's glEnable/glDisable(GL_TEXTURE_2D).  Under Path B force it OFF so the
-     * untextured path below runs (no texel data was uploaded -- see the PATH-B TEXTURE GUARD). */
-    tex_on = !path_b && (mach64_gli_u32(ctx, GLI_TEX2D_ENABLE) & GLI_TEX2D_BIT) != 0;
+    /* Follow the app's glEnable/glDisable(GL_TEXTURE_2D). */
+    tex_on = (mach64_gli_u32(ctx, GLI_TEX2D_ENABLE) & GLI_TEX2D_BIT) != 0;
 
     /* Select the CURRENTLY-BOUND texture: GLEngine stores its texobj at
      * gli+0x15748; our slot is keyed by texobj[0x30] (the state object). */
