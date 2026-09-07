@@ -427,40 +427,6 @@ void mach64_pathb_setup_target(gld_context *ctx)
             surf, desc, rt, p->target_off, p->target_pitch);
 }
 
-/* One-shot DIAGNOSTIC: read actual VRAM bytes at the colour and Z offsets (post-fence, engine idle)
- * via the sel-14 kernel peek, to see whether the Z clear/writes land where the engine reads Z.
- *   accel = ctx[0xb0]; LFB kernel VA = accel[0xe0] (getVRAMDescriptor's cached map, safe field);
- *   then peek LFB + off for a few sample words.  Z should read 0xffff... after a clear (far); if it
- *   reads colour-like data, z_off overlaps the colour surface.  Peeks are range-guarded. */
-void mach64_pathb_zdiag(gld_context *ctx)
-{
-    mach64_priv *p = MACH64_PRIV(ctx);
-    io_connect_t gc = ctx->connect;
-    uint32_t accel = 0, lfb = 0;
-    uint32_t zoff = p->z_off, toff = p->target_off, zp = p->z_pitch, tp = p->target_pitch;
-#define PK_REL(off,dst)  IOConnectMethodScalarIScalarO(gc, kATIRPro_scale_surface, 1,1, (off), (dst))
-#define PK_ABS(a,dst)    IOConnectMethodScalarIScalarO(gc, kATIRPro_scale_surface, 1,1, 0x80000000u|(a), (dst))
-#define VALID(x)         ((x) > 0x1000u && (x) < 0xff000000u)
-    PK_REL(0xb0u, &accel);
-    if (VALID(accel)) PK_ABS(accel + 0xe0u, &lfb);
-    if (!VALID(lfb)) { gld_log("[zdiag] accel=0x%x lfb=0x%x -- no VRAM VA, skip\n", accel, lfb); return; }
-    /* sample 3 points: top-left, and center (row h/2, col w/2) for colour(32bpp) and Z(16bpp) */
-    {   uint32_t w = *(const uint32_t *)((const char *)ctx + 0x1f0);
-        uint32_t h = *(const uint32_t *)((const char *)ctx + 0x1f4);
-        uint32_t cy = h/2, cx = w/2;
-        uint32_t c_tl=0, c_ctr=0, z_tl=0, z_ctr=0;
-        PK_ABS(lfb + toff, &c_tl);
-        PK_ABS(lfb + toff + cy*(tp*4u) + cx*4u, &c_ctr);
-        PK_ABS(lfb + zoff, &z_tl);
-        PK_ABS(lfb + zoff + cy*(zp*2u) + cx*2u, &z_ctr);
-        gld_log("[zdiag] lfb=0x%x  colour@0x%x tl=0x%08x ctr=0x%08x | Z@0x%x tl=0x%08x ctr=0x%08x (w%u h%u)\n",
-                lfb, toff, c_tl, c_ctr, zoff, z_tl, z_ctr, w, h);
-    }
-#undef PK_REL
-#undef PK_ABS
-#undef VALID
-}
-
 /* Page-flip: switch the CRTC scanout base to the colour buffer at byte offset `off`.
  * The mach64 CRTC offset is hardware double-buffered (loads at vblank), so this is a
  * tear-free swap with NO copy -- unlike mach64_present's blit.  Goes through the kext
@@ -1235,6 +1201,16 @@ void mach64_dispatch_render_ctl(gld_context *ctx, uint32_t a4, uint32_t a5,
              * and the mis-ordered per-frame 2D(clear)<->3D(tri) submits are the likely engine
              * wedge behind the second-run panic.  Now each frame is a clean
              * clear -> draw -> flush -> surface_flush. */
+            /* Reset the engine to 2D state (Z off, scaler off) at the TAIL of the geometry batch, so
+             * Apple's build_swap blit that follows does NOT inherit our Z_EN and depth-test its
+             * buffer->scanout copy (rejecting pixels -> white triangles on screen though the render
+             * buffer is correct).  Appended to p->batch so it stays ONE submit; marks state dirty so
+             * next frame's first triangle re-emits the full 3D+Z state. */
+            if (p->batch.buf && p->batch.n) {
+                m64_reg(&p->batch, MACH64_Z_CNTL,        0);
+                m64_reg(&p->batch, MACH64_SCALE_3D_CNTL, 0);
+                p->dirty |= MACH64_DIRTY_STATE;
+            }
             mach64_flush_batch(ctx);
             /* FENCE before present: the triangle submit KICKS the setup/scaler engine and returns;
              * surface_flush (build_swap) blits the surface buffer to scanout and can race ahead of
