@@ -17,9 +17,12 @@
  * Porting skeleton: needs the 10.3 IOKit headers to build against the bundle.
  */
 #include <IOKit/IOKitLib.h>
+#include <mach/mach.h>   /* mach_task_self for the MapMemory submit trigger */
 #include "gld.h"
 #include "../common/mach64_abi.h"
+#include "../common/atiragepro_abi.h"   /* Path-B: cmdbuf header + finish selector */
 #include "../common/mach64_regs.h"
+#include <string.h>   /* memset (mach64_pathb_present) */
 
 #ifdef GLD_PERF
 /* Frame-time profiler: split each frame into GPU/DMA time (blocked in mach64_submit waiting
@@ -53,40 +56,67 @@ void mach64_pack_vertex(m64_vertex *out, float x, float y, float z,
     out->argb = argb;
 }
 
-/* ---- submission: flush a built command buffer to the kext ------------
- * Appends the terminator, packs LE into the shared type-4 buffer, and kicks the
- * ring via new_vertex_buffer.  Returns the completion stamp. */
+/* ---- submission (PATH B): drain a command buffer through Apple's ATIRagePro kext ----
+ * Our m64_cmdbuf is the mach64 DMA PACKET format {header=ADRINDEX(reg)|(n-1)<<16, n vals}.
+ * Apple's submit_buffer (@0x12730) PIO-drains flat {reg,val} u32 PAIRS instead -- reg is
+ * the RAW byte offset, and the kext stwbrx-byte-reverses val into the little-endian
+ * register window.  So we CONVERT the packet stream to flat pairs (undoing ADRINDEX),
+ * write them into the type-1 command region's VendorCommandBufferHeader body[], set
+ * count + the SUBMIT bit, and call finish() (sel 8) -- which triggers the drain and
+ * fences on engine-idle.  Values go in NATIVE (big-endian) order: the kext does the
+ * byte-swap, NOT us (unlike the old DMA path's m64_cb_write_le).
+ * ADRINDEX inverse: block1 (reg 0x000-0x3ff) -> adr has bit 0x100, reg=(adr&0xff)<<2;
+ *                   block0 (reg 0x400-0x7ff) -> no 0x100 bit, reg=((adr&0xff)<<2)+0x400. */
 uint32_t mach64_submit(gld_context *ctx, m64_cmdbuf *cb)
 {
     mach64_priv *p = MACH64_PRIV(ctx);
-    uint32_t bufferID = 0;
-    size_t bytes;
+    /* HW-PROVEN Path-B recipe (2026-09-06):
+     *  - the REAL command buffer is the type-2 map (ATIRPRO_MEM_CONTEXT -> ctx->fb == kext ctx[0xdc]),
+     *    NOT type-1 (which is the surface buffer).
+     *  - Apple's submit_buffer writes MMIO[this[0x550]+reg] and this[0x550] == real_reg_base+0x400,
+     *    so the {reg,val} offset for register R is (R - 0x400).
+     *  - the DRAIN is triggered by IOConnectMapMemory(type-1) (clientMemoryForType ->
+     *    submit_context_buffer -> submit_buffer PIO), NOT finish(sel8) (which only fences). */
+    volatile ATIRProCmdBufHeader *hdr = (volatile ATIRProCmdBufHeader *)ctx->fb;
+    volatile uint32_t *body;
+    uint32_t cap, out = 0;
+    size_t i = 0;
+    vm_address_t sub = 0; vm_size_t subsz = 0;
 
     m64_emit_terminator(cb);
-    if (cb->overflow)              /* stream didn't fit -> drop, don't submit */
+    if (cb->overflow || !hdr)      /* stream overflowed, or command buffer not mapped yet */
         return p->last_stamp;
 
-#ifdef GLD_PERF
-    { unsigned long a = perf_now_us();
-      bytes = m64_cb_write_le(cb, ctx->fb);   /* uncached type-4 buffer: the suspect copy */
-      g_perf_copy_us += perf_now_us() - a; }
-#else
-    bytes = m64_cb_write_le(cb, ctx->fb);   /* ctx->fb = type-4 command buffer */
-#endif
-
-    /* new_vertex_buffer(size) -> kext rotateCommandBuffer builds the descriptor,
-     * quiesces, activates bus-mastering, kicks, waits for idle, restores. */
-#ifdef GLD_PERF
-    { unsigned long a = perf_now_us();
-      IOConnectMethodScalarIScalarO(ctx->connect, kMach64Sel_new_vertex_buffer,
-                                    1, 1, (int)bytes, &bufferID);
-      g_perf_submit_us += perf_now_us() - a; }
-#else
-    IOConnectMethodScalarIScalarO(ctx->connect, kMach64Sel_new_vertex_buffer,
-                                  1, 1, (int)bytes, &bufferID);
-#endif
-    p->last_stamp = bufferID;
-    return bufferID;
+    body = hdr->body;
+    cap  = hdr->capacity;          /* body capacity in DWORDS = (regionsize-0x20)/4 */
+    while (i < cb->n) {
+        uint32_t h   = cb->buf[i++];
+        uint32_t adr = h & 0xffffu;
+        uint32_t cnt = (h >> 16) + 1, k;
+        uint32_t base = (adr & 0x100u) ? ((adr & 0xffu) << 2)
+                                       : (((adr & 0xffu) << 2) + 0x400u);
+        for (k = 0; k < cnt && i < cb->n; k++) {
+            uint32_t reg = base + k * 4u;               /* real mach64 (DRI) register offset */
+            /* Apple's PIO aperture only reaches regs >= 0x400 (offset reg-0x400 >= 0).  The 3D
+             * SETUP/VERTEX engine (0x240-0x304) is below that -> NOT reachable via this path;
+             * drop those pairs so we never PIO a bad offset (3D triangles need the DMA path -- TODO).
+             * 2D fills/blits/clears use only regs >= 0x400, so they submit correctly. */
+            if (reg < 0x400u) { i++; continue; }
+            if (out + 2 > cap) { cb->overflow = 1; break; }   /* body full -> drop rest */
+            body[out++] = reg - 0x400u;    /* Apple {reg,val} offset = real_reg - 0x400 */
+            body[out++] = cb->buf[i++];    /* val (kext byte-reverses to the LE regs) */
+        }
+        if (cb->overflow) break;
+    }
+    hdr->count  = out;                                 /* # body dwords for the kext to drain */
+    hdr->flags |= ATIRPRO_CMDBUF_FLAG_SUBMIT;          /* bit0 = VALID/SUBMIT */
+    /* SUBMIT = map type-1 (surface buffer): clientMemoryForType drains our command buffer through
+     * the engine.  Map+unmap (the drain is the side effect of the map call). */
+    if (!IOConnectMapMemory(ctx->connect, ATIRPRO_MEM_COMMAND, mach_task_self(),
+                            &sub, &subsz, kIOMapAnywhere | kIOMapInhibitCache) && sub)
+        IOConnectUnmapMemory(ctx->connect, ATIRPRO_MEM_COMMAND, mach_task_self(), sub);
+    p->last_stamp = hdr->stamp;                        /* kext-updated submit stamp */
+    return p->last_stamp;
 }
 
 /* Clear the bound Z buffer to far (0xffff) via a 2D solid fill through the DMA
@@ -240,6 +270,82 @@ void mach64_present(gld_context *ctx)
     if (!p->dbuf || !p->back_off || !p->front_off) return;
     mach64_blit_surface(ctx, p->back_off, p->front_off, 0, 0, 0, 0,
                         p->fb_w, p->fb_h, p->fb_pitch);
+}
+
+/* IOAccelSurfaceData returned by surface_write_lock (layout LIVE-confirmed in
+ * apple-glcontext-protocol.md: +00 userspace-writable backing ptr, +10 pitch bytes,
+ * +14 w, +18 h, +1c bpp). */
+typedef struct {
+    uint32_t address;                 /* +00 directly-writable userspace backing ptr */
+    uint32_t r04, r08, r0c;           /* +04..+0f                                    */
+    uint32_t pitch;                   /* +10 pitch in bytes                          */
+    uint32_t width;                   /* +14                                         */
+    uint32_t height;                  /* +18                                         */
+    uint32_t bpp;                     /* +1c bytes/pixel                             */
+    uint32_t tail[16];                /* +20.. (idx@+48 etc.)                        */
+} apple_surf_data;
+
+/* PATH B present: composite the bound surface to the live scanout via Apple's
+ * surface_flush (surface sel 10) -- the LIVE-confirmed, race-free PIO 2D blit
+ * (build_swap, backing->scanout, NO CRTC touch).  write_lock/unlock bracket the
+ * surface's CPU-coherence protocol and hand back the backing geometry.  For now this
+ * also LOGS the backing so the first HW run resolves the open question: is a GL-bound
+ * surface's backing VRAM (engine renders straight in) or system memory (needs a
+ * render->backing copy bridge)?  The pixel bridge is finished once HW answers that. */
+/* Extract the app's glClearColor from the gli as 0xAARRGGBB (alpha forced 0xff). */
+static uint32_t mach64_clear_argb(gld_context *ctx)
+{
+    uint32_t gli = mach64_gli(ctx);
+    float rf = 0.0f, gf = 0.0f, bf = 0.0f;
+    if (gli) {
+        uint32_t rb = mach64_gli_u32(ctx, GLI_CLEAR_COLOR + 0);
+        uint32_t gb = mach64_gli_u32(ctx, GLI_CLEAR_COLOR + 4);
+        uint32_t bb = mach64_gli_u32(ctx, GLI_CLEAR_COLOR + 8);
+        __builtin_memcpy(&rf, &rb, 4); __builtin_memcpy(&gf, &gb, 4); __builtin_memcpy(&bf, &bb, 4);
+    }
+    return 0xff000000u | (clampc(rf) << 16) | (clampc(gf) << 8) | clampc(bf);
+}
+
+/* PATH B present (Increment 2, HW-PROVEN 2026-09-06): the engine has ALREADY rendered into the
+ * surface's VRAM buffer (surf[0x12c] == p->target_off) via mach64_submit.  Present = surface_flush
+ * ONLY: flush_surface -> build_swap blits the buffer to the live scanout.  Do NOT write_lock /
+ * CPU-fill the backing -- that sets the surface dirty bit, so clientMemoryForType/flush would copy
+ * the backing OVER our engine render and clobber it (the prime cleared that bit; keep it clear). */
+void mach64_pathb_present(gld_context *ctx)
+{
+    mach64_priv *p = MACH64_PRIV(ctx);
+    io_connect_t surf = (io_connect_t)p->apple_surf_cn;
+    if (!surf) return;
+    IOConnectMethodScalarIScalarO(surf, kATIRProSurf_surface_flush, 2, 0, 1u, 0u);
+}
+
+/* After the surface is bound: (1) PRIME it -- surface write_lock(14)+unlock(15)+flush(10) allocates
+ * the VRAM render buffer AND clears the surface dirty bit (so no backing->buffer copy clobbers our
+ * engine renders).  (2) Fetch the render-target off_pitch surf[0x12c][0x28] and decode it into
+ * p->target_off (byte offset) / p->target_pitch (pixels) so the clears/fills target it.
+ * NB: rt is read via the sel-14 dual-peek RE patch (this=ATIR3GLContext, ctx[0x10c]=surf); a shipping
+ * build should expose it via a dedicated get_render_target selector instead. */
+void mach64_pathb_setup_target(gld_context *ctx)
+{
+    mach64_priv *p = MACH64_PRIV(ctx);
+    io_connect_t sc = (io_connect_t)p->apple_surf_cn;
+    io_connect_t gc = ctx->connect;
+    uint32_t surf = 0, desc = 0, rt = 0;
+    if (sc) {
+        apple_surf_data sd; IOByteCount ol = sizeof sd; memset(&sd, 0, sizeof sd);
+        IOConnectMethodScalarIStructureO(sc, kATIRProSurf_surface_write_lock, 0, &ol, &sd);
+        IOConnectMethodScalarIScalarO(sc, kATIRProSurf_surface_write_unlock, 0, 0);
+        IOConnectMethodScalarIScalarO(sc, kATIRProSurf_surface_flush, 2, 0, 1u, 0u);
+    }
+    IOConnectMethodScalarIScalarO(gc, kATIRPro_scale_surface, 1, 1, 0x10cu, &surf);
+    if (surf) IOConnectMethodScalarIScalarO(gc, kATIRPro_scale_surface, 1, 1, 0x80000000u | (surf + 0x12cu), &desc);
+    if (desc) IOConnectMethodScalarIScalarO(gc, kATIRPro_scale_surface, 1, 1, 0x80000000u | (desc + 0x28u), &rt);
+    if (rt) {
+        p->target_off   = (rt & 0x3fffffu) << 3;        /* VRAM byte offset */
+        p->target_pitch = ((rt >> 22) & 0x3ffu) << 3;   /* pitch in pixels  */
+    }
+    gld_log("[pathb] setup target: surf=0x%x desc=0x%x rt=0x%08x -> off=0x%x pitch=%u\n",
+            surf, desc, rt, p->target_off, p->target_pitch);
 }
 
 /* Page-flip: switch the CRTC scanout base to the colour buffer at byte offset `off`.
@@ -983,6 +1089,21 @@ void mach64_dispatch_render_ctl(gld_context *ctx, uint32_t a4, uint32_t a5,
 {
     (void)a4; (void)a5; (void)a6; (void)a7; (void)a8;
     {   mach64_priv *p = MACH64_PRIV(ctx);
+        { static int rclog = 0; if (rclog < 4) {
+            gld_log("mach64_dispatch_render_ctl(0x60) surf_cn=%u dbuf=%u back_off=0x%x\n",
+                    p?p->apple_surf_cn:0, p?p->dbuf:0, p?p->back_off:0); rclog++; } }
+        /* PATH B: present through Apple's bound surface (surface_flush), the once-per-frame
+         * hook.  Takes priority over the legacy VRAM back->front blit (which needs our-kext
+         * buffers Path B doesn't allocate). */
+        if (p && p->apple_surf_cn) {
+            /* Render the frame's deferred glClear INTO the surface buffer with the engine (a
+             * clear-only app dispatches no triangle, so the lazy clear would otherwise never
+             * fire and we'd present the uninitialised buffer -> upper-left garbage). */
+            mach64_frame_start(ctx);
+            mach64_pathb_present(ctx);   /* surface_flush -> blit the rendered buffer to scanout */
+            p->frame_new = 1;
+            return;
+        }
         if (p && p->dbuf && p->back_off) {
 #ifdef GLD_PERF
             unsigned long _pres0 = perf_now_us();

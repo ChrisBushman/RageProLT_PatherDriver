@@ -166,6 +166,8 @@ void     mach64_winpool_init(uint32_t base, uint32_t end);
 uint32_t mach64_winbuf_alloc(uint32_t bytes);   /* 0 = pool exhausted */
 void     mach64_winbuf_free(uint32_t off, uint32_t bytes);
 void mach64_present(gld_context *ctx);   /* double-buffer back->front swap */
+void mach64_pathb_present(gld_context *ctx);   /* Path B: present via Apple's surface_flush */
+void mach64_pathb_setup_target(gld_context *ctx); /* Path B: prime surface + set render target off */
 void mach64_flip(gld_context *ctx, uint32_t off);   /* page-flip CRTC scanout to `off` */
 void mach64_wait_flip(gld_context *ctx);            /* block until the pending flip retired */
 void mach64_sync_depth_from_gli(gld_context *ctx);

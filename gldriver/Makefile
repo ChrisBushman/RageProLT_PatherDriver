@@ -4,7 +4,12 @@
 # bundle/Contents/MacOS/<name>, where <name> = ATIRagePro.kext's IOGLBundleName
 # (="ATIRageProGLDriver").  A different exec name -> silent dlopen fail.
 CC     ?= cc
-CFLAGS ?= -O2 -Wall -std=gnu99 -I..
+# GLD_APPLE_PROBE is now the MAIN Path-B path (not a probe): gld_context.c opens Apple's
+# ATIRagePro GL client directly and gldAttachDrawable creates/binds the surface.
+# GLD_DBUF enables double-buffered pixel formats (node[0x0c] bit3) -- WITHOUT it the CGL
+# scorer rejects every DB request (npix=0), and since all real apps ask for double buffering
+# they fall back to software (white).  Both flags are mandatory for the Path-B bundle.
+CFLAGS ?= -O2 -Wall -std=gnu99 -I.. -DGLD_APPLE_PROBE -DGLD_DBUF
 
 EXEC   := ATIRageProGLDriver
 BUNDLE := $(EXEC).bundle
@@ -15,7 +20,7 @@ SRC    := gld_glue.c gld_context.c gld_state.c gld_render.c gld_prims.c \
 .PHONY: bundle clean
 bundle: $(BUNDLE)
 
-$(EXEC): $(SRC) gld.h ../common/mach64_emit.h ../common/mach64_regs.h ../common/mach64_abi.h
+$(EXEC): $(SRC) gld.h ../common/mach64_emit.h ../common/mach64_regs.h ../common/mach64_abi.h ../common/atiragepro_abi.h
 	$(CC) $(CFLAGS) -bundle -o $(EXEC) $(SRC) -framework IOKit -framework ApplicationServices
 
 $(BUNDLE): $(EXEC) Info.plist

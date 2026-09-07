@@ -62,8 +62,15 @@ unsigned int mach64_apple_make_surface(uint32_t surface_id, uint32_t mode,
                                                    IOServiceMatching("ATIRagePro"));
     if (!svc) { gld_log("[apple-probe] (surf) ATIRagePro NOT found\n"); return 0; }
     io_connect_t sc = 0;
-    /* User-client types (verified via get_state probe): 0 = SURFACE, 1 = GL, 2 = 2D context. */
-    kern_return_t kr = IOServiceOpen(svc, mach_task_self(), 0 /* surface client */, &sc);
+    /* User-client types (HARDWARE-VERIFIED): the surface client is **TYPE 0**, GL is type 1,
+     * 2D context is type 2.  Proven by the get_state probe (tools/mach64_surftype.c: get_state
+     * = surface sel 2 succeeds only on the SURFACE client, and that's type 0) AND every
+     * live-confirmed present tool (mach64_writetest/fspresent/flushtest.c open SURF_TYPE=0 and
+     * put real pixels on screen).  NB: an earlier static-RE pass wrongly concluded type 2 from
+     * newUserClient's vtable slots -- but those factory slots are inherited IOAccelerator
+     * virtuals patched at load, unresolvable from this kext alone; the live tools are ground
+     * truth.  Opening type 2 (the 2D context) made set_id_mode return 0x2c2. */
+    kern_return_t kr = IOServiceOpen(svc, mach_task_self(), 0 /* IOATIRProSurface client */, &sc);
     IOObjectRelease(svc);
     if (kr != KERN_SUCCESS) {
         gld_log("[apple-probe] open surface client (type=0) FAILED 0x%08x\n", kr); return 0;

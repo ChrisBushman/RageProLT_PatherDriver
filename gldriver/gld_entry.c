@@ -14,6 +14,7 @@
  */
 #include "gld.h"
 #include "../common/mach64_abi.h"   /* kMach64Sel_* selector indices */
+#include "../common/atiragepro_abi.h"   /* Path-B command/context region types */
 #include <stdio.h>
 #include <stdarg.h>
 #include <stdlib.h>
@@ -31,13 +32,16 @@ void gld_log(const char *fmt, ...)
     va_list ap;
     if (!tried) {
         tried = 1;
-        if (!getenv("MACH64_GLD_NOLOG"))
+        if (!getenv("MACH64_GLD_NOLOG")) {
             f = fopen("/tmp/mach64gld.log", "w");
+            if (f) setvbuf(f, NULL, _IONBF, 0);   /* unbuffered: survive a crash/hang mid-frame */
+        }
     }
     if (!f) return;
     va_start(ap, fmt);
     vfprintf(f, fmt, ap);
     va_end(ap);
+    fflush(f);                                    /* flush every line so the crash point is visible */
 }
 
 /* ---- gldAttachDrawable: bind the app's drawable as the render target -
@@ -264,6 +268,25 @@ int gldAttachDrawable(gld_context *ctx, int type, void *drawable, uint32_t flags
              * connections.  The share group needs an IOATIRProShared created first (reverse the
              * setup OFFLINE before trying again).  Reverted -- do NOT re-add without that. */
             mach64_apple_bind_surface(pv2->apple_cn, d[0], sx, sy, sw, sh);
+
+            /* Path B: set_surface bound the surface (ctx+0x10c), so it is NOW safe to
+             * map the command region (type 1 -> ctx->regs@0xb8, holds the
+             * VendorCommandBufferHeader mach64_submit writes) and the context buffer
+             * (type 2 -> ctx->fb@0xd0).  Mapping BEFORE the bind NULL-derefs in
+             * clientMemoryForType.  Map once. */
+            if (pv2->apple_surf_cn && !ctx->regs) {
+                IOConnectMapMemory(ctx->connect, ATIRPRO_MEM_COMMAND, mach_task_self(),
+                                   (vm_address_t *)&ctx->regs, (IOByteCount *)&ctx->regs_size,
+                                   kIOMapAnywhere | kIOMapInhibitCache);
+                IOConnectMapMemory(ctx->connect, ATIRPRO_MEM_CONTEXT, mach_task_self(),
+                                   (vm_address_t *)&ctx->fb, (IOByteCount *)&ctx->fb_size,
+                                   kIOMapAnywhere | kIOMapInhibitCache);
+                gld_log("  [pathb] mapped cmd(type1)=%p sz=%u  ctxbuf(type2)=%p sz=%u\n",
+                        ctx->regs, ctx->regs_size, ctx->fb, ctx->fb_size);
+                /* Path B: prime the surface (alloc VRAM render buffer + clear dirty bit) and set
+                 * p->target_off/pitch = surf[0x12c][0x28] so clears/geometry render into it. */
+                mach64_pathb_setup_target(ctx);
+            }
         }
 #endif
 
@@ -421,7 +444,10 @@ int gldFlushBuffer(gld_context *ctx, void *drawable)
      * back buffer, so a swap without a preceding glFinish showed black -- the
      * animation swap-chain bug.  A single glFinish-before-swap test hid it.) */
     {   int r = gldFinish(ctx);
-        if (MACH64_PRIV(ctx)->dbuf) mach64_present(ctx);   /* swap: back -> front */
+        /* NB: the Path-B present runs at dispatch slot 0x60 (mach64_dispatch_render_ctl),
+         * GLEngine's once-per-frame hook -- NOT here (gldFlushBuffer is not called per swap
+         * on this GLEngine).  Legacy back->front blit kept only for the non-surface path. */
+        if (!MACH64_PRIV(ctx)->apple_surf_cn && MACH64_PRIV(ctx)->dbuf) mach64_present(ctx);
         MACH64_PRIV(ctx)->frame_new = 1;                   /* next frame: clear Z + back */
         return r;
     }
