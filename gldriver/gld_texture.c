@@ -311,16 +311,17 @@ static void mach64_upload_texels_pathb(gld_context *ctx, uint32_t dst_off,
 {
     io_connect_t gc = ctx->connect;
     uint32_t i = first, end = first + count;
-#define TEX_CHUNK 2000u                     /* texels/call -> struct <= 4 + 8000 bytes */
+#define TEX_CHUNK 2000u                     /* texels/call -> struct <= 8 + 8000 bytes */
     while (i < end) {
         uint32_t n = end - i; if (n > TEX_CHUNK) n = TEX_CHUNK;
-        uint32_t buf[1 + TEX_CHUNK];        /* [0]=dst byte offset, [1..]=ARGB texels */
+        uint32_t buf[2 + TEX_CHUNK];        /* [0]=op(UPLOAD), [1]=dst byte offset, [2..]=ARGB texels */
         uint32_t out[2] = {0,0}; IOByteCount osz = sizeof out;
         uint32_t k;
-        buf[0] = dst_off + (i - first) * 4u;
-        for (k = 0; k < n; k++, i++) buf[1+k] = tex_texel_argb(src, i, fmt, type);
+        buf[0] = kATIRPro_TEXOP_UPLOAD;
+        buf[1] = dst_off + (i - first) * 4u;
+        for (k = 0; k < n; k++, i++) buf[2+k] = tex_texel_argb(src, i, fmt, type);
         IOConnectMethodStructureIStructureO(gc, kATIRPro_new_texture,
-                                            (uint32_t)(4u + n*4u), &osz, buf, out);
+                                            (uint32_t)(8u + n*4u), &osz, buf, out);
     }
 #undef TEX_CHUNK
 }

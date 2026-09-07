@@ -370,6 +370,44 @@ void mach64_pathb_present(gld_context *ctx)
  * p->target_off (byte offset) / p->target_pitch (pixels) so the clears/fills target it.
  * NB: rt is read via the sel-14 dual-peek RE patch (this=ATIR3GLContext, ctx[0x10c]=surf); a shipping
  * build should expose it via a dedicated get_render_target selector instead. */
+/* Allocate `size` bytes of VRAM from Apple's own best-fit allocator via the multiplexed new_texture
+ * selector (sel 10, op=ALLOC).  The kext wraps the shared-heap best-fit in accel[0x544] mutex_lock,
+ * so it can't race the WindowServer (the v3 unlocked allocator paniced).  Returns the VRAM byte offset
+ * (0 on failure) and stores the opaque kernel record handle in *record_out (free it later with
+ * mach64_vram_free).  Collision-free at any surface size, unlike the small-window guessed placement.
+ * On a kext WITHOUT the allocator patch, op=ALLOC just runs the upload memcpy path with a tiny size and
+ * returns out=[0,0] -> rejected -> caller falls back to guessed placement. */
+uint32_t mach64_vram_alloc(gld_context *ctx, uint32_t size, uint32_t *record_out)
+{
+    uint32_t in[2], out[2] = {0,0};
+    IOByteCount osz = sizeof out;
+    kern_return_t k;
+    if (record_out) *record_out = 0;
+    in[0] = kATIRPro_TEXOP_ALLOC; in[1] = size;
+    gld_log("[vram] -> calling new_texture ALLOC size=%u (sel 10 op=1)...\n", size);   /* fsync'd: last line if it panics */
+    k = IOConnectMethodStructureIStructureO(ctx->connect, kATIRPro_new_texture,
+                                            sizeof in, &osz, in, out);
+    gld_log("[vram] <- alloc returned kr=0x%x out=[0x%x,0x%x]\n", (unsigned)k, out[0], out[1]);
+    if (k != 0) { gld_log("[vram] alloc(%u) kr=0x%x (allocator selector absent)\n", size, (unsigned)k); return 0; }
+    if (!out[0] || out[0] >= 0x800000u || (out[0] & 7u)) {   /* insane -> reject (OOM or wrong kext) */
+        gld_log("[vram] alloc(%u) -> bad off=0x%x rec=0x%x -- reject\n", size, out[0], out[1]);
+        if (out[1]) { uint32_t f[2]={kATIRPro_TEXOP_FREE,out[1]}, o2[2]; IOByteCount z=sizeof o2;   /* free the record */
+            IOConnectMethodStructureIStructureO(ctx->connect, kATIRPro_new_texture, sizeof f, &z, f, o2); }
+        return 0;
+    }
+    if (record_out) *record_out = out[1];
+    gld_log("[vram] alloc(%u) -> off=0x%x record=0x%x\n", size, out[0], out[1]);
+    return out[0];
+}
+
+void mach64_vram_free(gld_context *ctx, uint32_t record)
+{
+    uint32_t in[2], out[2]; IOByteCount osz = sizeof out;
+    if (!record || !ctx->connect) return;
+    in[0] = kATIRPro_TEXOP_FREE; in[1] = record;
+    IOConnectMethodStructureIStructureO(ctx->connect, kATIRPro_new_texture, sizeof in, &osz, in, out);
+}
+
 void mach64_pathb_setup_target(gld_context *ctx)
 {
     mach64_priv *p = MACH64_PRIV(ctx);
@@ -411,30 +449,41 @@ void mach64_pathb_setup_target(gld_context *ctx)
          * a 320x240 window's colour(0x4b000)+Z(0x25800) end ~0x372000, well under 0x400000. */
         {   uint32_t vis_h = *(const uint32_t *)((const char *)ctx + 0x1f4);
             uint32_t color_bytes = tpitch * 4u * vis_h;
-            /* Place Z with a FULL colour-buffer GAP past the surface (toff + 2*color_bytes), not
-             * immediately after it.  Writing Z inside Apple's (possibly padded/back-buffered)
-             * surface allocation marks it dirty -> the present's backing->buffer copy clobbers our
-             * engine render with the uninitialised (white) system backing -> white triangles on
-             * screen though the buffer is correct.  A gap keeps Z outside the surface's tracked
-             * range.  (320x240: Z@~0x397000, ends ~0x3bc800, still < 0x400000.) */
-            if (vis_h)
+            uint32_t zsize   = tpitch * 2u * vis_h;               /* 16-bit Z, same pixel width */
+            uint32_t texsize = 0x180000u;                         /* 1.5 MB texture heap        */
+            uint32_t zoff = 0, theap = 0;
+            /* PREFERRED: allocate Z + texture heap from Apple's OWN VRAM allocator (sel 10 op=ALLOC on
+             * the v4 kext) -- collision-free at ANY surface size, so large/fullscreen textures+depth
+             * work.  Falls back to the small-window guessed placement if the allocator isn't present
+             * (unpatched kext) or is out of VRAM. */
+            /* OPT-IN (MACH64_VRAM_ALLOC=1): the v3 allocator PANICKED because it drove the shared VRAM
+             * heap UNLOCKED, racing the WindowServer.  The v4 kext wraps the best-fit in the
+             * accel[0x544] mutex (as the stock methods do), which should fix it -- but it still runs on
+             * EVERY attach, so keep it gated until validated on hardware.  Without the env var, use the
+             * proven small-window guessed placement. */
+            int use_alloc = (getenv("MACH64_VRAM_ALLOC") != 0);
+            if (p->z_record)   { mach64_vram_free(ctx, p->z_record);   p->z_record = 0; }   /* re-attach: no leak */
+            if (p->tex_record) { mach64_vram_free(ctx, p->tex_record); p->tex_record = 0; }
+            if (vis_h && use_alloc) {
+                zoff  = mach64_vram_alloc(ctx, zsize,   &p->z_record);
+                theap = mach64_vram_alloc(ctx, texsize, &p->tex_record);
+            }
+            if (zoff) {
+                mach64_set_zbuffer(ctx, zoff, tpitch);
+                gld_log("[pathb] z-buffer -> off=0x%x pitch=%u (Apple allocator)\n", p->z_off, p->z_pitch);
+            } else if (vis_h) {
+                /* FALLBACK: gap past the colour surface (small windows only -- see the historical
+                 * white-clobber note; writing Z inside the surface's tracked range clobbers present). */
                 mach64_set_zbuffer(ctx, toff + 2u * color_bytes, tpitch);
-            gld_log("[pathb] z-buffer -> off=0x%x pitch=%u (gap past colour %ux%u @ 0x%x)\n",
-                    p->z_off, p->z_pitch, tpitch, vis_h, toff);
-            /* TEXTURE HEAP: put it in the SAME collision-free zone, right after the Z buffer, up to
-             * 0x400000 (below Apple's desktop surfaces -- the region we validated safe for colour+Z
-             * on a small window).  The compile default (0x600000) / double-buffer (z_off+zsize, ~
-             * 0x6bb800) heaps sit in VRAM Apple actively uses -> texel-upload blits corrupt it (and
-             * Apple stomps the texels) -- the same class of collision as the old Z placement.  Small
-             * window only: for a large drawable toff+2*color_bytes+zsize can exceed 0x400000, leaving
-             * no safe room -- then textures need a real Apple-VRAM allocator (the general fix). */
-            if (vis_h && p->z_off) {
-                uint32_t zsize = tpitch * 2u * vis_h;
-                uint32_t theap = p->z_off + zsize;
-                if (theap < 0x3f0000u)
-                    mach64_set_texheap(theap, 0x400000u);
-                else
-                    gld_log("[pathb] texheap: no safe room (theap=0x%x >= 0x3f0000) -- textures unsafe\n", theap);
+                gld_log("[pathb] z-buffer -> off=0x%x pitch=%u (guessed gap; small window only)\n",
+                        p->z_off, p->z_pitch);
+            }
+            if (theap) {
+                mach64_set_texheap(theap, theap + texsize);       /* Apple-allocated -> any size safe */
+            } else if (vis_h && p->z_off) {
+                uint32_t g = p->z_off + zsize;                    /* fallback: gap after Z, < 0x400000 */
+                if (g < 0x3f0000u) mach64_set_texheap(g, 0x400000u);
+                else gld_log("[pathb] texheap: no safe room (0x%x) + no allocator -- textures unsafe\n", g);
             }
         }
     }

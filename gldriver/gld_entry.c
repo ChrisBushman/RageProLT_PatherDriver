@@ -19,6 +19,7 @@
 #include <stdarg.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>   /* fsync (MACH64_GLD_FSYNC crash logging) */
 
 /* ---- diagnostic log -------------------------------------------------
  * Open the log ONCE and keep the FILE* -- writes are stdio-buffered and flushed on the app's
@@ -29,10 +30,11 @@
 void gld_log(const char *fmt, ...)
 {
     static FILE *f = NULL;
-    static int  tried = 0;
+    static int  tried = 0, do_fsync = 0;
     va_list ap;
     if (!tried) {
         tried = 1;
+        do_fsync = (getenv("MACH64_GLD_FSYNC") != 0);   /* force-to-disk each line (survives a panic) */
         if (!getenv("MACH64_GLD_NOLOG")) {
             /* Log to $HOME, NOT /tmp: Panther WIPES /private/tmp on (re)boot, so a kernel
              * panic destroys the log that would diagnose it.  $HOME survives the reboot. */
@@ -51,6 +53,7 @@ void gld_log(const char *fmt, ...)
     vfprintf(f, fmt, ap);
     va_end(ap);
     fflush(f);                                    /* flush every line so the crash point is visible */
+    if (do_fsync) fsync(fileno(f));               /* push to disk so a KERNEL PANIC can't lose the tail */
 }
 
 /* ---- gldAttachDrawable: bind the app's drawable as the render target -
@@ -75,6 +78,10 @@ int gldAttachDrawable(gld_context *ctx, int type, void *drawable, uint32_t flags
             MACH64_PRIV(ctx)->win_buf_off = 0; MACH64_PRIV(ctx)->win_buf_size = 0;
             MACH64_PRIV(ctx)->win_mode = 0;
         }
+        /* Return the Apple-allocated Z + texture-heap VRAM so it isn't leaked (VRAM is never
+         * reclaimed until reboot otherwise). */
+        if (MACH64_PRIV(ctx)->z_record)   { mach64_vram_free(ctx, MACH64_PRIV(ctx)->z_record);   MACH64_PRIV(ctx)->z_record = 0; }
+        if (MACH64_PRIV(ctx)->tex_record) { mach64_vram_free(ctx, MACH64_PRIV(ctx)->tex_record); MACH64_PRIV(ctx)->tex_record = 0; }
         return 0;
     }
 

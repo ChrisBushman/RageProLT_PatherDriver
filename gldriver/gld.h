@@ -125,6 +125,10 @@ typedef struct {
     /* ---- Path B port (GLD_APPLE_PROBE): live connections to Apple's ATIRagePro kext ---- */
     unsigned int apple_cn;         /* io_connect_t to Apple's type-1 GL user client (0=none) */
     unsigned int apple_surf_cn;    /* io_connect_t to Apple's type-2 IOAccelSurface client (0=none) */
+    /* ---- Path-B VRAM allocator records (from the sel-10 op=ALLOC kext path); opaque kernel handles,
+     * freed on detach/destroy so VRAM isn't leaked.  0 = allocated via the small-window guess. */
+    uint32_t   z_record;           /* Apple-allocator record for the Z buffer   */
+    uint32_t   tex_record;         /* Apple-allocator record for the texture heap */
     /* ---- texture state (first cut: one bound 2D texture) -------------- */
     void      *tex_obj;            /* bound/uploaded texobj (t[0x30]=state) */
     uint32_t   tex_off;            /* texel VRAM byte offset (0 = none up)  */
@@ -168,6 +172,8 @@ void     mach64_winbuf_free(uint32_t off, uint32_t bytes);
 void mach64_present(gld_context *ctx);   /* double-buffer back->front swap */
 void mach64_pathb_present(gld_context *ctx);   /* Path B: present via Apple's surface_flush */
 void mach64_pathb_setup_target(gld_context *ctx); /* Path B: prime surface + set render target off */
+uint32_t mach64_vram_alloc(gld_context *ctx, uint32_t size, uint32_t *record_out); /* Path B: Apple VRAM allocator */
+void mach64_vram_free(gld_context *ctx, uint32_t record);
 void mach64_flip(gld_context *ctx, uint32_t off);   /* page-flip CRTC scanout to `off` */
 void mach64_wait_flip(gld_context *ctx);            /* block until the pending flip retired */
 void mach64_sync_depth_from_gli(gld_context *ctx);

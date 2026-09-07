@@ -85,11 +85,11 @@ dispatch type: `kIOUCScalarIScalarO=0`, `kIOUCScalarIStructO=2`, `kIOUCStructISt
 | 7 | `read_buffer`         | StructIStructO                                         |
 | 8 | `finish`              | **fence only** — see §5.3                              |
 | 9 | `wait_for_stamp`      | fence                                                  |
-| 10| `new_texture`         | StructIStructO → `IOATIRProShared::new_texture`        |
-| 11| `delete_texture`      |                                                        |
+| 10| `new_texture`         | StructIStructO. **Repurposed + multiplexed by a kext patch** on `op` (in word 0): `0`=texel upload → VRAM memcpy, `1`=alloc VRAM (best-fit, out={offset,record}), `2`=free. The alloc/free wrap `mutex_lock(accel[0x544])` around Apple's shared-heap best-fit (islands `0x7474`/`0x7464`), so they can't race the WindowServer. Nothing but our driver calls sel 10, so multiplexing here is safe. |
+| 11| `delete_texture`      | **Left STOCK.** (v3 repurposed this for the allocator and paniced — sel 11 is invoked at context teardown.) |
 | 12| `become_global_shared`|                                                        |
 | 13| `pageoff_texture`     |                                                        |
-| 14| `scale_surface`       | stock: unused. **Currently repurposed by a peek patch into a kernel-memory read** — the driver uses it to fetch the render-target `OFF_PITCH` (§6.1). The sole kext-patch dependency; a shipping build replaces it with a `get_render_target` selector. |
+| 14| `scale_surface`       | stock: unused. **Currently repurposed by a peek patch into a kernel-memory read** — the driver uses it to fetch the render-target `OFF_PITCH` (§6.1). One of two kext-patch dependencies (the other multiplexes sel 10 for upload + VRAM alloc/free); a shipping build replaces this with a `get_render_target` selector and sel 10's multiplex with dedicated upload/alloc selectors. |
 
 ### Surface (type 0) — 16 selectors (relevant subset)
 

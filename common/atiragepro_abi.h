@@ -58,12 +58,26 @@ enum {
     kATIRPro_read_buffer          = 7,  /* @0x6c50 StructIStructO (var in) */
     kATIRPro_finish               = 8,  /* @0x7070 ScalarIStructI in=0 (drain+idle) */
     kATIRPro_wait_for_stamp       = 9,  /* @0x70c0 ScalarIStructI in=1 (drain+idle) */
-    kATIRPro_new_texture          = 10, /* @0x71e4 StructIStructO (var) -> shared->new_texture */
-    kATIRPro_delete_texture       = 11, /* @0x73c8 ScalarIStructI in=1 */
+    kATIRPro_new_texture          = 10, /* @0x71e4 StructIStructO (var).  On OUR patched kext (v4) this
+                                         * selector is MULTIPLEXED: in={u32 op; u32 arg; <payload>}.
+                                         *   op=0 UPLOAD: arg=dst_off, payload=argb texels -> VRAM memcpy.
+                                         *   op=1 ALLOC : arg=size  -> out={u32 offset; u32 record}
+                                         *                (accel[0x78] best-fit, LOCKED by accel[0x544]).
+                                         *   op=2 FREE  : arg=record.
+                                         * Multiplexing here (vs. repurposing sel 11) leaves the stock
+                                         * delete_texture intact -- sel 11 is exercised at teardown. */
+    kATIRPro_delete_texture       = 11, /* @0x73c8 stock ScalarIStructI in=1 -- LEFT STOCK (v4). */
     kATIRPro_become_global_shared = 12, /* @0x7484 ScalarIStructI in=1 (publish/relinquish; optional) */
     kATIRPro_pageoff_texture      = 13, /* @0x758c ScalarIStructI in=2 */
     kATIRPro_scale_surface        = 14, /* @0x710c ScalarIStructI in=3 */
     kATIRPro_GL_SEL_COUNT         = 15,
+};
+
+/* Op codes for the multiplexed new_texture (sel 10) selector -- struct in word [0]. */
+enum {
+    kATIRPro_TEXOP_UPLOAD = 0,  /* arg=dst_off, payload=argb texels               */
+    kATIRPro_TEXOP_ALLOC  = 1,  /* arg=size -> out={offset, record}               */
+    kATIRPro_TEXOP_FREE   = 2,  /* arg=record                                     */
 };
 
 /* ---- IOATIRProSurface external methods -- FULLY CONFIRMED (2026-09-06) --------

@@ -174,6 +174,12 @@ int gldCreateContext(gld_context **outp, void *pixfmt, void *shared,
 int gldDestroyContext(gld_context *ctx)
 {
     if (!ctx) return 0;
+    /* Return Apple-allocated Z/texture VRAM if the app destroyed without detaching (no-op if detach
+     * already freed them).  Must run while ctx->connect is still open (closed below). */
+    if (ctx->backend && ctx->connect) {
+        if (MACH64_PRIV(ctx)->z_record)   { mach64_vram_free(ctx, MACH64_PRIV(ctx)->z_record);   MACH64_PRIV(ctx)->z_record = 0; }
+        if (MACH64_PRIV(ctx)->tex_record) { mach64_vram_free(ctx, MACH64_PRIV(ctx)->tex_record); MACH64_PRIV(ctx)->tex_record = 0; }
+    }
     /* apple_cn aliases ctx->connect now (single Path-B connection) -- do NOT close it
      * here, it is closed below.  The surface is a SEPARATE type-2 client: close it. */
     if (ctx->backend && MACH64_PRIV(ctx)->apple_surf_cn)

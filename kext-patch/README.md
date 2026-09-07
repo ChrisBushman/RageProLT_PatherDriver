@@ -63,3 +63,57 @@ Needs `capstone` (PPC) and the two kext binaries (not in the repo — pull from 
 
 Deploy with `../install-upload-kext.sh` (backs up stock `.orig`, installs, invalidates caches;
 recovery = single-user restore of `.orig`). Result md5: `05b777e9b29417910bb93317ab8591b2`.
+
+---
+
+# v4 — VRAM allocator, multiplexed into sel 10 (`handler_mux.py` / `patch4.py`)
+
+For **fullscreen** rendering the driver can't guess where to place the Z buffer + texture heap without
+colliding with the WindowServer's own surfaces. The fix is to borrow Apple's own best-fit VRAM
+allocator (`alloc_bestfit` on `accel[0x78]`, freed with `heap_free`) via a kext selector.
+
+**Why not a new selector.** v3 repurposed `delete_texture` (sel 11) for this — a mistake: sel 11 is a
+*live* selector, invoked at context teardown, so overriding its methodDesc **panicked on teardown**.
+v4 instead **multiplexes** the allocator into sel 10 (`new_texture` — already ours, called by nothing
+but our driver), dispatched on a leading op word, and leaves `delete_texture` **stock**.
+
+**Why it panicked on first use (the real bug).** External-method dispatch is **not** serialized: the
+handler ran `alloc_bestfit`/`heap_free` on the shared heap while the WindowServer touched it
+concurrently. The stock methods **self-lock** `mutex_lock(accel[0x544])` first; the v3 handler didn't.
+v4 wraps both heap ops in that mutex, via the same branch islands stock `delete_texture` uses:
+**`mutex_lock` = island `0x7474`, `mutex_unlock` = island `0x7464`** (both verified from the stock
+`delete_texture` disassembly — *not* the 0x73b8/0x7368 islands, which belong to the orphaned
+`new_texture` body).
+
+## The multiplexed handler (`handler_mux.py`)
+
+61 PPC instructions over `0x71e4` (region `0x71e4..0x72d8`; stock `delete_texture` starts at `0x73c8`).
+`StructIStructO`: `r3=this  r4=inPtr  r5=outPtr  r6=inSize`, `in = { u32 op; u32 arg; <payload> }`:
+
+    op=0 UPLOAD: dst = this[0xb0][0xe0] + arg;  memcpy(dst, in+8, inSize-8)      ; (the old sel-10 job)
+    op=1 ALLOC : rec = IOMallocPageable(0x10); rec[8]=0
+                 LOCK(accel[0x544]); alloc_bestfit(accel[0x78], rec, arg/*size*/, 0x40); UNLOCK
+                 out = { rec[8]/*offset, 0 on OOM*/, rec }
+    op=2 FREE  : LOCK(accel[0x544]); heap_free(accel[0x78], arg/*rec*/); UNLOCK; IOFreePageable(rec,0x10)
+
+Non-volatiles hold state across the `bl`s (r27=outPtr, r28=op, r29=arg, r30=accel, r31=record).
+
+## Relocations (`patch4.py`)
+
+The whole `0x71e4..0x73c8` window is peppered with `__text` relocs from the orphaned `new_texture`
+body + jump table + two dead islands. `patch4.py` decodes **every** reloc (scattered and plain),
+and any whose write-address lands in the window is repointed to a dead scratch word (`0x73c0`),
+preserving scattered-flag bits; `PPC_RELOC_PAIR` entries are skipped. It then asserts **no** surviving
+reloc writes into the executed handler bytes. It also asserts sel 10 is `StructIStructO`-variable and
+**sel 11 is still stock** before writing anything.
+
+## Reproduce
+
+Start from `ATIRagePro.patched2` (the v2 upload build) plus the parsed reloc table `_relocs.pkl`:
+
+    python3 handler_mux.py   # assemble + verify all 14 branch/bl targets -> handler_mux.bin
+    python3 patch4.py        # ATIRagePro.patched2 -> ATIRagePro.patched4, fully verified
+
+Deploy with `../install-kext-v4.sh` (preserves `.orig` stock + `.peek` v2 fallbacks).
+Result md5: `421c9c2542a7ef3d42e1a12febcda2dd`. Revert with `../revert-kext.sh` (→ v2) or
+`../revert-kext.sh orig` (→ stock).
