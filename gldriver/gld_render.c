@@ -115,6 +115,15 @@ uint32_t mach64_submit(gld_context *ctx, m64_cmdbuf *cb)
         }
         if (cb->overflow) break;
     }
+    if (cb->overflow) {
+        /* The packed stream didn't fit the hardware body -> it is TRUNCATED mid-geometry.
+         * Draining a truncated stream WEDGES the engine (the Flurry freeze).  Drop it instead:
+         * lose this batch's geometry but keep the machine alive.  The draw_triangle batch sizing
+         * (fb_size-0x20)/8 should keep us from ever getting here; log loudly if we do. */
+        gld_log("  [submit] *** OVERFLOW: packed %u dw > body cap %u -- DROPPING (would wedge) ***\n",
+                out, cap);
+        return p->last_stamp;
+    }
     hdr->count  = out;                                 /* # body dwords for the kext to drain */
     hdr->flags |= ATIRPRO_CMDBUF_FLAG_SUBMIT;          /* bit0 = VALID/SUBMIT */
     { static int slog = 0; if (slog < 5) {
@@ -618,15 +627,20 @@ int mach64_draw_triangle(gld_context *ctx, const m64_vertex *v0,
                     sizeof(p->batchbuf) / sizeof(p->batchbuf[0]));
 
     /* Flush before this triangle if the state block (~96 dwords when dirty) + the
-     * triangle (~64 dwords) might not fit.  The 12-bit bus-master byte-count limit no longer
-     * caps the BATCH: the kext now CHAINS the submit across multiple <=4092-byte descriptors
-     * (submitCommandBuffer), so a batch can fill the whole command buffer and still DMA-kick
-     * ONCE.  Bound the batch by the smaller of the command buffer (fb_size/4) and the batch
-     * staging (batchbuf), leaving headroom for the terminator + a final state+triangle.
-     * (Was capped at 960 dwords -> ~80 kicks/frame -> ~3fps, almost all submit overhead.) */
-    limit = ctx->fb_size / 4;
+     * triangle (~64 dwords) might not fit.  CRITICAL SIZING (Flurry kernel-panic fix):
+     * p->batch holds our DRI packet format {header, run...}, but mach64_submit EXPANDS each
+     * packet into flat {reg,val} body PAIRS -- a run of N values -> 2N body dwords, so the
+     * expansion is up to ~2x.  The hardware command body holds only (fb_size-0x20)/4 dwords
+     * (fb_size=4096 -> 1016).  If the batch is bounded by fb_size/4 (=1024) it can expand to
+     * ~2000 body dwords, overflow the 1016-dword body, and mach64_submit TRUNCATES mid-stream
+     * -> a malformed DMA that WEDGES the engine (whole machine freezes -- what killed Flurry,
+     * which draws hundreds of particles/frame).  So bound the DRI batch by (fb_size-0x20)/8:
+     * half the body capacity, guaranteeing the worst-case 2x expansion still fits one drain.
+     * High-volume frames simply split across several well-formed drains (state re-emitted per
+     * flush), which is correct if slower -- never a truncated submit. */
+    limit = (ctx->fb_size > 0x20u) ? (ctx->fb_size - 0x20u) / 8u : 256u;  /* guard underflow */
     if (limit > 32000) limit = 32000;  /* <= batchbuf[32768], with headroom */
-    if (limit < 256) limit = 256;
+    if (limit < 256) limit = 256;      /* fb not mapped yet / tiny buffer: a single tri fits */
     need = ((p->dirty & MACH64_DIRTY_STATE) ? 96u : 0u) + 64u;
     if (p->batch.n + need > limit - 8)
         mach64_flush_batch(ctx);
