@@ -117,3 +117,41 @@ Start from `ATIRagePro.patched2` (the v2 upload build) plus the parsed reloc tab
 Deploy with `../install-kext-v4.sh` (preserves `.orig` stock + `.peek` v2 fallbacks).
 Result md5: `421c9c2542a7ef3d42e1a12febcda2dd`. Revert with `../revert-kext.sh` (→ v2) or
 `../revert-kext.sh orig` (→ stock).
+
+---
+
+# v5 — enlarge the PIO command buffer 4 KB → 64 KB (`patch5.py`)
+
+Apple's mach64 GL is **PIO-only**: geometry is register-programmed into the type-2 command buffer
+and drained by `submit_buffer` (`stwbrx val → BAR+0x400+reg_off`); the `ONE_OVER_AREA` write is the
+per-triangle kick. There is **no** vertex-DMA path (`new_vertex_buffer`/`IOVertexBuffer` are dead,
+unreferenced code — for Radeon-class parts in the same source base). And `IOConnectMapMemory(type-1)`
+— our only submit trigger — is the **full end-of-frame present** (`build_swap` + CRTC flip), valid
+exactly once per frame (a 2nd hits the `accel[0x74]` latch → skips the drain + double-flips → engine
+wedge). So a frame's geometry is capped at **one command buffer**, and the stock buffer is only 4 KB =
+`(0x1000-0x20)/4` = 1016 body dwords ≈ **12–15 triangles/frame**.
+
+The drain (`submit_buffer`) already accepts up to `0x4000` dwords; only the buffer size caps us, and
+it's a hardcoded constant. `patch5.py` grows it to **64 KB** (→ 16376 body dwords = 8188 `{reg,val}`
+pairs ≈ **~200 triangles/frame**, safely under the `0x4000` drain cap) with **two** `li r,0x1000 →
+lis r,1` edits:
+
+| vaddr | file off | old → new | role |
+|---|---|---|---|
+| `0x5164` | `0x54a0` | `li r4,0x1000`→`lis r4,1` | size arg to `allocAllContextBuffers` — grows the command buffer **and both ping-pong staging buffers** + alloc-time capacity (one shared size) |
+| `0x5fe4` | `0x6320` | `li r5,0x1000`→`lis r5,1` | type-2 handler's per-map capacity re-init (`init_context_buffer_header`), else it clobbers capacity back to 1016 on every map |
+
+Both allocations flow through `IOBufferMemoryDescriptor::withOptions(opts, size, align)` (RE-verified,
+handles 64 KB), and no other `0x1000` constant sits on the path — so two edits are sufficient and there
+is no hidden overflow. The **driver needs no change**: `mach64_draw_triangle`'s batch limit is
+`(fb_size-0x20)/8`, which at a 64 KB live map = 8188 DRI dwords → expands to ≤16376 body dwords = the
+new capacity exactly.
+
+## Reproduce
+
+    python3 patch5.py   # ATIRagePro.patched4 -> ATIRagePro.patched5 (2 sites, verified)
+
+Deploy with `../install-kext-v5.sh` (preserves `.orig`/`.peek`). Result md5:
+`3803034d703f3439aaaea3dd200a9565`. HW-verified: flurrywin at 40 quads (80 tris) renders the FULL
+swirl, `cap=16376`, **0 dropped triangles** (was ~3 circles on the 4 KB buffer). Belt-and-suspenders
+check: after the type-2 map, `header[0x10]` should read `0x3ff8` (16376).

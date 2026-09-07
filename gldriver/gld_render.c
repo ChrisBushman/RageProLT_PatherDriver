@@ -642,8 +642,12 @@ int mach64_draw_triangle(gld_context *ctx, const m64_vertex *v0,
      * p->batch holds DRI packets {header, run...} which mach64_submit expands ~2x into {reg,val} body
      * pairs, and the hardware body is only (fb_size-0x20)/4 (=1016 @ 4KB) dwords, so bound the DRI
      * batch by (fb_size-0x20)/8 (half, for the 2x expansion) -> the frame's one submit never truncates.
-     * CONSEQUENCE: the PIO command buffer caps a frame at ~6-15 triangles; real geometry volume needs
-     * the GART vertex-buffer DMA path (new_vertex_buffer) -- the proper fix, separate work. */
+     * CONSEQUENCE: a frame's geometry is capped at ONE command buffer.  On the stock 4KB buffer that
+     * is only ~12-15 triangles; the v5 kext enlarges the command buffer to 64KB (map-size li->lis
+     * patch) -> ~8000 pairs -> ~200 triangles/frame.  This limit auto-scales: fb_size is the live map
+     * size, so a bigger v5 buffer lifts the ceiling with no driver change.  (Apple's mach64 GL is
+     * PIO-only -- the vertex-DMA path in the kext is dead code -- so enlarging this buffer is THE fix
+     * for volume, not a DMA rework.) */
     limit = (ctx->fb_size > 0x20u) ? (ctx->fb_size - 0x20u) / 8u : 256u;  /* guard underflow */
     if (limit > 32000) limit = 32000;  /* <= batchbuf[32768], with headroom */
     if (limit < 256) limit = 256;      /* fb not mapped yet / tiny buffer: a single tri fits */
