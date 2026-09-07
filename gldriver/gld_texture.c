@@ -670,13 +670,27 @@ int mach64_bind_texture(gld_context *ctx)
     mach64_tex_slot *bound;
     uint32_t wl, hl, tex_on, env, light_fcn, new_scale_3d, blend, lop_mix = 0;
     int changed, lop_on;
+    /* PATH-B TEXTURE GUARD: texture upload uses the mach64 host-data blit (a run of texels to the
+     * HOST_DATA0 FIFO port).  Apple's PIO {reg,val} submit CANNOT express a FIFO feed -- it expands
+     * a register run into CONSECUTIVE register pokes, which both overflows the 4KB command buffer
+     * (truncated blit -> engine waits for missing texels) and scribbles past HOST_DATA15 into other
+     * registers -> the GUI engine WEDGES (only a reboot clears it).  Until a Path-B-compatible upload
+     * exists (Apple new_texture selector, or a CPU-writable VRAM staging map), DISABLE texturing
+     * under Path B: skip the upload entirely and render untextured (vertex-colour) geometry.  Detect
+     * Path B by the bound Apple surface. */
+    int path_b = (p->apple_surf_cn != 0);
 
     /* Upload any image-dirtied textures (their state objects are populated by
      * draw time); each lands in its own VRAM slot.  Pop the queue under the lock,
      * then upload OUTSIDE it -- mach64_upload -> slot_alloc takes the lock itself,
      * so holding it across the DMA upload would both deadlock and needlessly
      * serialise uploads. */
-    for (;;) {
+    if (path_b) {
+        TEX_LOCK(); g_npending = 0; TEX_UNLOCK();   /* discard uploads -- the blit would wedge */
+        { static int warned = 0; if (!warned) {
+            gld_log("mach64 tex: PATH B -- texture upload disabled (host-data blit wedges Apple's "
+                    "PIO submit); rendering UNTEXTURED.\n"); warned = 1; } }
+    } else for (;;) {
         void *pend = 0;
         TEX_LOCK();
         if (g_npending) pend = g_pending[--g_npending];
@@ -806,8 +820,9 @@ int mach64_bind_texture(gld_context *ctx)
     if (mach64_fog_on) p->dirty |= MACH64_DIRTY_STATE;
     else               st->dp_fog_clr = 0;   /* leave DP_FRGD_CLR to the 2D engine */
 
-    /* Follow the app's glEnable/glDisable(GL_TEXTURE_2D). */
-    tex_on = (mach64_gli_u32(ctx, GLI_TEX2D_ENABLE) & GLI_TEX2D_BIT) != 0;
+    /* Follow the app's glEnable/glDisable(GL_TEXTURE_2D).  Under Path B force it OFF so the
+     * untextured path below runs (no texel data was uploaded -- see the PATH-B TEXTURE GUARD). */
+    tex_on = !path_b && (mach64_gli_u32(ctx, GLI_TEX2D_ENABLE) & GLI_TEX2D_BIT) != 0;
 
     /* Select the CURRENTLY-BOUND texture: GLEngine stores its texobj at
      * gli+0x15748; our slot is keyed by texobj[0x30] (the state object). */

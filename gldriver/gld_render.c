@@ -421,6 +421,21 @@ void mach64_pathb_setup_target(gld_context *ctx)
                 mach64_set_zbuffer(ctx, toff + 2u * color_bytes, tpitch);
             gld_log("[pathb] z-buffer -> off=0x%x pitch=%u (gap past colour %ux%u @ 0x%x)\n",
                     p->z_off, p->z_pitch, tpitch, vis_h, toff);
+            /* TEXTURE HEAP: put it in the SAME collision-free zone, right after the Z buffer, up to
+             * 0x400000 (below Apple's desktop surfaces -- the region we validated safe for colour+Z
+             * on a small window).  The compile default (0x600000) / double-buffer (z_off+zsize, ~
+             * 0x6bb800) heaps sit in VRAM Apple actively uses -> texel-upload blits corrupt it (and
+             * Apple stomps the texels) -- the same class of collision as the old Z placement.  Small
+             * window only: for a large drawable toff+2*color_bytes+zsize can exceed 0x400000, leaving
+             * no safe room -- then textures need a real Apple-VRAM allocator (the general fix). */
+            if (vis_h && p->z_off) {
+                uint32_t zsize = tpitch * 2u * vis_h;
+                uint32_t theap = p->z_off + zsize;
+                if (theap < 0x3f0000u)
+                    mach64_set_texheap(theap, 0x400000u);
+                else
+                    gld_log("[pathb] texheap: no safe room (theap=0x%x >= 0x3f0000) -- textures unsafe\n", theap);
+            }
         }
     }
     gld_log("[pathb] setup target: surf=0x%x desc=0x%x rt=0x%08x -> off=0x%x pitch=%u\n",
