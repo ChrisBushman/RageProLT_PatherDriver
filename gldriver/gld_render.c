@@ -96,29 +96,38 @@ uint32_t mach64_submit(gld_context *ctx, m64_cmdbuf *cb)
         uint32_t base = (adr & 0x100u) ? ((adr & 0xffu) << 2)
                                        : (((adr & 0xffu) << 2) + 0x400u);
         for (k = 0; k < cnt && i < cb->n; k++) {
-            uint32_t reg = base + k * 4u;               /* real mach64 (DRI) register offset */
-            /* Apple's submit_buffer writes MMIO[this[0x550]+off], this[0x550]==real_reg_base+0x400,
-             * so off = reg-0x400 reaches register `reg` -- but ONLY for reg >= 0x400.  Block 0
-             * (real 0x000-0x3ff: the 3D SETUP/VERTEX engine 0x240-0x304, CRTC, ...) is NOT mapped
-             * contiguously below this[0x550] (HW-verified: reads there are adjacent kernel memory,
-             * NOT registers -- writing would corrupt the kernel).  So we DROP reg < 0x400 here:
-             * 2D fills/blits/clears (all reg >= 0x400) submit correctly; 3D triangles need the
-             * DMA/ADRINDEX vertex-buffer path (IOATIRProShared::new_vertex_buffer) -- TODO. */
-            if (reg < 0x400u) { i++; continue; }
+            /* `reg` is our DRI-header register offset (0x000-0x7fc).  Apple's submit_buffer does
+             * `stwbrx val, this[0x550], off`, and this[0x550] == the mach64 register BAR + 0x400
+             * (the GUI/block-1 sub-aperture base) -- HW-PROVEN by the working submits: Z_CNTL is
+             * DRI 0x54c and lands via off 0x14c (=0x54c-0x400); SCALE_3D_CNTL DRI 0x5fc via off
+             * 0x1fc.  So the UNIVERSAL offset is off = reg - 0x400 for EVERY register.  For the 3D
+             * SETUP/VERTEX block-0 registers (DRI 0x240-0x304, below 0x400) this yields a value
+             * like 0x240-0x400 = 0xFFFFFE40; PPC stwrx adds it mod 2^32 so the EA wraps to
+             * this[0x550]-0x1c0 = BAR+0x240 = real VERTEX_1_S -- IN the register BAR, not before
+             * it (the earlier "block-0 unreachable/panic" fear assumed base 0x000; base is 0x400,
+             * so the wrap is safe).  The prior `reg>=0x400?reg-0x400:reg` wrote block-0 regs at
+             * this[0x550]+0x240 = real 0x640 (WRONG registers) -> the setup engine got no vertex
+             * data -> the triangle was submitted but rasterized nothing (2D fills still worked). */
+            uint32_t reg = base + k * 4u;
             if (out + 2 > cap) { cb->overflow = 1; break; }   /* body full -> drop rest */
-            body[out++] = reg - 0x400u;    /* Apple {reg,val} offset = real_reg - 0x400 */
+            body[out++] = reg - 0x400u;    /* Apple MMIO offset (base = BAR+0x400) */
             body[out++] = cb->buf[i++];    /* val (kext byte-reverses to the LE regs) */
         }
         if (cb->overflow) break;
     }
     hdr->count  = out;                                 /* # body dwords for the kext to drain */
     hdr->flags |= ATIRPRO_CMDBUF_FLAG_SUBMIT;          /* bit0 = VALID/SUBMIT */
+    { static int slog = 0; if (slog < 5) {
+        gld_log("  [submit #%d] out=%u dw (cap=%u) off0=0x%x val0=0x%x -> drain...\n",
+                slog, out, cap, out ? body[0] : 0, out ? body[1] : 0); slog++; } }
     /* SUBMIT = map type-1 (surface buffer): clientMemoryForType drains our command buffer through
      * the engine.  Map+unmap (the drain is the side effect of the map call). */
     if (!IOConnectMapMemory(ctx->connect, ATIRPRO_MEM_COMMAND, mach_task_self(),
                             &sub, &subsz, kIOMapAnywhere | kIOMapInhibitCache) && sub)
         IOConnectUnmapMemory(ctx->connect, ATIRPRO_MEM_COMMAND, mach_task_self(), sub);
     p->last_stamp = hdr->stamp;                        /* kext-updated submit stamp */
+    { static int slog2 = 0; if (slog2 < 5) {
+        gld_log("  [submit #%d] drained OK stamp=0x%x\n", slog2, p->last_stamp); slog2++; } }
     return p->last_stamp;
 }
 
@@ -340,12 +349,26 @@ void mach64_pathb_setup_target(gld_context *ctx)
         IOConnectMethodScalarIScalarO(sc, kATIRProSurf_surface_write_unlock, 0, 0);
         IOConnectMethodScalarIScalarO(sc, kATIRProSurf_surface_flush, 2, 0, 1u, 0u);
     }
+    /* KERNEL-PEEK HAZARD: these are absolute kernel reads (0x80000000 flag).  Dereferencing a
+     * bogus pointer PANICS the machine (docs hazard).  VALIDATE each peeked pointer is in the
+     * kernel-heap range before feeding it to the next absolute peek -- a garbage value (0,
+     * ~0, a userspace address) is skipped, leaving target_off 0 (caller renders nothing) rather
+     * than panicking.  Observed-good: surf~0x1d84400, desc~0x1d8449c (kernel zalloc zone). */
+#define PEEK_OK(pp)  ((pp) > 0x10000u && (pp) < 0x40000000u)
     IOConnectMethodScalarIScalarO(gc, kATIRPro_scale_surface, 1, 1, 0x10cu, &surf);
-    if (surf) IOConnectMethodScalarIScalarO(gc, kATIRPro_scale_surface, 1, 1, 0x80000000u | (surf + 0x12cu), &desc);
-    if (desc) IOConnectMethodScalarIScalarO(gc, kATIRPro_scale_surface, 1, 1, 0x80000000u | (desc + 0x28u), &rt);
+    if (PEEK_OK(surf)) IOConnectMethodScalarIScalarO(gc, kATIRPro_scale_surface, 1, 1, 0x80000000u | (surf + 0x12cu), &desc);
+    if (PEEK_OK(desc)) IOConnectMethodScalarIScalarO(gc, kATIRPro_scale_surface, 1, 1, 0x80000000u | (desc + 0x28u), &rt);
+#undef PEEK_OK
     if (rt) {
-        p->target_off   = (rt & 0x3fffffu) << 3;        /* VRAM byte offset */
-        p->target_pitch = ((rt >> 22) & 0x3ffu) << 3;   /* pitch in pixels  */
+        uint32_t toff   = (rt & 0x3fffffu) << 3;         /* VRAM byte offset */
+        uint32_t tpitch = ((rt >> 22) & 0x3ffu) << 3;    /* pitch in pixels  */
+        /* Sync BOTH the 2D-fill target (p->target_off, used by the clear/fill path) AND the
+         * 3D render state (p->hw.dst_off_pitch, emitted by m64_emit_state for triangles) to
+         * Apple's bound surface.  Previously only target_off was set, so the 2D clear hit the
+         * surface (0x301000, presented) but triangles used the stale hw.dst_off_pitch left by
+         * the winpool set_render_target (0x6bb800) -- rendered into a buffer never presented,
+         * so geometry was invisible while the clear showed. */
+        mach64_set_render_target(ctx, toff, tpitch);
     }
     gld_log("[pathb] setup target: surf=0x%x desc=0x%x rt=0x%08x -> off=0x%x pitch=%u\n",
             surf, desc, rt, p->target_off, p->target_pitch);
@@ -487,6 +510,13 @@ int mach64_draw_triangle(gld_context *ctx, const m64_vertex *v0,
         m64_emit_state(&p->batch, &p->hw);
         p->dirty &= ~MACH64_DIRTY_STATE;
     }
+    { static int tlog = 0; if (tlog < 3) {
+        gld_log("  [tri #%d] v0 xy=0x%08x argb=0x%08x | v1 xy=0x%08x argb=0x%08x | v2 xy=0x%08x argb=0x%08x\n",
+                tlog, (unsigned)v0->x_y, v0->argb, (unsigned)v1->x_y, v1->argb, (unsigned)v2->x_y, v2->argb);
+        gld_log("  [tri #%d] scale3d=0x%x setup=0x%x zc=0x%x dstop=0x%x sc_lr=0x%x sc_tb=0x%x dp_mix=0x%x dp_src=0x%x wmask=0x%x\n",
+                tlog, p->hw.scale_3d_cntl, p->hw.setup_cntl, p->hw.z_cntl, p->hw.dst_off_pitch,
+                p->hw.sc_left_right, p->hw.sc_top_bottom, p->hw.dp_mix, p->hw.dp_src, p->hw.dp_write_mask);
+        tlog++; } }
     if (!m64_emit_triangle(&p->batch, v0, v1, v2))
         return 0;                  /* degenerate: nothing emitted */
     return 1;

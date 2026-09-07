@@ -138,25 +138,38 @@ client overwrites `body[]`/`count` before triggering.
 `submit_buffer` (§5.2) writes each register with `stwbrx r_val, this[0x550], r_off` — a
 byte-reversing store to `MMIO_base + off`, where `MMIO_base = accel[0x550]`.
 
-**[HW] `MMIO_base == real_register_base + 0x400`.** Proven two ways: `GUI_STAT` (canonical real
-`0x738`) reads correctly at `MMIO_base + 0x338`; and writing `DST_WIDTH_HEIGHT` (canonical real
-`0x6ec`) at `MMIO_base + 0x2ec` triggers a fill. Therefore:
+**[HW] `MMIO_base == real_register_base + 0x400`.** Proven by the working command streams: `Z_CNTL`
+(canonical real `0x54c`) programs correctly at `MMIO_base + 0x14c`; `SCALE_3D_CNTL` (real `0x5fc`)
+at `MMIO_base + 0x1fc`; `DST_WIDTH_HEIGHT` (real `0x6ec`) at `MMIO_base + 0x2ec` triggers a fill.
+Therefore:
 
-> **The `{reg,val}` offset a client must write to program canonical register `R` is `R − 0x400`.**
+> **The `{reg,val}` offset a client must write to program canonical register `R` is `R − 0x400`,
+> for EVERY register — 2D *and* 3D.**
 
 - `DST_OFF_PITCH` real `0x500` → write offset `0x100`
 - `DP_FRGD_CLR`   real `0x6c4` → write offset `0x2c4`
-- `DST_WIDTH_HEIGHT` real `0x6ec` → write offset `0x2ec`  *(the fill trigger)*
+- `DST_WIDTH_HEIGHT` real `0x6ec` → write offset `0x2ec`  *(the 2D fill trigger)*
+- `VERTEX_1_S`    real `0x240` → write offset `0x240 − 0x400 = 0xFFFFFE40`  *(see wrap below)*
+- `ONE_OVER_AREA_UC` real `0x300` → write offset `0xFFFFFF00`  *(the 3D setup trigger)*
 
-**[HW] Reachability limit.** `MMIO_base` maps only **block 1** (real `0x400–0x7ff`, the 2D/GUI/
-scaler engine). **Block 0 (real `0x000–0x3ff`)** — which holds the 3D **SETUP/VERTEX** engine
-(`SETUP_CNTL 0x304`, `VERTEX_n 0x240–0x2a8`, `ONE_OVER_AREA_UC 0x300`) and the CRTC — is **not**
-mapped contiguously below `MMIO_base`. Reads below `MMIO_base` return adjacent kernel memory, not
-registers; **writing there via an unsigned-wrap offset would corrupt the kernel.** Consequently:
+**[HW] Block 0 is reachable — the 32-bit wrap is the mechanism, not a bug.** The BAR spans the full
+real `0x000–0x7ff`; `MMIO_base` points `0x400` **into** it (the GUI/block-1 sub-aperture base), so
+the real base sits `0x400` *below* `MMIO_base`, still inside the mapping. For a block-0 register
+`R < 0x400`, `off = R − 0x400` is a large unsigned value (e.g. `0x240 − 0x400 = 0xFFFFFE40`); PPC
+`stwbrx` computes `EA = MMIO_base + off (mod 2³²)`, which wraps to `MMIO_base − 0x1c0 = real 0x240`
+— a genuine register **inside** the BAR, never kernel memory. So a **single uniform rule** (`R −
+0x400`) reaches both blocks:
 
-> **Only registers `≥ 0x400` are reachable via `submit_buffer` PIO.** 2D fills/blits/clears use only
-> such registers and work. 3D geometry (block-0 setup engine) is **not** reachable this way and must
-> use the bus-master DMA / vertex-buffer path (§10).
+> **All registers are reachable via `submit_buffer` PIO. 2D fills/blits/clears AND 3D
+> SETUP/VERTEX/ONE_OVER_AREA geometry submit through the exact same path — no bus-master DMA or
+> vertex-buffer subsystem is required for hardware triangles.** [HW-PROVEN: a Gouraud triangle
+> rasterizes through Apple's unmodified kext, §10.]
+
+> **Pitfall (cost the most).** An earlier revision special-cased block 0 as `reg < 0x400 ? reg : reg
+> − 0x400`, writing SETUP/VERTEX at `MMIO_base + 0x2xx/0x3xx = real 0x6xx/0x7xx` — the *wrong*
+> registers. 2D still worked (its registers are all `≥ 0x400`), the triangle submit drained cleanly,
+> but the setup engine received no vertex data and rasterized nothing. The fix is the uniform `R −
+> 0x400`; the wrap does the rest.
 
 ---
 
@@ -304,19 +317,44 @@ register reads back correct. Always derive offsets as `real_DRI_offset − 0x400
 
 ---
 
-## 10. 3D geometry (specified, not yet wired)
+## 10. 3D geometry (HW-PROVEN via PIO — no DMA subsystem)
 
 The setup engine (gouraud/textured triangles) is programmed through block-0 registers
-(`SETUP_CNTL 0x304`, `VERTEX_{1,2,3}_* 0x240–0x2a8`, trigger `ONE_OVER_AREA_UC 0x300`) — **all
-`< 0x400`, hence unreachable via `submit_buffer` PIO (§4)**. Apple's own present blit (`build_swap`)
-reaches these via the **bus-master DMA / ADRINDEX** path (a DMA descriptor's register indices span
-all blocks), not via PIO.
+(`SETUP_CNTL 0x304`, `VERTEX_{1,2,3}_* 0x240–0x2a8`, trigger `ONE_OVER_AREA_UC 0x300`). These are
+all `< 0x400`, but they are **fully reachable via `submit_buffer` PIO** through the uniform `R −
+0x400` offset and its 32-bit wrap (§4). No bus-master DMA, GART vertex buffer, or `build_swap`-style
+path is required: **the same `{reg,val}` command stream that does 2D fills also rasterizes
+triangles.** A red/green/blue Gouraud triangle renders correctly through Apple's unmodified
+`ATIRagePro.kext` on the Rage LT Pro.
 
-The client-facing mechanism is **`IOATIRProShared::new_vertex_buffer`** (`@0x10618`): it allocates
-a GART-backed `IOVertexBuffer` (0x80-byte object); the kext DMAs it to the setup engine. Wiring 3D
-therefore means: allocate a vertex buffer, fill it in the kext's expected vertex layout, and issue
-the DMA draw. Reversing that submission (allocation selector, vertex format, DMA kick) is the
-remaining work.
+**Per-triangle command stream** (appended to the same command buffer, drained by the same map-type-1
+trigger):
+
+1. **State (once per state change), all via `R − 0x400`:**
+   `SCALE_3D_CNTL = 0x000100c1` (real `0x5fc`), `SETUP_CNTL = 0` (real `0x304`; **`0x40` breaks the
+   colour gradient** — every pixel comes out white), `Z_CNTL`, `DP_PIX_WIDTH = 0x60060666`,
+   `DST_OFF_PITCH` (= the surface's `rt`, §6), `SC_LEFT_RIGHT/SC_TOP_BOTTOM` (scissor), `DP_MIX =
+   0x00070007`, `DP_SRC = 0x00000505` (Gouraud: colour from the interpolated vertex ARGB),
+   `DP_WRITE_MASK = 0xffffffff`.
+2. **Three vertices**, each the full 7-dword block written at `VERTEX_n_S` (real `0x240 + n·0x20`)
+   with a run count of 7: `{S, T, W, SPEC_ARGB, Z, ARGB, X_Y}`.
+   - `X_Y = (x·4 & 0xffff)<<16 | (y·4 & 0xffff)` — screen coords in 2-sub-pixel fixed point, **Y
+     flipped to top-down** (`fb_h − y`) to match the framebuffer.
+   - `W = 1/w_clip` as IEEE float; **it MUST be non-zero (1.0 for 2D/ortho)** or the perspective-
+     correct colour interpolation divides by garbage and saturates to white.
+   - `ARGB` per vertex (Gouraud); for flat shading replicate the provoking vertex's colour to all
+     three before emit.
+3. **Trigger:** `ONE_OVER_AREA_UC` (real `0x300`) = IEEE float `1.0 / signed_area`.
+   - **Winding:** the setup engine walks spans by the *sign* of the area; a wrong-sign (opposite-
+     winding) triangle rasterizes **zero coverage** (invisible). Normalize to positive area by
+     swapping two vertices when the computed area is negative — both windings must draw (GL face
+     culling is resolved in software upstream).
+
+> **The two bugs that made a correct-looking triangle invisible**, in the order they bit: (a) the
+> block-0 offset special-case (§4 pitfall) sent vertices to the wrong registers; (b) after fixing
+> that, negative-area winding rasterized no coverage. Each masks as "geometry submits, nothing
+> draws." Verify offsets first (does `SETUP_CNTL` at `real−0x400` actually change shading?), winding
+> second.
 
 ---
 
@@ -375,9 +413,12 @@ remaining work.
 | `CLR_CMP_CNTL`      | `0x708`  | `0x308`            | 1     |
 | `FIFO_STAT`         | `0x710`  | `0x310`            | 1     |
 | `GUI_STAT`          | `0x738`  | `0x338`            | 1     |
-| `SETUP_CNTL`        | `0x304`  | *(unreachable)*    | 0     |
-| `ONE_OVER_AREA_UC`  | `0x300`  | *(unreachable)*    | 0     |
-| `VERTEX_{1,2,3}_*`  | `0x240…` | *(unreachable)*    | 0     |
+| `SETUP_CNTL`        | `0x304`  | `0xFFFFFF04` (wrap) | 0     |
+| `ONE_OVER_AREA_UC`  | `0x300`  | `0xFFFFFF00` (wrap) | 0     |
+| `VERTEX_{1,2,3}_*`  | `0x240…` | `0xFFFFFE40…` (wrap) | 0     |
+
+Block-0 PIO offsets are `R − 0x400` as a 32-bit unsigned value; `stwbrx`'s modular add wraps the
+effective address back to `real R`, inside the BAR (§4). Reachable, not unreachable.
 
 ---
 

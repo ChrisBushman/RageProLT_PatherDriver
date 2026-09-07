@@ -134,6 +134,19 @@ int m64_emit_triangle(m64_cmdbuf *cb, const m64_vertex *v0,
     float ooa; uint32_t oob;
 
     if (area == 0.0) return 0;                 /* degenerate: drop */
+
+    /* NORMALIZE WINDING: the mach64 setup engine walks spans by the SIGNED area.  A
+     * negative area (opposite winding) rasterizes inside-out -> ZERO coverage (the
+     * triangle is invisible, not mis-coloured).  GL culling is done in software upstream
+     * (or off), so BOTH windings must draw here: when the area is negative, swap v1/v2 to
+     * flip the winding positive.  Safe for Gouraud (each vertex keeps its own colour) and
+     * flat (colour already replicated to all three vertices before emit).  Without this,
+     * exactly half of all triangles (and any single triangle wound "backwards", like a
+     * screen-space CCW app triangle after the framebuffer Y-flip) vanish. */
+    if (area < 0.0) {
+        const m64_vertex *tmp = v1; v1 = v2; v2 = tmp;
+        area = -area;
+    }
     ooa = (float)(1.0 / area);
     memcpy(&oob, &ooa, 4);
 

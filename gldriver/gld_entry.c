@@ -18,6 +18,7 @@
 #include <stdio.h>
 #include <stdarg.h>
 #include <stdlib.h>
+#include <string.h>
 
 /* ---- diagnostic log -------------------------------------------------
  * Open the log ONCE and keep the FILE* -- writes are stdio-buffered and flushed on the app's
@@ -33,7 +34,15 @@ void gld_log(const char *fmt, ...)
     if (!tried) {
         tried = 1;
         if (!getenv("MACH64_GLD_NOLOG")) {
-            f = fopen("/tmp/mach64gld.log", "w");
+            /* Log to $HOME, NOT /tmp: Panther WIPES /private/tmp on (re)boot, so a kernel
+             * panic destroys the log that would diagnose it.  $HOME survives the reboot. */
+            const char *home = getenv("HOME");
+            char path[1024];
+            if (home && (int)strlen(home) < 1000) {
+                snprintf(path, sizeof(path), "%s/mach64gld.log", home);
+                f = fopen(path, "w");
+            }
+            if (!f) f = fopen("/tmp/mach64gld.log", "w");   /* fallback */
             if (f) setvbuf(f, NULL, _IONBF, 0);   /* unbuffered: survive a crash/hang mid-frame */
         }
     }
@@ -77,6 +86,28 @@ int gldAttachDrawable(gld_context *ctx, int type, void *drawable, uint32_t flags
         uint32_t base_bytes  = 0x600000u;   /* fallback: off-screen scratch  */
         uint32_t pitch_bytes;
         uint32_t fb_pitch_px;
+
+        /* Path B: the drawable descriptor carries NO window geometry (windowed.md) -- d[1]/d[2]
+         * are a CGS window-id/surface-id pair, NOT width/height (this run: d=8f17 a2 104, rest 0).
+         * Resolve the TRUE content bounds via CGS ONCE, up front, and treat them as authoritative:
+         * Apple's surface, our render target, GLEngine's drawable dims and the present blit must
+         * ALL agree on WxH.  Previously width/height fell through as the garbage d[1]/d[2] (162x260)
+         * because the CRTC get_surface_size returns 0 on Apple's kext; that tiny surface then
+         * scissored all geometry to a corner, AND the real 480-wide window was rejected downstream
+         * by the `ww <= fb_pitch_px(=162)` gate -- a circular size dependency.  Resolve once (the
+         * CGS position drifts per call -- windowed.md -- so we must NOT re-resolve later). */
+        {   mach64_priv *pv0 = MACH64_PRIV(ctx);
+            int wx = 0, wy = 0, ww = 0, wh = 0;
+            if (pv0->dbuf && mach64_cgs_resolve_bounds(d[1], d[2], &wx, &wy, &ww, &wh)
+                && ww > 0 && wh > 0 && ww <= 2048 && wh <= 2048) {
+                width = (uint32_t)ww; height = (uint32_t)wh;
+                pv0->win_mode = 1;
+                pv0->win_x = (uint32_t)wx; pv0->win_y = (uint32_t)wy;
+                pv0->fb_w  = (uint32_t)ww; pv0->fb_h  = (uint32_t)wh;
+                gld_log("  [pathb] CGS bounds -> surface %dx%d at (%d,%d) [authoritative]\n",
+                        ww, wh, wx, wy);
+            }
+        }
 
         /* Bind the LIVE display framebuffer as the render target (full-screen): read the
          * mach64 CRTC via the kext -> DMA lands on screen.  Take the render dims from the
@@ -201,11 +232,14 @@ int gldAttachDrawable(gld_context *ctx, int type, void *drawable, uint32_t flags
              * engine-coexistence test: our bus-master blit + geometry DMA run concurrently with
              * the live WS.  (Geometry is bounded by the w x h viewport the app sets.) */
             {   int wx = 0, wy = 0, ww = 0, wh = 0, got = 0;
-                /* Resolve the windowed content bounds FIRST (the real, automatic path): the descriptor's
-                 * d[1]=CGS window id, d[2]=CGS surface id (mach64_multiwin) -> exact per-window lookup,
-                 * multi-window correct.  env MACH64_WIN_RECT is the manual fallback. */
-                if (pv->dbuf && mach64_cgs_resolve_bounds(d[1], d[2], &wx, &wy, &ww, &wh))
-                    got = 1;
+                /* Reuse the bounds already resolved ONCE up front (pv->win_mode/fb_w/fb_h): the CGS
+                 * resolver drifts the reported position per call (windowed.md), so re-resolving here
+                 * would disagree with the surface we already shaped.  env MACH64_WIN_RECT stays the
+                 * manual fallback for when the early CGS resolve found nothing. */
+                if (pv->win_mode) {
+                    wx = (int)pv->win_x; wy = (int)pv->win_y;
+                    ww = (int)pv->fb_w;  wh = (int)pv->fb_h; got = 1;
+                }
                 if (!got) {
                     const char *wr = getenv("MACH64_WIN_RECT");
                     if (pv->dbuf && wr && sscanf(wr, "%d,%d,%d,%d", &wx, &wy, &ww, &wh) == 4)

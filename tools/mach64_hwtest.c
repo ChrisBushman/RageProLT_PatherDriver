@@ -95,6 +95,12 @@ int main(void){
     P(0x0100,rt);                /* DST_OFF_PITCH (real 0x500) = surf buffer */
     P(0x02e8,0);                 /* DST_X_Y (real 0x6e8) = (0,0) */
     P(0x02ec,(768u<<16)|1024u);  /* DST_WIDTH_HEIGHT (real 0x6ec) = (h<<16)|w -> TRIGGER, full screen */
+    /* NOTE (superseded): this probe wrote off 0x304 believing this[0x550]==real 0x000.  The real
+     * base is this[0x550]==real+0x400, so off 0x304 hits real 0x704 (a DIFFERENT register that just
+     * held our value -> a FALSE "block-0 reachable" readback).  Block 0 IS PIO-reachable, but via the
+     * uniform off=reg-0x400 and its 32-bit wrap (SETUP_CNTL 0x304 -> off 0xFFFFFF04 -> real 0x304).
+     * See docs/path-b-driver-spec.md §4 + gld_render.c mach64_submit.  Kept as-is for provenance. */
+    P(0x0304, 0x0000abcdu);
     #undef P
     hdr[5]=n; hdr[7]|=1u;
     printf("flat fill %u dwords (%u pairs), count=%u flags=0x%x\n",n,n/2,hdr[5],hdr[7]);
@@ -115,9 +121,8 @@ int main(void){
       /* Confirm the register aperture is mapped BELOW this[0x550] (real 0x000-0x3ff) so the
        * submit_buffer wrap (this[0x550]+(reg-0x400)) reaches the 3D SETUP/VERTEX regs.  Read the
        * CRTC block at real 0x000/0x004/0x008 = mmio-0x400/-0x3fc/-0x3f8 (values are byte-swapped). */
-      printf("  APERTURE-BELOW test: CRTC[real000]=%08x [004]=%08x [008]=%08x  (nonzero+plausible => mapped)\n",
-             p(ABS(mm - 0x400u)), p(ABS(mm - 0x3FCu)), p(ABS(mm - 0x3F8u)));
-      printf("  SETUP_CNTL(real 0x304=mmio-0xFC)=%08x (may be write-only)\n", p(ABS(mm - 0xFCu))); }
+      printf("  BLOCK-0 test: CRTC_OFF_PITCH[mmio+0x14]=%08x  SETUP_CNTL[mmio+0x304]=%08x (want bswap 0x0000abcd=0xcdab0000)\n",
+             p(ABS(mm + 0x14u)), p(ABS(mm + 0x304u))); }
     { printf("  APERTURE COMPARISON (both should hold our fill values if same regs):\n");
       printf("    via MMIO this[0x550]=0x%08x:  DP_FRGD_CLR[2c4]=%08x DST_OFF_PITCH[100]=%08x DP_WRITE_MASK[2c8]=%08x DST_WH[11c]=%08x GUI_STAT[338]=%08x\n",
              mmio, p(ABS(mmio+0x2c4)),p(ABS(mmio+0x100)),p(ABS(mmio+0x2c8)),p(ABS(mmio+0x11c)),p(ABS(mmio+0x338)));
