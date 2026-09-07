@@ -134,6 +134,10 @@ uint32_t mach64_submit(gld_context *ctx, m64_cmdbuf *cb)
     if (!IOConnectMapMemory(ctx->connect, ATIRPRO_MEM_COMMAND, mach_task_self(),
                             &sub, &subsz, kIOMapAnywhere | kIOMapInhibitCache) && sub)
         IOConnectUnmapMemory(ctx->connect, ATIRPRO_MEM_COMMAND, mach_task_self(), sub);
+    /* NOTE: a per-drain finish-fence (sel 8) was tried here to serialise the multiple mid-frame drains
+     * a heavy frame needs -- it did NOT stop the high-volume engine wedge (just made it slower before
+     * wedging), so the wedge is NOT simple drain overlap.  Reverted.  The multi-drain-per-frame model
+     * (forced by the 4KB command body) needs a different fix -- see the offline RE plan. */
     p->last_stamp = hdr->stamp;                        /* kext-updated submit stamp */
     { static int slog2 = 0; if (slog2 < 5) {
         gld_log("  [submit #%d] drained OK stamp=0x%x\n", slog2, p->last_stamp); slog2++; } }
@@ -626,24 +630,31 @@ int mach64_draw_triangle(gld_context *ctx, const m64_vertex *v0,
         m64_cb_init(&p->batch, p->batchbuf,
                     sizeof(p->batchbuf) / sizeof(p->batchbuf[0]));
 
-    /* Flush before this triangle if the state block (~96 dwords when dirty) + the
-     * triangle (~64 dwords) might not fit.  CRITICAL SIZING (Flurry kernel-panic fix):
-     * p->batch holds our DRI packet format {header, run...}, but mach64_submit EXPANDS each
-     * packet into flat {reg,val} body PAIRS -- a run of N values -> 2N body dwords, so the
-     * expansion is up to ~2x.  The hardware command body holds only (fb_size-0x20)/4 dwords
-     * (fb_size=4096 -> 1016).  If the batch is bounded by fb_size/4 (=1024) it can expand to
-     * ~2000 body dwords, overflow the 1016-dword body, and mach64_submit TRUNCATES mid-stream
-     * -> a malformed DMA that WEDGES the engine (whole machine freezes -- what killed Flurry,
-     * which draws hundreds of particles/frame).  So bound the DRI batch by (fb_size-0x20)/8:
-     * half the body capacity, guaranteeing the worst-case 2x expansion still fits one drain.
-     * High-volume frames simply split across several well-formed drains (state re-emitted per
-     * flush), which is correct if slower -- never a truncated submit. */
+    /* Bound the batch to ONE hardware command buffer, and DROP triangles that don't fit this frame
+     * rather than flushing mid-frame.  RE-PROVEN (2026-09-07): IOConnectMapMemory(type-1) -- our only
+     * submit trigger -- is NOT a lightweight drain, it is the FULL end-of-frame PRESENT (build_swap +
+     * submit_swap_buffer + CRTC flip).  It is safe exactly ONCE per frame (at render_ctl).  A 2nd
+     * type-1 in the same frame hits the accel[0x74] "who-presented-last" latch: the real drain
+     * (submit_context_buffer) is SKIPPED (that batch's geometry is dropped anyway) AND build_swap +
+     * the CRTC flip run again mid-primitive -> HARD ENGINE WEDGE (unkillable, reboot-only -- what
+     * killed Flurry and the flurrywin stress).  So mach64_draw_triangle must NEVER call
+     * mach64_flush_batch (a mid-frame present); when the batch can't hold another triangle, drop it.
+     * p->batch holds DRI packets {header, run...} which mach64_submit expands ~2x into {reg,val} body
+     * pairs, and the hardware body is only (fb_size-0x20)/4 (=1016 @ 4KB) dwords, so bound the DRI
+     * batch by (fb_size-0x20)/8 (half, for the 2x expansion) -> the frame's one submit never truncates.
+     * CONSEQUENCE: the PIO command buffer caps a frame at ~6-15 triangles; real geometry volume needs
+     * the GART vertex-buffer DMA path (new_vertex_buffer) -- the proper fix, separate work. */
     limit = (ctx->fb_size > 0x20u) ? (ctx->fb_size - 0x20u) / 8u : 256u;  /* guard underflow */
     if (limit > 32000) limit = 32000;  /* <= batchbuf[32768], with headroom */
     if (limit < 256) limit = 256;      /* fb not mapped yet / tiny buffer: a single tri fits */
     need = ((p->dirty & MACH64_DIRTY_STATE) ? 96u : 0u) + 64u;
-    if (p->batch.n + need > limit - 8)
-        mach64_flush_batch(ctx);
+    if (p->batch.n + need > limit - 8) {
+        static int droplog = 0;
+        if (droplog < 3) { gld_log("  [draw] batch full (%zu dw, limit %zu) -- DROPPING triangle "
+                                   "(one cmd buffer/frame; needs vertex-DMA for more)\n",
+                                   p->batch.n, limit); droplog++; }
+        return 0;   /* buffer full this frame -> drop; a mid-frame flush would present+flip -> wedge */
+    }
 
     if (p->dirty & MACH64_DIRTY_STATE) {
         m64_emit_state(&p->batch, &p->hw);
