@@ -128,6 +128,12 @@ typedef struct {
     uint32_t   present_unsafe;     /* 1 = bound surface is display-associated (surf[0x178]!=0xffff) ->
                                     * its present DST aliases the live scanout -> would race IONDRV ->
                                     * skip prime + present (setup_target/render_ctl) to avoid a panic */
+    /* ---- fullscreen shrink-surface (MACH64_FS_SHRINK): render into a SMALLER backing so VRAM frees
+     * for a texheap, then set_scale presents it scaled up to the native scanout.  fs_disp_* hold the
+     * NATIVE display size (present DEST); width/height (render dims) are set to the shrunk size. 0 =
+     * shrink inactive (native-res flat path). */
+    uint32_t   fs_disp_w, fs_disp_h;   /* native display (present DEST); 0 = shrink inactive */
+    uint32_t   fs_shrink_w, fs_shrink_h; /* shrunk render/backing dims (present SRC)          */
     /* ---- Path-B VRAM allocator records (from the sel-10 op=ALLOC kext path); opaque kernel handles,
      * freed on detach/destroy so VRAM isn't leaked.  0 = allocated via the small-window guess. */
     uint32_t   z_record;           /* Apple-allocator record for the Z buffer   */
@@ -177,6 +183,10 @@ void mach64_pathb_present(gld_context *ctx);   /* Path B: present via Apple's su
 void mach64_pathb_setup_target(gld_context *ctx); /* Path B: prime surface + set render target off */
 uint32_t mach64_vram_alloc(gld_context *ctx, uint32_t size, uint32_t *record_out); /* Path B: Apple VRAM allocator */
 void mach64_vram_free(gld_context *ctx, uint32_t record);
+uint32_t mach64_agp_alloc(gld_context *ctx, uint32_t size,                          /* Path B: AGP/GART alloc (v7 kext op=3) */
+                          uint32_t *token_out, uint32_t *kva_out, uint32_t *handle_out);
+void mach64_agp_upload(gld_context *ctx, uint32_t handle,                           /* Path B: AGP texel upload (v7 kext op=5) */
+                       const uint32_t *argb, uint32_t count);
 void mach64_flip(gld_context *ctx, uint32_t off);   /* page-flip CRTC scanout to `off` */
 void mach64_wait_flip(gld_context *ctx);            /* block until the pending flip retired */
 void mach64_sync_depth_from_gli(gld_context *ctx);

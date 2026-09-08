@@ -78,6 +78,13 @@ enum {
     kATIRPro_TEXOP_UPLOAD = 0,  /* arg=dst_off, payload=argb texels               */
     kATIRPro_TEXOP_ALLOC  = 1,  /* arg=size -> out={offset, record}               */
     kATIRPro_TEXOP_FREE   = 2,  /* arg=record                                     */
+    kATIRPro_TEXOP_AGP_ALLOC  = 3, /* in={3,size}(8B).  new_agp_texture(Shared,0,size,&out)@0xf64c   */
+                                /* + addToGART(accel,tex[4],&gart)@0x4398 -> out={gart_off(=TEX_0_OFF),*/
+                                /* token=tex[0x54], kva=tex[0x94], handle=tex} (v7). No VRAM.  ALLOC   */
+                                /* ONLY -- texels via op=5 (16KB won't fit MIG inline -> ARRAY_TOO_LARGE). */
+    kATIRPro_TEXOP_AGP_FREE   = 4, /* arg=handle -> delete_texture(Shared,handle)@0x10214 (NOT WIRED) */
+    kATIRPro_TEXOP_AGP_UPLOAD = 5, /* in={5,handle,dst_off,argb[]}; memcpy(handle[0x94]+dst_off,argb,n) */
+                                /* chunked (<=2000 texels/call, like op=0) to fit the inline limit.  */
 };
 
 /* ---- IOATIRProSurface external methods -- FULLY CONFIRMED (2026-09-06) --------

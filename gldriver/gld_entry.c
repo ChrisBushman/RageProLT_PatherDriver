@@ -143,8 +143,24 @@ int gldAttachDrawable(gld_context *ctx, int type, void *drawable, uint32_t flags
                  * resolve tells them apart. */
                 int dw = 0, dh = 0;
                 if (mach64_display_size(&dw, &dh)) {
-                    width = (uint32_t)dw; height = (uint32_t)dh;
-                    gld_log("  [pathb] fullscreen (no window) -> display size %ux%u\n", width, height);
+                    if (getenv("MACH64_FS_SHRINK")) {
+                        /* SHRINK: render into a smaller backing (frees VRAM for a texheap) and
+                         * set_scale it up to the native display on present (see setup_target).
+                         * Render/backing dims = shrunk; fs_disp_* = native present DEST. */
+                        uint32_t sw = 800, sh = 600;
+                        const char *e = getenv("MACH64_FS_W"); if (e) sw = (uint32_t)atoi(e);
+                        e = getenv("MACH64_FS_H");             if (e) sh = (uint32_t)atoi(e);
+                        MACH64_PRIV(ctx)->fs_disp_w = (uint32_t)dw;
+                        MACH64_PRIV(ctx)->fs_disp_h = (uint32_t)dh;
+                        MACH64_PRIV(ctx)->fs_shrink_w = sw;
+                        MACH64_PRIV(ctx)->fs_shrink_h = sh;
+                        width = sw; height = sh;
+                        gld_log("  [pathb] fullscreen SHRINK: render %ux%u -> scale to native %ux%u\n",
+                                width, height, dw, dh);
+                    } else {
+                        width = (uint32_t)dw; height = (uint32_t)dh;
+                        gld_log("  [pathb] fullscreen (no window) -> display size %ux%u\n", width, height);
+                    }
                 }
             }
         }

@@ -421,6 +421,65 @@ void mach64_vram_free(gld_context *ctx, uint32_t record)
     IOConnectMethodStructureIStructureO(ctx->connect, kATIRPro_new_texture, sizeof in, &osz, in, out);
 }
 
+/* AGP/GART texture ALLOC via the multiplexed new_texture selector (sel 10, op=3) on the v7 kext.
+ * The kext calls new_agp_texture(Shared=userclient[0x88], j=0, size, &out)@0xf64c to reserve `size`
+ * bytes of SYSTEM RAM through the GART aperture, then GART-maps it via addToGART(accel, tex[0x04],
+ * &gart)@0x4398 -- both under the accel[0x544] mutex.  Input is just {op, size} (8 bytes), so no MIG
+ * size limit.  Returns the aperture offset to program as TEX_0_OFF (0 on failure) and reports the
+ * client token, the buffer's KERNEL VA (for chunked uploads), and the kernel tex handle.  Independent
+ * of VRAM, so it works at FULLSCREEN where VRAM is too cramped for a texheap.  Texels are NOT sent
+ * here (they'd blow the ~4KB inline-struct limit -> MIG_ARRAY_TOO_LARGE); upload them separately with
+ * mach64_agp_upload().  Free is op=4 (not yet wired -- leak is fine for now). */
+uint32_t mach64_agp_alloc(gld_context *ctx, uint32_t size,
+                          uint32_t *token_out, uint32_t *kva_out, uint32_t *handle_out)
+{
+    uint32_t in[2] = { kATIRPro_TEXOP_AGP_ALLOC, 0 };
+    uint32_t out[4] = {0,0,0,0};
+    IOByteCount osz = sizeof out;
+    kern_return_t k;
+    if (token_out)  *token_out  = 0;
+    if (kva_out)    *kva_out    = 0;
+    if (handle_out) *handle_out = 0;
+    if (!ctx->connect || !size) return 0;
+    in[1] = size;
+    gld_log("[agp] -> new_agp_texture ALLOC size=%u (sel 10 op=3)...\n", size);   /* fsync'd: last line if it panics */
+    k = IOConnectMethodStructureIStructureO(ctx->connect, kATIRPro_new_texture,
+                                            sizeof in, &osz, in, out);
+    gld_log("[agp] <- kr=0x%x out=[gart=0x%x token=0x%x kva=0x%x handle=0x%x]\n",
+            (unsigned)k, out[0], out[1], out[2], out[3]);
+    if (k != 0 || !out[0]) return 0;
+    if (token_out)  *token_out  = out[1];
+    if (kva_out)    *kva_out    = out[2];
+    if (handle_out) *handle_out = out[3];
+    return out[0];
+}
+
+/* Upload ARGB texels into a previously-agp-allocated buffer via sel 10 op=5 (chunked).  The kext
+ * memcpy's each chunk into (handle[0x94] + dst_off) -- i.e. the buffer's kernel VA.  Chunked the same
+ * way as the VRAM op=0 path (<= 2000 texels/call) to stay under the inline-struct limit. */
+void mach64_agp_upload(gld_context *ctx, uint32_t handle, const uint32_t *argb, uint32_t count)
+{
+    uint32_t i = 0;
+#define AGP_CHUNK 2000u                      /* texels/call -> struct <= 12 + 8000 bytes */
+    if (!ctx->connect || !handle || !argb) return;
+    gld_log("[agp] -> upload handle=0x%x count=%u (sel 10 op=5, chunked)...\n", handle, count);
+    while (i < count) {
+        uint32_t n = count - i; if (n > AGP_CHUNK) n = AGP_CHUNK;
+        uint32_t buf[3 + AGP_CHUNK];         /* [0]=op(5) [1]=handle [2]=dst byte off [3..]=ARGB */
+        uint32_t out[2] = {0,0}; IOByteCount osz = sizeof out;
+        uint32_t j;
+        buf[0] = kATIRPro_TEXOP_AGP_UPLOAD;
+        buf[1] = handle;
+        buf[2] = i * 4u;
+        for (j = 0; j < n; j++) buf[3 + j] = argb[i + j];
+        IOConnectMethodStructureIStructureO(ctx->connect, kATIRPro_new_texture,
+                                            (uint32_t)(12u + n * 4u), &osz, buf, out);
+        i += n;
+    }
+    gld_log("[agp] upload done (no panic)\n");
+#undef AGP_CHUNK
+}
+
 void mach64_pathb_setup_target(gld_context *ctx)
 {
     mach64_priv *p = MACH64_PRIV(ctx);
@@ -450,6 +509,37 @@ void mach64_pathb_setup_target(gld_context *ctx)
             return;
         }
         p->present_unsafe = 0;
+        /* FULLSCREEN SHRINK-SURFACE (MACH64_FS_SHRINK): reallocate the color backing to a smaller WxH
+         * via set_scale (writes surf[0x140]/[0x142] -> shape_surface resizes the backing), freeing a
+         * VRAM hole for a real texheap; build_swap then presents it SCALED to the native display (the
+         * shape stays native).  Driver-only.  Log the backing off/pitch before & after (shape_surface
+         * may RELOCATE it) so the texheap lands in the freed hole.  Build A: shrink+log only, texheap
+         * still OFF (flat) -- confirms set_scale doesn't panic and reveals the hole + scale-vs-letterbox. */
+        if (p->fs_shrink_w && sc) {
+            uint32_t buf=0, rt0=0, s140=0, s158=0, shp=0;
+            uint16_t st[22];                     /* set_scale struct: 0x2c bytes; halfword [4]=w [6]=h */
+            kern_return_t kr;
+            IOConnectMethodScalarIScalarO(gc, kATIRPro_scale_surface, 1, 1, 0x80000000u|(surf+0x12cu), &buf);
+            if (buf > 0x10000u && buf < 0x40000000u)
+                IOConnectMethodScalarIScalarO(gc, kATIRPro_scale_surface, 1, 1, 0x80000000u|(buf+0x28u), &rt0);
+            IOConnectMethodScalarIScalarO(gc, kATIRPro_scale_surface, 1, 1, 0x80000000u|(surf+0x29cu), &shp);
+            gld_log("[fs] BEFORE set_scale: buf=0x%x rt=0x%x -> off=0x%x pitch=%u  shape[8:a]=0x%x\n",
+                    buf, rt0, (rt0 & 0x3fffffu) << 3, ((rt0 >> 22) & 0x3ffu) << 3, shp);
+            memset(st, 0, sizeof st);
+            st[2] = (uint16_t)p->fs_shrink_w;    /* byte 4 -> surf[0x140] width  */
+            st[3] = (uint16_t)p->fs_shrink_h;    /* byte 6 -> surf[0x142] height */
+            gld_log("[fs] -> set_scale %ux%u flags=0x3 size=0x2c...\n", p->fs_shrink_w, p->fs_shrink_h);
+            kr = IOConnectMethodScalarIStructureI(sc, kATIRProSurf_set_scale, 1, 0x2c, 0x3u, st);
+            gld_log("[fs] <- set_scale kr=0x%x\n", (unsigned)kr);
+            buf = 0; rt0 = 0;
+            IOConnectMethodScalarIScalarO(gc, kATIRPro_scale_surface, 1, 1, 0x80000000u|(surf+0x12cu), &buf);
+            if (buf > 0x10000u && buf < 0x40000000u)
+                IOConnectMethodScalarIScalarO(gc, kATIRPro_scale_surface, 1, 1, 0x80000000u|(buf+0x28u), &rt0);
+            IOConnectMethodScalarIScalarO(gc, kATIRPro_scale_surface, 1, 1, 0x80000000u|(surf+0x140u), &s140);
+            IOConnectMethodScalarIScalarO(gc, kATIRPro_scale_surface, 1, 1, 0x80000000u|(surf+0x158u), &s158);
+            gld_log("[fs] AFTER  set_scale: buf=0x%x rt=0x%x -> off=0x%x pitch=%u  surf[0x140:142]=0x%x active[0x158]=0x%x\n",
+                    buf, rt0, (rt0 & 0x3fffffu) << 3, ((rt0 >> 22) & 0x3ffu) << 3, s140, s158);
+        }
     }
     if (sc) {
         apple_surf_data sd; IOByteCount ol = sizeof sd; memset(&sd, 0, sizeof sd);
@@ -550,14 +640,63 @@ void mach64_pathb_setup_target(gld_context *ctx)
                 if (g < 0x3f0000u) mach64_set_texheap(g, 0x400000u);
                 else { mach64_set_texheap(0, 0);
                        gld_log("[pathb] texheap: no safe room (0x%x) -- textures OFF\n", g); }
+            } else if (vis_h && p->fs_shrink_w) {
+                /* FULLSCREEN SHRINK-SURFACE: with the color backing shrunk to 800x600 (~1.9MB) there's
+                 * now free VRAM for a texheap.  Get it from Apple's MUTEX-LOCKED best-fit heap (op=1) --
+                 * the SAFE way: the heap tracks Apple's surfaces so it hands back a genuine hole, not a
+                 * scanout/surface collision (unlike a fixed guessed offset -- the backing was already
+                 * 800x600 at attach, so the "tail" past it is NOT known-free).  Validate the returned
+                 * offset is in VRAM and doesn't overlap our own color backing before enabling textures;
+                 * fall back to flat (texheap OFF, stable) if it fails.  Reuses the proven op0 upload.
+                 * Depth stays off at 800x600 (Z won't also fit; add via a smaller shrink later). */
+                uint32_t fs_texsize = 0x100000u;   /* 1MB heap: fits the freed hole, holds a 512^2 + a few */
+                uint32_t th = 0;
+                if (p->tex_record) { mach64_vram_free(ctx, p->tex_record); p->tex_record = 0; }
+                th = mach64_vram_alloc(ctx, fs_texsize, &p->tex_record);   /* validates VRAM-range/align */
+                if (th && th + fs_texsize <= 0x800000u &&
+                    (th + fs_texsize <= toff || th >= toff + color_bytes)) {   /* not over color backing */
+                    mach64_set_texheap(th, th + fs_texsize);
+                    gld_log("[pathb] texheap: FULLSCREEN SHRINK -> [0x%x,0x%x) (Apple allocator; color [0x%x,0x%x))\n",
+                            th, th + fs_texsize, toff, toff + color_bytes);
+                } else {
+                    if (p->tex_record) { mach64_vram_free(ctx, p->tex_record); p->tex_record = 0; }
+                    mach64_set_texheap(0, 0);
+                    gld_log("[pathb] texheap: FS-SHRINK alloc unsafe/failed (off=0x%x vs color [0x%x,0x%x)) -- OFF (flat)\n",
+                            th, toff, toff + color_bytes);
+                }
             } else if (vis_h) {
-                /* FULLSCREEN: at screen size the VRAM is too cramped for a KNOWN-safe texheap -- the tail
-                 * past our backing collides with Apple's framebuffer/cursor (HW: black->panic), and the
-                 * allocator can hand back a scanout-colliding offset.  Mark the heap INVALID (0,0) so
-                 * texture uploads SKIP -> fullscreen renders UNTEXTURED but STABLE (HW-proven flat).
-                 * Textured fullscreen needs the Apple VRAM-layout RE to find a genuinely-free region. */
+                /* FULLSCREEN (no shrink): at native size the VRAM is too cramped for a KNOWN-safe texheap
+                 * -- the tail past our backing collides with Apple's framebuffer/cursor (HW: black->panic),
+                 * and the allocator can hand back a scanout-colliding offset.  Mark the heap INVALID (0,0)
+                 * so texture uploads SKIP -> fullscreen renders UNTEXTURED but STABLE (HW-proven flat).
+                 * Textured fullscreen uses the shrink-surface path above (MACH64_FS_SHRINK=1). */
                 mach64_set_texheap(0, 0);
                 gld_log("[pathb] texheap: FULLSCREEN -> OFF (no known-safe region; untextured, stable)\n");
+                /* AGP PROBE (opt-in, MACH64_AGP_PROBE=1): confirm the v6 kext AGP path end-to-end and
+                 * reveal gart_off's address space BEFORE wiring TEX_0_OFF sampling.  Allocs+uploads one
+                 * 64x64 texture in GART and logs the returned aperture offset.  Does NOT program any
+                 * texture register, so the render stays the stable untextured path -- no panic risk from
+                 * sampling a mis-mapped address.  Once gart_off is confirmed sane (>= 8MB aperture range),
+                 * the real path programs TEX_0_OFF = gart_off. */
+                if (getenv("MACH64_AGP_PROBE")) {
+                    uint32_t tok = 0, kva = 0, hnd = 0;
+                    uint32_t g = mach64_agp_alloc(ctx, 64u * 64u * 4u, &tok, &kva, &hnd);
+                    gld_log("[agp] PROBE gart_off=0x%x token=0x%x kva=0x%x handle=0x%x %s\n", g, tok, kva, hnd,
+                            g ? (g >= 0x800000u ? "(APERTURE range >8MB -- TEX_0_OFF=gart_off)"
+                                                : "(LOW/VRAM range -- needs aperture base)")
+                              : "(FAILED)");
+                    /* exercise the chunked upload path too (op=5): 64x64 checkerboard into the GART
+                     * buffer.  Still NO sampling (no TEX_0_OFF programmed) -- just proves op=5 doesn't
+                     * panic and the kernel-VA memcpy works. */
+                    if (g && hnd) {
+                        static uint32_t chk[64 * 64];
+                        int yy, xx;
+                        for (yy = 0; yy < 64; yy++)
+                            for (xx = 0; xx < 64; xx++)
+                                chk[yy * 64 + xx] = ((xx ^ yy) & 8) ? 0xffff0000u : 0xff00ff00u;
+                        mach64_agp_upload(ctx, hnd, chk, 64u * 64u);
+                    }
+                }
             }
         }
     }
