@@ -3,7 +3,8 @@
 # Rebuilds the driver bundle, then runs a TEXTURED fullscreen render with MACH64_FS_SHRINK=1: render
 # into an 800x600 backing (frees VRAM), place the texheap via Apple's mutex-locked best-fit heap in the
 # freed hole (validated not to overlap the color backing), upload texels via the PROVEN op0 path, and
-# present scaled to native.  Depth is off at 800x600 (Z won't also fit).  DRIVER-ONLY (no reboot).
+# present scaled to native.  Depth (Z) is ALSO allocated from the locked heap now (validated).
+# DRIVER-ONLY (no reboot).
 #
 # Run AT THE CONSOLE:  sh ~/deploy-and-fstexshrink.sh  [NPART] [NFRAMES]
 # Afterwards send the log lines:  grep -E '\[fs\]|texheap|z-buffer' ~/mach64gld.log

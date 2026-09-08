@@ -616,7 +616,7 @@ void mach64_pathb_setup_target(gld_context *ctx)
             if (zoff) {
                 mach64_set_zbuffer(ctx, zoff, tpitch);
                 gld_log("[pathb] z-buffer -> off=0x%x pitch=%u (Apple allocator)\n", p->z_off, p->z_pitch);
-            } else if (vis_h) {
+            } else if (vis_h && !p->fs_shrink_w) {   /* fullscreen-shrink sets Z in its own branch below */
                 /* FALLBACK: gap past the colour surface (small windows only -- see the historical
                  * white-clobber note; writing Z inside the surface's tracked range clobbers present).
                  * BOUNDS-GUARD: at fullscreen size this gap lands PAST 8MB VRAM (e.g. 1024x768 ->
@@ -647,10 +647,24 @@ void mach64_pathb_setup_target(gld_context *ctx)
                  * scanout/surface collision (unlike a fixed guessed offset -- the backing was already
                  * 800x600 at attach, so the "tail" past it is NOT known-free).  Validate the returned
                  * offset is in VRAM and doesn't overlap our own color backing before enabling textures;
-                 * fall back to flat (texheap OFF, stable) if it fails.  Reuses the proven op0 upload.
-                 * Depth stays off at 800x600 (Z won't also fit; add via a smaller shrink later). */
+                 * fall back to flat (texheap OFF, stable) if it fails.  Reuses the proven op0 upload. */
                 uint32_t fs_texsize = 0x100000u;   /* 1MB heap: fits the freed hole, holds a 512^2 + a few */
-                uint32_t th = 0;
+                uint32_t th = 0, zh = 0;
+                /* DEPTH: place the Z buffer via the same locked heap.  It found the texheap hole safely
+                 * (right after the color backing), so it also finds Z room (e.g. the ~1.5MB gap before
+                 * the backing).  Z and tex come from the same heap -> guaranteed non-overlapping; both
+                 * validated vs the color backing.  Falls back to depth-off (not a panic) if unsafe. */
+                if (p->z_record) { mach64_vram_free(ctx, p->z_record); p->z_record = 0; }
+                zh = mach64_vram_alloc(ctx, zsize, &p->z_record);
+                if (zh && zh + zsize <= 0x800000u &&
+                    (zh + zsize <= toff || zh >= toff + color_bytes)) {
+                    mach64_set_zbuffer(ctx, zh, tpitch);
+                    gld_log("[pathb] z-buffer: FULLSCREEN SHRINK -> off=0x%x pitch=%u (Apple allocator)\n", zh, tpitch);
+                } else {
+                    if (p->z_record) { mach64_vram_free(ctx, p->z_record); p->z_record = 0; }
+                    gld_log("[pathb] z-buffer: FS-SHRINK alloc unsafe/failed (0x%x vs color [0x%x,0x%x)) -- depth off\n",
+                            zh, toff, toff + color_bytes);
+                }
                 if (p->tex_record) { mach64_vram_free(ctx, p->tex_record); p->tex_record = 0; }
                 th = mach64_vram_alloc(ctx, fs_texsize, &p->tex_record);   /* validates VRAM-range/align */
                 if (th && th + fs_texsize <= 0x800000u &&
