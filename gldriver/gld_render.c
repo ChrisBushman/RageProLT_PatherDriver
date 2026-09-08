@@ -509,6 +509,20 @@ void mach64_pathb_setup_target(gld_context *ctx)
             return;
         }
         p->present_unsafe = 0;
+        /* SAFETY (screensaver preview): a SINGLE-buffered (dbuf=0) Path-B surface context -- e.g. the
+         * System Preferences screensaver preview well -- has no back buffer, so ANY present blits an
+         * unsynced/half-drawn buffer straight to the composited scanout: garbage over the live desktop
+         * and, held too long, a present-vs-WindowServer panic.  This catches it whether or not the CGS
+         * resolve pinned it to a window (a failed resolve would otherwise mis-fall-through to fullscreen
+         * present).  Mark present_unsafe: STILL bind the render target below (geometry lands harmlessly
+         * in the surface, never a stale/scanout offset), but skip the prime present here and the frame
+         * present in render_ctl -- blank well, no garbage, no panic.  EVERY working case (windowed +
+         * fullscreen, textured/flat) is double-buffered, so dbuf=1 paths are unaffected. */
+        if (!p->dbuf) {
+            p->present_unsafe = 1;
+            gld_log("[st] single-buffered surface (dbuf=0, win_mode=%u %ux%u @ %u,%u) -> present SKIPPED "
+                    "(blank, safe); still binding RT\n", p->win_mode, p->fb_w, p->fb_h, p->win_x, p->win_y);
+        }
         /* FULLSCREEN SHRINK-SURFACE (MACH64_FS_SHRINK): reallocate the color backing to a smaller WxH
          * via set_scale (writes surf[0x140]/[0x142] -> shape_surface resizes the backing), freeing a
          * VRAM hole for a real texheap; build_swap then presents it SCALED to the native display (the
@@ -541,7 +555,7 @@ void mach64_pathb_setup_target(gld_context *ctx)
                     buf, rt0, (rt0 & 0x3fffffu) << 3, ((rt0 >> 22) & 0x3ffu) << 3, s140, s158);
         }
     }
-    if (sc) {
+    if (sc && !p->present_unsafe) {   /* skip the prime present for a present-unsafe (e.g. blank preview) surface */
         apple_surf_data sd; IOByteCount ol = sizeof sd; memset(&sd, 0, sizeof sd);
         gld_log("[st] write_lock...\n");
         IOConnectMethodScalarIStructureO(sc, kATIRProSurf_surface_write_lock, 0, &ol, &sd);

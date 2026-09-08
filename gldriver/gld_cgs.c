@@ -25,12 +25,12 @@ extern int CGSGetSurfaceList(CGSConnectionID cid, CGSWindowID wid, int cap, CGSS
 extern int CGSGetScreenRectForWindow(CGSConnectionID cid, CGSWindowID wid, CGRect *r);
 extern int CGSGetSurfaceBounds(CGSConnectionID cid, CGSWindowID wid, CGSSurfaceID sid, CGRect *b);
 
-int mach64_cgs_resolve_bounds(uint32_t window_id, uint32_t surface_id,
+int mach64_cgs_resolve_bounds(uint32_t window_id, uint32_t surface_id, int allow_enum,
                               int *ox, int *oy, int *ow, int *oh)
 {
     CGSConnectionID cid = _CGSDefaultConnection();
     CGSWindowID wins[256]; int nwin = 0, i, j;
-    if (!cid) return 0;
+    if (!cid) { gld_log("  [cgs] no default connection\n"); return 0; }
 
     /* DIRECT, multi-window correct: the windowed drawable descriptor's d[1] is the CGS WINDOW id and
      * d[2] the CGS SURFACE id -- HW-probed (tools/mach64_multiwin): for two windows d[1]/d[2] matched
@@ -53,8 +53,18 @@ int mach64_cgs_resolve_bounds(uint32_t window_id, uint32_t surface_id,
 
     /* FALLBACK: first window with a surface -- used only if the descriptor ids don't resolve (e.g. a
      * fullscreen/garbage descriptor, or a GLEngine build where d[1]/d[2] aren't CGS ids).  Correct for
-     * the single-window case; ambiguous for multiple (which the direct path above handles). */
-    if (CGSGetWindowList(cid, cid, 256, wins, &nwin) != 0 || nwin <= 0) return 0;
+     * the single-window case; ambiguous for multiple (which the direct path above handles).  Gated by
+     * allow_enum: a fullscreen drawable's garbage ids must NOT falsely enumerate to some other app's
+     * window -- only the exact direct match above is trusted for the ungated (single-buffered) case. */
+    if (!allow_enum) {
+        gld_log("  [cgs] direct id (win=%u surf=0x%x) did not resolve; enum disabled -> fullscreen\n",
+                window_id, surface_id);
+        return 0;
+    }
+    if (CGSGetWindowList(cid, cid, 256, wins, &nwin) != 0 || nwin <= 0) {
+        gld_log("  [cgs] CGSGetWindowList failed/empty (nwin=%d)\n", nwin);
+        return 0;
+    }
     for (i = 0; i < nwin; i++) {
         CGRect fr; CGSSurfaceID surfs[64]; int ns = 0;
         if (CGSGetScreenRectForWindow(cid, wins[i], &fr) != 0) continue;

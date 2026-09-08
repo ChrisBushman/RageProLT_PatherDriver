@@ -233,7 +233,8 @@ unsigned long perf_now_us(void);
 #endif
 /* Resolve a windowed drawable's CGS window id (descriptor d[1]) + surface id (d[2]) -> on-screen
  * content bounds via CGS (gld_cgs.c).  Returns 1 + fills x/y/w/h (screen px), 0 if unresolved. */
-int mach64_cgs_resolve_bounds(uint32_t window_id, uint32_t surface_id, int *x, int *y, int *w, int *h);
+int mach64_cgs_resolve_bounds(uint32_t window_id, uint32_t surface_id, int allow_enum,
+                              int *x, int *y, int *w, int *h);
 int mach64_display_size(int *w, int *h);   /* main-display pixel size (fullscreen surface shaping) */
 
 #ifdef GLD_APPLE_PROBE

@@ -105,7 +105,15 @@ int gldAttachDrawable(gld_context *ctx, int type, void *drawable, uint32_t flags
          * CGS position drifts per call -- windowed.md -- so we must NOT re-resolve later). */
         {   mach64_priv *pv0 = MACH64_PRIV(ctx);
             int wx = 0, wy = 0, ww = 0, wh = 0;
-            if (pv0->dbuf && mach64_cgs_resolve_bounds(d[1], d[2], &wx, &wy, &ww, &wh)
+            /* ALWAYS attempt the resolve (not gated on dbuf): a SINGLE-buffered window -- e.g. the
+             * System Preferences screensaver PREVIEW well -- would otherwise skip resolution, fall
+             * through to the fullscreen path, and get presented straight to the scanout (garbage over
+             * the live desktop + a fullscreen-present-vs-WindowServer panic).  The DIRECT id match
+             * (exact d[1]/d[2] -> a real CGS window+surface) can't false-positive on a fullscreen app's
+             * garbage ids, so it's safe ungated; the enum FALLBACK stays gated on dbuf (allow_enum). */
+            gld_log("  [pathb] attach dbuf=%u d[1]=0x%x d[2]=0x%x -- resolving CGS bounds...\n",
+                    pv0->dbuf, d[1], d[2]);
+            if (mach64_cgs_resolve_bounds(d[1], d[2], pv0->dbuf, &wx, &wy, &ww, &wh)
                 && ww > 0 && wh > 0 && ww <= 2048 && wh <= 2048) {
                 width = (uint32_t)ww; height = (uint32_t)wh;
                 pv0->win_mode = 1;
