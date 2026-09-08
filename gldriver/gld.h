@@ -134,6 +134,10 @@ typedef struct {
      * shrink inactive (native-res flat path). */
     uint32_t   fs_disp_w, fs_disp_h;   /* native display (present DEST); 0 = shrink inactive */
     uint32_t   fs_shrink_w, fs_shrink_h; /* shrunk render/backing dims (present SRC)          */
+    uint32_t   render_skip;            /* 1 => bound surface backing is INVALID (rt=0, e.g. a full-screen
+                                        * 1024x768 surface that didn't fit 8MB VRAM) -> SKIP all geometry/
+                                        * clears/present so we never render into live/colliding VRAM (panic).
+                                        * Fail-to-black, stable.  Real fix = shrink the fullscreen backing. */
     /* ---- Path-B VRAM allocator records (from the sel-10 op=ALLOC kext path); opaque kernel handles,
      * freed on detach/destroy so VRAM isn't leaked.  0 = allocated via the small-window guess. */
     uint32_t   z_record;           /* Apple-allocator record for the Z buffer   */

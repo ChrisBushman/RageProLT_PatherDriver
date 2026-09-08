@@ -583,6 +583,17 @@ void mach64_pathb_setup_target(gld_context *ctx)
     if (PEEK_OK(desc)) IOConnectMethodScalarIScalarO(gc, kATIRPro_scale_surface, 1, 1, 0x80000000u | (desc + 0x28u), &rt);
     gld_log("[st] rt=0x%x\n", rt);
 #undef PEEK_OK
+    /* SAFETY: if the bound surface's backing didn't resolve (rt=0) we have NO valid render target --
+     * geometry would fall back to the scratch/base offset and can render into live VRAM (HW-confirmed
+     * panic: Snowball Run's full-screen 1024x768 surface that didn't fit 8MB).  Mark render_skip so all
+     * geometry/clears/present are skipped: fail-to-black, stable.  (A valid surface clears this.) */
+    if (surf > 0x10000u && !rt) {
+        p->render_skip = 1;
+        p->present_unsafe = 1;
+        gld_log("[st] rt=0 (surface backing unresolved) -> RENDER SKIPPED (fail-to-black, no VRAM corruption)\n");
+    } else if (rt) {
+        p->render_skip = 0;
+    }
     if (rt) {
         uint32_t toff   = (rt & 0x3fffffu) << 3;         /* VRAM byte offset */
         uint32_t tpitch = ((rt >> 22) & 0x3ffu) << 3;    /* pitch in pixels  */
@@ -830,6 +841,7 @@ void mach64_flush_batch(gld_context *ctx)
 static void mach64_frame_start(gld_context *ctx)
 {
     mach64_priv *p = MACH64_PRIV(ctx);
+    if (p->render_skip) { p->frame_new = 0; return; }   /* invalid surface -> no clear into live VRAM */
     if (p->frame_new) {
         /* Batch the colour clear into p->batch (NOT a separate mach64_submit) so the clear and the
          * frame's triangles drain as ONE command stream -> ONE IOConnectMapMemory(type1) trigger ->
@@ -852,6 +864,7 @@ int mach64_draw_triangle(gld_context *ctx, const m64_vertex *v0,
     mach64_priv *p = MACH64_PRIV(ctx);
     size_t limit, need;
 
+    if (p->render_skip) return 0;   /* bound surface backing invalid -> skip geometry (no VRAM corruption) */
     mach64_frame_start(ctx);   /* deferred glClear -> colour/Z clear on the frame's first draw */
 
     if (!p->batch.buf)

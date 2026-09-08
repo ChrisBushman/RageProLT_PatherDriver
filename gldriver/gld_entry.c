@@ -256,7 +256,11 @@ int gldAttachDrawable(gld_context *ctx, int type, void *drawable, uint32_t flags
                 pv->back_off  = back;
                 pv->render_off = back;   /* page-flip: front is displayed, render into back */
                 pv->fb_w = width; pv->fb_h = height; pv->fb_pitch = fb_pitch_px;
-                mach64_set_texheap(z_off + zsize, 0x800000u);
+                /* Cap the texheap end BELOW the FB/cursor block (~0x778000).  0x800000 (8MB) let a
+                 * texture-heavy game (Snowball Run) upload past the framebuffer/cursor -> corruption ->
+                 * PANIC.  0x770000 keeps uploads clear of it; when the heap fills, alloc fails and the
+                 * texture is skipped (missing, but STABLE) rather than corrupting live VRAM. */
+                mach64_set_texheap(z_off + zsize, 0x770000u);
                 mach64_set_render_target(ctx, back, fb_pitch_px);   /* draw to back */
                 gld_log("  [dbuf] front=0x%x back=0x%x z=0x%x %ux%u pitch=%upx -> render->back\n",
                         base_bytes, back, z_off, width, height, fb_pitch_px);
