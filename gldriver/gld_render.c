@@ -518,7 +518,33 @@ void mach64_pathb_setup_target(gld_context *ctx)
          * in the surface, never a stale/scanout offset), but skip the prime present here and the frame
          * present in render_ctl -- blank well, no garbage, no panic.  EVERY working case (windowed +
          * fullscreen, textured/flat) is double-buffered, so dbuf=1 paths are unaffected. */
+        p->preview_lock = 0;
         if (!p->dbuf) {
+            /* Peek the DESKTOP SCANOUT base+pitch from accel[0x130] (the kext's cached CRTC_OFF_PITCH,
+             * same packed format as our rt) -- the DST for the stock-ICD-style windowed present blit. */
+            uint32_t acc = 0, sop = 0;
+            IOConnectMethodScalarIScalarO(gc, 14, 1, 1, 0xb0u, &acc);   /* ctx[0xb0] = accel */
+            if (acc > 0x10000u && acc < 0x40000000u)
+                IOConnectMethodScalarIScalarO(gc, 14, 1, 1, 0x80000000u | (acc + 0x130u), &sop);
+            if (sop) { p->scanout_off = (sop & 0x3fffffu) << 3; p->scanout_pitch = ((sop >> 22) & 0x3ffu) << 3; }
+            gld_log("[st] scanout: accel=0x%x accel[0x130]=0x%x -> off=0x%x pitch=%upx\n",
+                    acc, sop, p->scanout_off, p->scanout_pitch);
+        }
+        if (!p->dbuf && getenv("MACH64_SB_PRESENT") && p->win_x == 0 && p->win_y == 0 && p->fb_w >= 640) {
+            /* SINGLE-BUFFERED FULLSCREEN present via the kext's surface_flush (build_swap presents to the
+             * REAL scanout, like our fullscreen path).  GATED to fullscreen-ish (origin + >=640 wide) --
+             * the small composited PREVIEW well surface_flush mis-positions to (0,0) AND WEDGES the engine
+             * (HW-confirmed twice), so the preview must NOT take this path; it stays blank-safe below. */
+            gld_log("[st] single-buffered FULLSCREEN SB_PRESENT -> surface_flush at gldFlush (kext scanout)\n");
+        }
+        else if (!p->dbuf && getenv("MACH64_PREVIEW_LOCK")) {
+            /* OPT-IN: present the single-buffered windowed surface via the IOAccelSurface lock/unlock
+             * arbitration (render_ctl), the CORRECT Quartz-Extreme windowed protocol -- NOT surface_flush
+             * (which mis-positions + wedges).  Skip the prime flush below too.  Safe-but-blank if our
+             * surface isn't the CGS-bound one QE composites; never wedges (lock/unlock arbitrates). */
+            p->preview_lock = 1;
+            gld_log("[st] single-buffered PREVIEW_LOCK -> lock/unlock present (QE composite), no flush\n");
+        } else if (!p->dbuf) {
             p->present_unsafe = 1;
             gld_log("[st] single-buffered surface (dbuf=0, win_mode=%u %ux%u @ %u,%u) -> present SKIPPED "
                     "(blank, safe); still binding RT\n", p->win_mode, p->fb_w, p->fb_h, p->win_x, p->win_y);
@@ -555,7 +581,7 @@ void mach64_pathb_setup_target(gld_context *ctx)
                     buf, rt0, (rt0 & 0x3fffffu) << 3, ((rt0 >> 22) & 0x3ffu) << 3, s140, s158);
         }
     }
-    if (sc && !p->present_unsafe) {   /* skip the prime present for a present-unsafe (e.g. blank preview) surface */
+    if (sc && !p->present_unsafe && !p->preview_lock) {   /* skip prime for a blank-safe OR lock/unlock (preview) surface */
         apple_surf_data sd; IOByteCount ol = sizeof sd; memset(&sd, 0, sizeof sd);
         gld_log("[st] write_lock...\n");
         IOConnectMethodScalarIStructureO(sc, kATIRProSurf_surface_write_lock, 0, &ol, &sd);
@@ -808,6 +834,41 @@ void mach64_blit_surface(gld_context *ctx, uint32_t src_off, uint32_t dst_off,
     p->dirty |= MACH64_DIRTY_STATE;   /* 3D state clobbered -> re-emit next tri */
 }
 
+/* Positioned 2D blit with SEPARATE src/dst pitches -- copy a w x h box from src_off (pitch src_pitch_px)
+ * at (sx,sy) to dst_off (pitch dst_pitch_px) at (dx,dy).  This is the STOCK Rage Pro ICD's windowed
+ * present: render off-screen, then blit to the live desktop framebuffer at the window's screen rect
+ * (dst_off=0 = scanout base is legal).  No surface_flush, no CRTC touch, no QE -- a plain GUI-engine
+ * blit, exactly what ATIRageProGLDriver does for a windowed context. */
+void mach64_blit_2pitch(gld_context *ctx, uint32_t src_off, uint32_t src_pitch_px,
+                        uint32_t dst_off, uint32_t dst_pitch_px,
+                        uint32_t sx, uint32_t sy, uint32_t dx, uint32_t dy,
+                        uint32_t w, uint32_t h)
+{
+    mach64_priv *p = MACH64_PRIV(ctx);
+    m64_cmdbuf cb;
+    if (!src_off || !w || !h || !src_pitch_px || !dst_pitch_px) return;   /* dst_off=0 (scanout) is OK */
+    mach64_flush_batch(ctx);
+    m64_cb_init(&cb, p->scratch, sizeof(p->scratch) / sizeof(p->scratch[0]));
+    m64_reg(&cb, MACH64_Z_CNTL,           0);
+    m64_reg(&cb, MACH64_SCALE_3D_CNTL,    0);
+    m64_reg(&cb, MACH64_GUI_TRAJ_CNTL,    (1u<<0) | (1u<<1));
+    m64_reg(&cb, MACH64_DP_PIX_WIDTH,     0x60060666u);
+    m64_reg(&cb, MACH64_DP_WRITE_MASK,    0xffffffffu);
+    m64_reg(&cb, MACH64_DP_MIX,           MACH64_DP_MIX_DS);
+    m64_reg(&cb, MACH64_DP_SRC,           MACH64_DP_SRC_BLIT);
+    m64_reg(&cb, MACH64_SC_LEFT_RIGHT,    (0x1fffu<<16) | 0);
+    m64_reg(&cb, MACH64_SC_TOP_BOTTOM,    (0x1fffu<<16) | 0);
+    m64_reg(&cb, MACH64_CLR_CMP_CNTL,     0);
+    m64_reg(&cb, MACH64_SRC_OFF_PITCH,    ((src_pitch_px / 8) << 22) | (src_off >> 3));
+    m64_reg(&cb, MACH64_DST_OFF_PITCH,    ((dst_pitch_px / 8) << 22) | (dst_off >> 3));
+    m64_reg(&cb, MACH64_SRC_WIDTH1,       w);
+    m64_reg(&cb, MACH64_SRC_Y_X,          (sx << 16) | sy);
+    m64_reg(&cb, MACH64_DST_Y_X,          (dx << 16) | dy);
+    m64_reg(&cb, MACH64_DST_WIDTH_HEIGHT, (h << 16) | w);
+    mach64_submit(ctx, &cb);
+    p->dirty |= MACH64_DIRTY_STATE;
+}
+
 /* ---- triangle batching ----------------------------------------------
  * mach64_draw_triangle (below) accumulates state + geometry into the persistent
  * per-context command buffer p->batch instead of submitting per-triangle; the whole
@@ -947,7 +1008,102 @@ int gldCompleteVertexBuffer(gld_context *ctx, void *vb)
 void gldFreeVertexBuffer(gld_context *ctx, void *vb) { (void)ctx; (void)vb; }
 
 /* glFlush: ensure submitted work is kicked (already synchronous today). */
-int gldFlush(gld_context *ctx) { gld_log("gldFlush()\n"); mach64_flush_batch(ctx); return 0; }
+int gldFlush(gld_context *ctx)
+{
+    gld_log("gldFlush()\n");
+    mach64_flush_batch(ctx);
+    /* SINGLE-BUFFERED WINDOWED PRESENT (screensaver preview) -- MACH64_PREVIEW_BLIT.  Single-buffered
+     * contexts present at glFlush (no swap hook fires), so this is the present point.  Do the stock Rage
+     * Pro ICD's windowed present: fence the geometry, then 2D-blit our rendered backing to the live
+     * desktop framebuffer at the window's screen rect (win_x,win_y) -- NOT surface_flush.  Scanout base
+     * is 0 / pitch 1024 by default (HW layout: 1024x768x32 desktop @ VRAM 0, our surface right after at
+     * 0x301000); override via MACH64_SCANOUT_BASE/PITCH if wrong.  Gated so the default stays blank-safe. */
+    {   mach64_priv *p = MACH64_PRIV(ctx);
+        /* FORCED-DBUF screensaver present: with MACH64_FORCE_DBUF the wedge is gone (dbuf=1), but the
+         * app still presents at gldFlush (render_ctl/swap hook never fires for it).  So present here via
+         * the kext surface_flush (build_swap).  build_swap anchors DST to (0,0) -> CORRECT for the
+         * FULLSCREEN screensaver; the windowed preview mis-positions (separate fix).  Safe now (dbuf). */
+        if (p && p->dbuf && p->apple_surf_cn && p->target_off && getenv("MACH64_FORCE_DBUF")) {
+            /* Present via the SAFE manual 2D blit (surface_flush wedges per-frame) from our render
+             * buffer to the desktop scanout (accel[0x130]) at the window rect.  dbuf killed the setup
+             * wedge; the manual blit never wedges.  base override via MACH64_SCANOUT_BASE (single known
+             * position, not the sweep). */
+            uint32_t acc = 0, sop = 0, base = 0, pitch = 1024;
+            const char *e;
+            IOConnectMethodScalarIScalarO(ctx->connect, 14, 1, 1, 0xb0u, &acc);
+            if (acc > 0x10000u && acc < 0x40000000u)
+                IOConnectMethodScalarIScalarO(ctx->connect, 14, 1, 1, 0x80000000u | (acc + 0x130u), &sop);
+            if (sop) { base = (sop & 0x3fffffu) << 3; pitch = ((sop >> 22) & 0x3ffu) << 3; }
+            e = getenv("MACH64_SCANOUT_BASE");  if (e) base  = (uint32_t)strtoul(e, 0, 0);
+            e = getenv("MACH64_SCANOUT_PITCH"); if (e) pitch = (uint32_t)strtoul(e, 0, 0);
+            IOConnectMethodScalarIStructureI(ctx->connect, kATIRPro_finish, 0, 0, NULL);
+            mach64_blit_2pitch(ctx, p->target_off, p->target_pitch, base, pitch ? pitch : 1024,
+                               0, 0, p->win_x, p->win_y, p->fb_w, p->fb_h);
+            { static int fp = 0; if (fp < 4) {
+                gld_log("  [force-dbuf-present] MANUAL blit src=0x%x/%u -> scanout=0x%x/%u @ (%u,%u) %ux%u\n",
+                        p->target_off, p->target_pitch, base, pitch, p->win_x, p->win_y, p->fb_w, p->fb_h); fp++; } }
+            return 0;
+        }
+        /* BASE-SWEEP (MACH64_BASE_SWEEP): find the true desktop scanout base empirically with the SAFE
+         * 2D fill (no surface_flush -> no wedge).  Fill a magenta 200x200 block at a VRAM offset that
+         * steps +0x40000 every ~48 frames; when the block appears on the real desktop at ~(100,100), the
+         * base logged at that moment is the scanout.  Wrong bases write invisible/other VRAM (transient
+         * garbage at worst).  Quit the instant magenta shows; I read the last logged base. */
+        if (p && !p->dbuf && p->target_off && getenv("MACH64_BASE_SWEEP")) {
+            static uint32_t swf = 0;
+            uint32_t HOLD = 10, STEP = 0x20000u, NSTEPS = 64;   /* 0..0x800000 in 128KB steps, loops */
+            uint32_t idx = (swf / HOLD) % NSTEPS, base = idx * STEP;
+            mach64_fill_rect(ctx, base, 100, 100, 200, 200, 1024, 0xffff00ffu);
+            if (swf % HOLD == 0)
+                gld_log("  [base-sweep] idx=%u base=0x%x -- magenta 200x200 @ screen(100,100)\n", idx, base);
+            swf++;
+            return 0;
+        }
+        if (p && !p->dbuf && p->apple_surf_cn && getenv("MACH64_SB_PRESENT")
+            && p->win_x == 0 && p->win_y == 0 && p->fb_w >= 640) {   /* FULLSCREEN only -- preview wedges */
+            /* Single-buffered FULLSCREEN present via the kext (surface_flush -> build_swap to the REAL
+             * scanout the kext tracks).  gldFlush is the single-buffered present point (no swap hook
+             * fires).  Fence geometry first so build_swap sees a complete frame. */
+            IOConnectMethodScalarIStructureI(ctx->connect, kATIRPro_finish, 0, 0, NULL);
+            mach64_pathb_present(ctx);
+            { static int sp = 0; if (sp < 4) {
+                gld_log("  [sb-present] surface_flush (kext scanout) win_mode=%u %ux%u @ %u,%u\n",
+                        p->win_mode, p->fb_w, p->fb_h, p->win_x, p->win_y); sp++; } }
+        }
+        else if (p && p->win_mode && !p->dbuf && p->target_off && getenv("MACH64_PREVIEW_BLIT")) {
+            /* DST = the desktop scanout peeked from accel[0x130] (setup_target); env can override. */
+            uint32_t base = p->scanout_off, pitch = p->scanout_pitch ? p->scanout_pitch : 1024;
+            const char *e = getenv("MACH64_SCANOUT_BASE"); if (e) base  = (uint32_t)strtoul(e, 0, 0);
+            e = getenv("MACH64_SCANOUT_PITCH");            if (e) pitch = (uint32_t)strtoul(e, 0, 0);
+            /* DIAGNOSTIC (MACH64_PREVIEW_TESTFILL): paint the render buffer a solid MAGENTA so the blit
+             * is unambiguous -- if a magenta 324x236 block appears at (442,178) the scanout base is right
+             * and the blit works (then the only issue is Flurry rendering at the wrong size).  Sweep
+             * MACH64_SCANOUT_BASE with this on to find where the block lands = the real scanout base. */
+            if (getenv("MACH64_PREVIEW_TESTFILL")) {
+                /* DIRECT scanout fill at a FIXED block on the OPEN DESKTOP (top-left (10,10) 200x200),
+                 * away from the preview well.  Isolates two things: (a) is base 0x1000 the VISIBLE
+                 * scanout at all? (b) is the WELL specifically being repainted white by the WS?  If
+                 * magenta appears at (10,10) but the well stays white -> the well is WS-overwritten.
+                 * If nothing at (10,10) -> base 0x1000 isn't the live front / engine can't reach it. */
+                uint32_t fx = 10, fy = 10, fw = 200, fh = 200;
+                const char *xe = getenv("MACH64_TESTFILL_X"); if (xe) fx = (uint32_t)strtoul(xe,0,0);
+                xe = getenv("MACH64_TESTFILL_Y"); if (xe) fy = (uint32_t)strtoul(xe,0,0);
+                mach64_fill_rect(ctx, base, fx, fy, fw, fh, pitch, 0xffff00ffu);
+                { static int fl=0; if (fl<3){ gld_log("  [preview-testfill] DESKTOP fill magenta @ base=0x%x (%u,%u) %ux%u pitch=%u\n",
+                        base, fx, fy, fw, fh, pitch); fl++; } }
+            } else {
+                IOConnectMethodScalarIStructureI(ctx->connect, kATIRPro_finish, 0, 0, NULL);   /* retire geometry */
+                mach64_blit_2pitch(ctx, p->target_off, p->target_pitch, base, pitch,
+                                   0, 0, p->win_x, p->win_y, p->fb_w, p->fb_h);
+            }
+            { static int blog = 0; if (blog < 4) {
+                gld_log("  [preview-blit] src=0x%x/%upx -> scanout base=0x%x/%upx at (%u,%u) %ux%u\n",
+                        p->target_off, p->target_pitch, base, pitch, p->win_x, p->win_y, p->fb_w, p->fb_h);
+                blog++; } }
+        }
+    }
+    return 0;
+}
 
 /* glFinish: block until the newest submission has retired. */
 int gldFinish(gld_context *ctx)
@@ -1533,6 +1689,23 @@ void mach64_dispatch_render_ctl(gld_context *ctx, uint32_t a4, uint32_t a5,
                 p->frame_new = 1;
                 return;
             }
+            /* WINDOWED-COMPOSITED present (screensaver preview): a single-buffered windowed surface must
+             * NOT surface_flush (build_swap is a fullscreen origin-anchored swap -> mis-positions to
+             * (0,0) AND wedges the engine racing Quartz Extreme).  The correct protocol is the
+             * IOAccelSurface arbitration cycle: surface_write_lock (syncs the engine, returns the backing)
+             * -> render into the backing -> surface_write_unlock (releases; the WindowServer composites
+             * the backing into the well on its next vblank -- positioning is CGS's job, not ours).  No
+             * flush, no scanout blit.  Opt-in (MACH64_PREVIEW_LOCK) while validating it composites (our
+             * surface may be private -> safe-but-blank if QE has no handle to it). */
+            {   int preview_lock = (p->preview_lock != 0);
+                if (preview_lock) {
+                    apple_surf_data sd; IOByteCount ol = sizeof sd; memset(&sd, 0, sizeof sd);
+                    kern_return_t lkr = IOConnectMethodScalarIStructureO((io_connect_t)p->apple_surf_cn,
+                                            kATIRProSurf_surface_write_lock, 0, &ol, &sd);
+                    static int llog = 0; if (llog < 3) {
+                        gld_log("  [pathb] preview write_lock kr=0x%x (arbitrate vs QE, no flush)\n",
+                                (unsigned)lkr); llog++; }
+                }
             /* Render the frame's deferred glClear INTO the surface buffer with the engine (a
              * clear-only app dispatches no triangle, so the lazy clear would otherwise never
              * fire and we'd present the uninitialised buffer -> upper-left garbage). */
@@ -1565,7 +1738,17 @@ void mach64_dispatch_render_ctl(gld_context *ctx, uint32_t a4, uint32_t a5,
                                       kATIRPro_finish, 0, 0, NULL);
               static int flog = 0; if (flog < 3) {
                   gld_log("  [pathb] finish-fence kr=0x%x\n", fkr); flog++; } }
-            mach64_pathb_present(ctx);   /* surface_flush -> blit the rendered buffer to scanout */
+                if (preview_lock) {
+                    /* release the arbitration lock -> Quartz Extreme composites the backing into the
+                     * well on its next vblank.  NO surface_flush (that would blit to scanout + wedge). */
+                    IOConnectMethodScalarIScalarO((io_connect_t)p->apple_surf_cn,
+                                                  kATIRProSurf_surface_write_unlock, 0, 0);
+                    static int ulog = 0; if (ulog < 3) {
+                        gld_log("  [pathb] preview write_unlock (QE composites; no scanout blit)\n"); ulog++; }
+                } else {
+                    mach64_pathb_present(ctx);   /* surface_flush -> blit the rendered buffer to scanout */
+                }
+            }   /* end preview_lock scope */
             p->frame_new = 1;
             return;
         }

@@ -147,7 +147,12 @@ int gldCreateContext(gld_context **outp, void *pixfmt, void *shared,
          * context never has 0x8000, and a DB context WITH it gets zero geometry
          * dispatched (GLEngine routes it off the hardware path).  Strip 0x8000 for
          * DB so the caps match a hardware context plus the double-buffer bit 0x400. */
-        if (ctx->backend && (f0c & 8)) {
+        if (ctx->backend && ((f0c & 8) || getenv("MACH64_FORCE_DBUF"))) {
+            /* MACH64_FORCE_DBUF: treat a single-buffered request as double-buffered.  Diagnostic +
+             * possible fix for the screensaver: our WORKING windowed/fullscreen tools are all dbuf=1
+             * (their surface_flush present does NOT wedge), while the dbuf=0 screensaver contexts wedge
+             * or stay white.  Forcing dbuf=1 routes them through the proven double-buffered setup +
+             * present path -- if they then render, single-buffered was the whole problem class. */
             caps &= ~0x8000u;
             MACH64_PRIV(ctx)->dbuf = 1;
         }

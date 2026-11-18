@@ -351,6 +351,75 @@ int gldAttachDrawable(gld_context *ctx, int type, void *drawable, uint32_t flags
              * setup OFFLINE before trying again).  Reverted -- do NOT re-add without that. */
             mach64_apple_bind_surface(pv2->apple_cn, d[0], sx, sy, sw, sh);
 
+            /* CGS-SURFACE PROBE (MACH64_SURF_PROBE): per RE, surfaces live in a global per-accelerator
+             * registry (accel[0x5c]) keyed by surf[0x98].  If the WindowServer already registered an
+             * IOAccelSurface for THIS drawable's CGS surface, set_surface(that id) finds it and ctx[0x10c]
+             * comes back NON-private (surf[0x12c] != surf+0x9c = the shared/composited backing).  Try
+             * candidate ids from the drawable's CGS handles (d[0]=surf id, d[1]=win id, d[2]=surf id) and
+             * log which, if any, resolves a WS-composited surface -- that decides easy-bind vs CGS-SPI.
+             * Restore our own surface binding afterward.  ctx->connect aliases apple_cn (one connection). */
+            if (getenv("MACH64_SURF_PROBE")) {
+                uint32_t cands[7], nc = 0, k, dummy = 0;
+                cands[nc++] = d[2]; cands[nc++] = d[2] & 0x7fffu;
+                cands[nc++] = d[1]; cands[nc++] = d[1] & 0x7fffu;
+                cands[nc++] = (~d[2]) & 0x7fffu; cands[nc++] = d[0];
+                cands[nc++] = d[0] & 0x7fffu;   /* our own (sanity: should be private) */
+                for (k = 0; k < nc; k++) {
+                    uint32_t sp = 0, backing = 0;
+                    kern_return_t sr = IOConnectMethodScalarIStructureI(ctx->connect, 0 /*set_surface*/,
+                                          4, 0, cands[k], 0x24u, 0u, 0u, &dummy);
+                    IOConnectMethodScalarIScalarO(ctx->connect, 14 /*scale_surface peek*/, 1, 1, 0x10cu, &sp);
+                    if (sp > 0x10000u && sp < 0x40000000u)
+                        IOConnectMethodScalarIScalarO(ctx->connect, 14, 1, 1, 0x80000000u | (sp + 0x12cu), &backing);
+                    gld_log("  [surfprobe] set_surface(0x%x) kr=0x%x -> ctx[0x10c]=0x%x surf[0x12c]=0x%x %s\n",
+                            cands[k], (unsigned)sr, sp, backing,
+                            (sp && backing && backing != sp + 0x9cu) ? "*** NON-PRIVATE (WS/composited?) ***"
+                            : (sp ? "(private surf+0x9c)" : "(no surface)"));
+                }
+                IOConnectMethodScalarIStructureI(ctx->connect, 0, 4, 0, d[0] & 0x7fffu, 0x24u, 0u, 0u, &dummy);
+                gld_log("  [surfprobe] restored our surface (idx=0x%x)\n", d[0] & 0x7fffu);
+                /* ENUMERATE the global registry (accel[0x5c] head, surf[0x90]=next, circular): id-guessing
+                 * can miss the WS surface (registry key is ~idx, not the CGS id).  Walk it and dump every
+                 * surface's id(0x98)/backing(0x12c)/assoc(0x178) -- a NON-private backing = a WS/composited
+                 * surface we could bind by its real id.  Guarded peeks + bounded loop (no panic). */
+                {   uint32_t accel = 0, head = 0, s = 0, prev = 0; int i;
+                    IOConnectMethodScalarIScalarO(ctx->connect, 14, 1, 1, 0xb0u, &accel);   /* ctx[0xb0]=accel */
+                    if (accel > 0x10000u && accel < 0x40000000u)
+                        IOConnectMethodScalarIScalarO(ctx->connect, 14, 1, 1, 0x80000000u|(accel+0x5cu), &head);
+                    gld_log("  [surfprobe] REGISTRY accel=0x%x head=0x%x:\n", accel, head);
+                    s = head;
+                    for (i = 0; i < 24 && s > 0x10000u && s < 0x40000000u; i++) {
+                        uint32_t id = 0, bk = 0, as = 0, nx = 0;
+                        IOConnectMethodScalarIScalarO(ctx->connect, 14, 1, 1, 0x80000000u|(s+0x98u), &id);
+                        IOConnectMethodScalarIScalarO(ctx->connect, 14, 1, 1, 0x80000000u|(s+0x12cu), &bk);
+                        IOConnectMethodScalarIScalarO(ctx->connect, 14, 1, 1, 0x80000000u|(s+0x178u), &as);
+                        IOConnectMethodScalarIScalarO(ctx->connect, 14, 1, 1, 0x80000000u|(s+0x90u), &nx);
+                        gld_log("    [%d] surf=0x%x id(0x98)=0x%x backing(0x12c)=0x%x assoc(0x178)=0x%x next=0x%x %s\n",
+                                i, s, id, bk, as, nx,
+                                (bk && bk != s + 0x9cu) ? "*** NON-PRIVATE ***" : "(private)");
+                        prev = s; s = nx;
+                        if (s == head || s == prev) break;
+                    }
+                    /* SCANOUT base/dims for the stock-ICD-style positioned windowed blit DST: per RE,
+                     * get_surface_size stashes base+w/h into accel[0xb4..].  Peek them + call
+                     * get_surface_size directly -- this reveals the real desktop framebuffer base/pitch
+                     * to blit our rendered preview into (get_surface_size returned 0 for this sub-view). */
+                    {   uint32_t b4=0,b8=0,c0=0,c4=0,c8=0, gc=0,gb=0,gp=0,gh=0;
+                        if (accel > 0x10000u && accel < 0x40000000u) {
+                            IOConnectMethodScalarIScalarO(ctx->connect, 14,1,1, 0x80000000u|(accel+0xb4u), &b4);
+                            IOConnectMethodScalarIScalarO(ctx->connect, 14,1,1, 0x80000000u|(accel+0xb8u), &b8);
+                            IOConnectMethodScalarIScalarO(ctx->connect, 14,1,1, 0x80000000u|(accel+0xc0u), &c0);
+                            IOConnectMethodScalarIScalarO(ctx->connect, 14,1,1, 0x80000000u|(accel+0xc4u), &c4);
+                            IOConnectMethodScalarIScalarO(ctx->connect, 14,1,1, 0x80000000u|(accel+0xc8u), &c8);
+                        }
+                        IOConnectMethodScalarIScalarO(ctx->connect, kMach64Sel_get_surface_size, 0, 4, &gc,&gb,&gp,&gh);
+                        gld_log("  [surfprobe] accel[0xb4]=0x%x [0xb8]=0x%x [0xc0]=%u [0xc4]=%u [0xc8]=%u | "
+                                "get_surface_size crtc=0x%x base=0x%x pitch=%u h=%u\n",
+                                b4, b8, c0, c4, c8, gc, gb, gp, gh);
+                    }
+                }
+            }
+
             /* Path B: set_surface bound the surface (ctx+0x10c), so it is NOW safe to
              * map the command region (type 1 -> ctx->regs@0xb8, holds the
              * VendorCommandBufferHeader mach64_submit writes) and the context buffer

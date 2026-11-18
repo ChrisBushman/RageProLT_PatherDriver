@@ -134,6 +134,10 @@ typedef struct {
      * shrink inactive (native-res flat path). */
     uint32_t   fs_disp_w, fs_disp_h;   /* native display (present DEST); 0 = shrink inactive */
     uint32_t   fs_shrink_w, fs_shrink_h; /* shrunk render/backing dims (present SRC)          */
+    uint32_t   preview_lock;           /* 1 => single-buffered windowed (preview): present via
+                                        * surface_write_lock/unlock (QE composites), NOT surface_flush */
+    uint32_t   scanout_off, scanout_pitch; /* desktop framebuffer base(bytes)/pitch(px) from accel[0x130]
+                                        * (CRTC_OFF_PITCH the kext cached) -- DST for the windowed blit */
     uint32_t   render_skip;            /* 1 => bound surface backing is INVALID (rt=0, e.g. a full-screen
                                         * 1024x768 surface that didn't fit 8MB VRAM) -> SKIP all geometry/
                                         * clears/present so we never render into live/colliding VRAM (panic).
@@ -164,6 +168,10 @@ static __inline__ mach64_priv *MACH64_PRIV(gld_context *c)
 /* ---- state translation (gld_state.c): GL state -> m64_state ---------- */
 void mach64_init_state(mach64_priv *p);
 void mach64_set_render_target(gld_context *ctx, uint32_t off, uint32_t pitch_px);
+void mach64_blit_2pitch(gld_context *ctx, uint32_t src_off, uint32_t src_pitch_px,   /* stock-ICD windowed present */
+                        uint32_t dst_off, uint32_t dst_pitch_px,
+                        uint32_t sx, uint32_t sy, uint32_t dx, uint32_t dy,
+                        uint32_t w, uint32_t h);
 void mach64_set_shade_model(gld_context *ctx, int smooth);  /* GL_SMOOTH? */
 void mach64_set_depth_test(gld_context *ctx, int enable, uint32_t gl_func);
 void mach64_set_zbuffer(gld_context *ctx, uint32_t off, uint32_t pitch_px);
