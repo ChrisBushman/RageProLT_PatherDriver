@@ -3,6 +3,7 @@
  *   cc -o mach64_modeswitch mach64_modeswitch.c -framework ApplicationServices
  *   ./mach64_modeswitch            # print the current mode
  *   ./mach64_modeswitch 640 480    # switch (keeps the current depth / best refresh)
+ *   ./mach64_modeswitch 1024 768 16  # switch and change depth (16 = thousands of colours, 32 = millions)
  *
  * Runs as the console user (it needs the WindowServer).  The switch is permanent for the session, like System Preferences'. */
 #include <ApplicationServices/ApplicationServices.h>
@@ -24,7 +25,8 @@ int main(int argc, char **argv)
     CGDisplayErr err;
     printf("current: %ldx%ld %ld bpp\n", dict_long(cur, kCGDisplayWidth), dict_long(cur, kCGDisplayHeight), dict_long(cur, kCGDisplayBitsPerPixel));
     if (argc < 3) return 0;
-    want = CGDisplayBestModeForParameters(disp, (size_t)dict_long(cur, kCGDisplayBitsPerPixel), (size_t)atoi(argv[1]), (size_t)atoi(argv[2]), &exact);
+    want = CGDisplayBestModeForParameters(disp, argc > 3 ? (size_t)atoi(argv[3]) : (size_t)dict_long(cur, kCGDisplayBitsPerPixel),
+                                          (size_t)atoi(argv[1]), (size_t)atoi(argv[2]), &exact);
     if (!want) { fprintf(stderr, "no mode for %sx%s\n", argv[1], argv[2]); return 1; }
     printf("switching to %ldx%ld %ld bpp%s\n", dict_long(want, kCGDisplayWidth), dict_long(want, kCGDisplayHeight), dict_long(want, kCGDisplayBitsPerPixel), exact ? "" : " (closest)");
     fflush(stdout);
