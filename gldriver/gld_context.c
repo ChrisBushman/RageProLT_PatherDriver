@@ -173,6 +173,7 @@ extern void mach64_dma_fence(void);
 int gldDestroyContext(gld_context *ctx)
 {
     if (!ctx) return 0;
+    mach64_repaint_stop(ctx);   /* the idle-repaint timer holds ctx: remove it before ctx is freed */
     mach64_dma_fence();   /* a queued frame (batch + present) may still be running on the DMA worker: finish it before anything it uses is freed */
     mach64_gli_forget(ctx);
     /* Return Apple-allocated Z/texture VRAM if the app destroyed without detaching (no-op if detach

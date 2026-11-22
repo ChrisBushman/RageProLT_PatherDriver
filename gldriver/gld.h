@@ -164,6 +164,12 @@ typedef struct {
     uint32_t   off_display;        /* 1 = the drawable's window is on ANOTHER display (not the Rage): this context must not touch Apple's surfaces or the Rage scanout */
     uint32_t   vis_hidden;         /* 1 = completely covered by windows in front: skip the present */
     uint32_t   vis_sig, vis_tick;  /* occlusion tracking: signature of the last visible-rect list applied, present counter */
+    /* Idle repaint (windowed Path B): the present blits straight to the screen, so the WindowServer repainting the window from its own (white)
+     * backing erases the frame, and an app that only redraws on events (Chess) stays white.  While nothing new is drawn, a run-loop timer
+     * re-presents the untouched surface buffer (mach64_repaint_*, gld_render.c). */
+    uint32_t   repaint_ok;         /* 1 = the surface buffer still holds the last presented frame (cleared by any draw, re-target or detach) */
+    uint64_t   repaint_t;          /* mach_absolute_time of the last present */
+    void      *repaint_timer;      /* CFRunLoopTimerRef on the presenting thread's run loop (0 = none) */
     uint32_t   win_buf_off;        /* per-context windowed back+Z buffer (0 = none/shared); freed on
                                     * detach.  Lets multiple windowed contexts render independently. */
     uint32_t   win_buf_size;       /* size of that pool allocation, for the free */
@@ -230,7 +236,8 @@ void mach64_set_depth_test(gld_context *ctx, int enable, uint32_t gl_func);
 void mach64_set_zbuffer(gld_context *ctx, uint32_t off, uint32_t pitch_px);
 void mach64_clear_zbuffer(gld_context *ctx);
 void mach64_flush_batch(gld_context *ctx);   /* submit accumulated triangles */
-volatile unsigned char *mach64_vram_cpu_begin(void);   /* engine-idle CPU view of VRAM (BAR0) for pixel ops; 0 = skip (gld_texture.c) */
+volatile unsigned char *mach64_vram_cpu_begin(void);
+void mach64_repaint_stop(gld_context *ctx);   /* remove the windowed idle-repaint timer (gld_render.c) */   /* engine-idle CPU view of VRAM (BAR0) for pixel ops; 0 = skip (gld_texture.c) */
 void mach64_clear_color(gld_context *ctx);
 void mach64_batch_clear_color(gld_context *ctx);  /* clear folded into the triangle batch */
 void mach64_fill_rect(gld_context *ctx, uint32_t off, uint32_t x, uint32_t y,

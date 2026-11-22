@@ -35,6 +35,7 @@ int gldAttachDrawable(gld_context *ctx, int type, void *drawable, uint32_t flags
      * app exits.  (Previously the flip-present moved the CRTC to our back buffer, which had
      * to be flipped back here.) */
     if (type == 0 || !drawable) {
+        if (ctx->backend) MACH64_PRIV(ctx)->repaint_ok = 0;   /* window gone: the idle repaint must not blit to where it was */
         if (ctx->backend && MACH64_PRIV(ctx)->win_buf_off) {   /* release the per-context windowed buffer */
             mach64_winbuf_free(MACH64_PRIV(ctx)->win_buf_off, MACH64_PRIV(ctx)->win_buf_size);
             MACH64_PRIV(ctx)->win_buf_off = 0; MACH64_PRIV(ctx)->win_buf_size = 0;

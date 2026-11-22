@@ -27,6 +27,8 @@
 #include <pthread.h>
 #include <fcntl.h>
 #include <sys/file.h>   /* flock (DMA lock shared with the texture upload) */
+#include <mach/mach_time.h>                 /* idle repaint: time since the last present */
+#include <CoreFoundation/CoreFoundation.h>  /* idle repaint: run-loop timer */
 
 #define M64_BSTORE(p) ((p)->batch_sel == 0 ? (p)->batchbuf : (p)->batch_sel == 1 ? (p)->batchbuf2 : (p)->batch_sel == 2 ? (p)->batchbuf3 : (p)->batchbuf4)
 void mach64_dma_fence(void);
@@ -393,6 +395,7 @@ int mach64_vis_update(gld_context *ctx, int force)
 int mach64_async_present_ok(gld_context *ctx);
 int mach64_frame_end_async(gld_context *ctx);
 int mach64_present_async(gld_context *ctx, unsigned surf);
+static void mach64_repaint_arm(gld_context *ctx);
 void mach64_pathb_present(gld_context *ctx)
 {
     int async_ok = mach64_async_present_ok(ctx);
@@ -402,15 +405,69 @@ void mach64_pathb_present(gld_context *ctx)
     if (!surf) return;
     /* set_shape re-allocated the backing (the render target moved): re-prime and re-read the target, and do NOT flush this frame -- it was
      * rendered into the old, now freed, backing.  The next frame renders into the new one. */
-    if (mach64_vis_update(ctx, 0)) { mach64_pathb_setup_target(ctx); return; }
+    if (mach64_vis_update(ctx, 0)) { p->repaint_ok = 0; mach64_pathb_setup_target(ctx); return; }
     /* Completely covered by windows in front: present NOTHING (a stale shape made the window keep painting over the screen saver / a Terminal
      * window).  The check runs every 4th frame, so the window is presented again as soon as part of it is uncovered. */
     if (p->win_mode && p->cgs_win && p->vis_hidden) return;
+    /* The buffer now holds a finished frame: let the idle timer re-present it until the next draw touches the buffer. */
+    p->repaint_ok = (p->win_mode && p->dbuf) ? 1u : 0u;
+    p->repaint_t  = mach_absolute_time();
+    if (p->repaint_ok) mach64_repaint_arm(ctx);
     if (async_ok && mach64_present_async(ctx, (unsigned)surf) == 0) return;   /* queued behind the frame's batches: the worker does finish + surface_flush + finish */
     mach64_dma_fence();
     IOConnectMethodScalarIScalarO(surf, kATIRProSurf_surface_flush, 2, 0, 1u, 0u);
     /* the present's scaler blit runs asynchronously: without this fence the NEXT frame's colour clear races it and wipes the bottom rows before they are read */
     IOConnectMethodScalarIStructureI(ctx->connect, kATIRPro_finish, 0, 0, NULL);
+}
+
+/* ---- idle repaint (windowed Path B) ----
+ * The present above blits the surface buffer straight onto the live screen; the WindowServer does not know those pixels are there, and
+ * repaints the window from its own backing (white -- GL never draws into it) whenever it refreshes that window.  An app that redraws every
+ * frame hides this; one that only redraws on events (Chess) shows its frame for a moment and then stays white.  While the buffer still holds
+ * the last presented frame (repaint_ok: no draw, re-target or detach since), re-present it from a run-loop timer.  The timer lives on the run
+ * loop of the thread that presents, so it fires only while that thread sits idle in its event loop -- never inside one of the app's GL calls
+ * on the same context.  A thread with no run loop (a game's render thread) simply never fires it.  surface_flush is a plain buffer->screen
+ * blit (build_swap); no write_lock, which would copy the stale system backing over the render (path-b-driver-spec.md 7/8). */
+#define MACH64_REPAINT_NS 150000000ull   /* re-present an idle window at most every 150 ms */
+static uint64_t mach64_ns_since(uint64_t t)
+{
+    static mach_timebase_info_data_t tb;
+    if (!tb.denom) mach_timebase_info(&tb);
+    return (mach_absolute_time() - t) * tb.numer / tb.denom;
+}
+static void mach64_repaint_fire(CFRunLoopTimerRef timer, void *info)
+{
+    gld_context *ctx = (gld_context *)info;
+    mach64_priv *p = ctx ? MACH64_PRIV(ctx) : 0;
+    (void)timer;
+    if (!p || !p->repaint_ok || !p->apple_surf_cn || !p->win_mode || p->present_unsafe || p->render_skip || p->off_display) return;
+    if (p->batch.buf && p->batch.n) return;                       /* a frame is being built: not idle */
+    if (mach64_ns_since(p->repaint_t) < MACH64_REPAINT_NS) return; /* the app is presenting by itself */
+    mach64_pathb_present(ctx);   /* same visibility rules as a real present; a reshape clears repaint_ok (the new buffer holds no frame) */
+}
+static void mach64_repaint_arm(gld_context *ctx)
+{
+    mach64_priv *p = MACH64_PRIV(ctx);
+    CFRunLoopTimerContext tc = { 0, ctx, NULL, NULL, NULL };
+    CFRunLoopTimerRef t;
+    if (p->repaint_timer) return;
+    t = CFRunLoopTimerCreate(kCFAllocatorDefault, CFAbsoluteTimeGetCurrent() + MACH64_REPAINT_NS / 1e9,
+                             MACH64_REPAINT_NS / 1e9, 0, 0, mach64_repaint_fire, &tc);
+    if (!t) return;
+    CFRunLoopAddTimer(CFRunLoopGetCurrent(), t, kCFRunLoopCommonModes);   /* common modes: keep repainting during menu/drag tracking too */
+    p->repaint_timer = t;
+}
+/* Stop and free the context's timer (context destroy). */
+void mach64_repaint_stop(gld_context *ctx)
+{
+    mach64_priv *p = ctx && ctx->backend ? MACH64_PRIV(ctx) : 0;
+    if (!p) return;
+    p->repaint_ok = 0;
+    if (p->repaint_timer) {
+        CFRunLoopTimerInvalidate((CFRunLoopTimerRef)p->repaint_timer);
+        CFRelease((CFRunLoopTimerRef)p->repaint_timer);
+        p->repaint_timer = 0;
+    }
 }
 
 /* After the surface is bound: (1) PRIME it -- surface write_lock(14)+unlock(15)+flush(10) allocates
@@ -465,6 +522,7 @@ int m64_peek(io_connect_t conn, int selector, uint32_t kaddr, uint32_t *out)
 void mach64_pathb_setup_target(gld_context *ctx)
 {
     mach64_priv *p = MACH64_PRIV(ctx);
+    p->repaint_ok = 0;   /* re-primed / re-targeted buffer holds no presented frame */
     io_connect_t sc = (io_connect_t)p->apple_surf_cn;
     io_connect_t gc = ctx->connect;
     uint32_t surf = 0, desc = 0, rt = 0, d178 = 0;
@@ -743,6 +801,7 @@ void mach64_flush_batch(gld_context *ctx)
 static void mach64_frame_start(gld_context *ctx)
 {
     mach64_priv *p = MACH64_PRIV(ctx);
+    p->repaint_ok = 0;   /* the buffer is about to change: no idle re-present until this frame is presented */
     if (p->render_skip) { p->frame_new = 0; return; }   /* invalid surface -> no clear into live VRAM */
     if (p->frame_new) {
         /* Batch the colour clear into p->batch (NOT a separate mach64_submit) so the clear and the

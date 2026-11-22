@@ -21,7 +21,7 @@ SRC    := gld_glue.c gld_context.c gld_state.c gld_render.c gld_prims.c \
 bundle: $(BUNDLE)
 
 $(EXEC): $(SRC) gld.h ../common/mach64_emit.h ../common/mach64_regs.h ../common/mach64_abi.h ../common/atiragepro_abi.h
-	$(CC) $(CFLAGS) -bundle -o $(EXEC) $(SRC) -framework IOKit -framework ApplicationServices
+	$(CC) $(CFLAGS) -bundle -o $(EXEC) $(SRC) -framework IOKit -framework ApplicationServices -framework CoreFoundation
 
 $(BUNDLE): $(EXEC) Info.plist
 	@mkdir -p $(BUNDLE)/Contents/MacOS
