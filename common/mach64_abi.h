@@ -71,7 +71,8 @@ enum {
     kMach64Sel_delete_vertex_buffer = 16, /* ScalarI_StructI in=1         */
     kMach64Sel_accel_hold         = 17, /* ScalarI_ScalarO in=1 out=0: take Apple's accelerator mutex (kernel address passed in: accel[0x544], read through Apple's patched peek selector) and KEEP it across the return */
     kMach64Sel_accel_release      = 18, /* ScalarI_ScalarO in=0 out=0: release it (same thread; the dying-client path releases it safely too) */
-    kMach64Sel_COUNT              = 19,
+    kMach64Sel_get_mode_gen       = 19, /* ScalarI_ScalarO in=0 out=1: display-mode generation (odd = a mode change is in progress; any change = every cached VRAM offset is stale) */
+    kMach64Sel_COUNT              = 20,
 };
 
 /* get_config (selector 3) returns 3 dwords into the plugin's context. */

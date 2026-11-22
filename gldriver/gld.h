@@ -170,6 +170,11 @@ typedef struct {
     uint32_t   repaint_ok;         /* 1 = the surface buffer still holds the last presented frame (cleared by any draw, re-target or detach) */
     uint64_t   repaint_t;          /* mach_absolute_time of the last present */
     void      *repaint_timer;      /* CFRunLoopTimerRef on the presenting thread's run loop (0 = none) */
+    /* Display mode changes (docs/re-notes/display-mode-change.md): Apple resets its whole VRAM heap between "will" and "did", so every
+     * cached VRAM offset (render target, Z, texture heap, resident textures) goes stale.  The kext publishes a generation (odd while
+     * changing); mach64_mode_check re-validates when it moves. */
+    uint32_t   mode_gen;           /* generation this context last validated against */
+    uint32_t   mode_seen;          /* 1 once mode_gen holds a real value (the first check only records it) */
     uint32_t   win_buf_off;        /* per-context windowed back+Z buffer (0 = none/shared); freed on
                                     * detach.  Lets multiple windowed contexts render independently. */
     uint32_t   win_buf_size;       /* size of that pool allocation, for the free */
@@ -237,7 +242,10 @@ void mach64_set_zbuffer(gld_context *ctx, uint32_t off, uint32_t pitch_px);
 void mach64_clear_zbuffer(gld_context *ctx);
 void mach64_flush_batch(gld_context *ctx);   /* submit accumulated triangles */
 volatile unsigned char *mach64_vram_cpu_begin(void);
-void mach64_repaint_stop(gld_context *ctx);   /* remove the windowed idle-repaint timer (gld_render.c) */   /* engine-idle CPU view of VRAM (BAR0) for pixel ops; 0 = skip (gld_texture.c) */
+void mach64_repaint_stop(gld_context *ctx);   /* remove the windowed idle-repaint timer (gld_render.c) */
+uint32_t mach64_mode_gen(void);               /* kext display-mode generation; 0 if the kext predates it (gld_texture.c) */
+void mach64_tex_invalidate_all(void);         /* VRAM layout reset: every texture -> evicted, heap emptied (gld_texture.c) */
+int  mach64_mode_check(gld_context *ctx);     /* 0 = a mode change is in progress: render/present nothing (gld_render.c) */   /* engine-idle CPU view of VRAM (BAR0) for pixel ops; 0 = skip (gld_texture.c) */
 void mach64_clear_color(gld_context *ctx);
 void mach64_batch_clear_color(gld_context *ctx);  /* clear folded into the triangle batch */
 void mach64_fill_rect(gld_context *ctx, uint32_t off, uint32_t x, uint32_t y,

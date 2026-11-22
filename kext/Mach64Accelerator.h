@@ -17,6 +17,7 @@
 #include <IOKit/IODeviceMemory.h>
 #include <IOKit/IOBufferMemoryDescriptor.h>
 #include <IOKit/IOLib.h>
+#include <IOKit/graphics/IOFramebuffer.h>
 
 class Mach64GLUserClient;
 
@@ -47,6 +48,16 @@ class Mach64Accelerator : public IOService
     UInt32                    fFlipPending;    // 1 => a page flip was written, not yet retired
     UInt32                    fFlipScanline;   // scanline at the flip write (vblank-load detect)
     UInt32                    fOrigCrtc;       // desktop CRTC_OFF_PITCH, saved at first flip, restored in stop()
+
+    // ---- display mode changes (mirrors ATIRagePro::display_mode_will/did_change, docs/re-notes/display-mode-change.md) ----
+    enum { kMaxFB = 4 };
+    IONotifier               *fFBPublish;      // publish notification for IOFramebuffers on our PCI device
+    IOFramebuffer            *fFBs[kMaxFB];    // framebuffers we registered with (not retained: they outlive us on this device)
+    IONotifier               *fFBNotify[kMaxFB];
+    int                       fNumFB;
+    volatile SInt32           fModeDepth;      // nested will/did count across heads (Apple's this+0xc4)
+    volatile UInt32           fModeGen;        // odd while a mode change is in progress; bumped on each edge
+    bool                      fRedirected;     // user mappings of fFB are redirected
 
     // ---- register / ring MMIO helpers (little-endian, see mach64_regs.h) --
     UInt32 regRead (UInt32 off) const;
@@ -88,6 +99,12 @@ public:
     IOReturn setSurface(Mach64GLUserClient *c,
                         UInt32 a, UInt32 b, UInt32 cc, UInt32 d);
     IOReturn waitFlip(void);   // block until a pending page flip has retired (vblank loaded)
+
+    // ---- display mode changes ----
+    UInt32   modeGen(void) const { return fModeGen; }
+    bool     modeChanging(void) const { return (fModeGen & 1u) != 0; }
+    bool     fbPublished(IOService *svc);                       // gIOPublishNotification for IOFramebuffer
+    IOReturn fbEvent(IOFramebuffer *fb, IOIndex event, void *info);   // IOFramebuffer notification
 };
 
 #endif /* MACH64_ACCELERATOR_H */

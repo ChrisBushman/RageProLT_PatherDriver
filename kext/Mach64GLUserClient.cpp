@@ -49,6 +49,7 @@ bool Mach64GLUserClient::start(IOService *provider)
         M(delete_vertex_buffer,kIOUCScalarIStructI,1, 0),               //16
         M(accel_hold,         kIOUCScalarIScalarO, 1, 0),               //17: take Apple's accelerator mutex and keep it
         M(accel_release,      kIOUCScalarIScalarO, 0, 0),               //18: release it
+        M(get_mode_gen,       kIOUCScalarIScalarO, 0, 1),               //19: display-mode generation
     };
     for (int i = 0; i < kMach64Sel_COUNT; i++) fMethods[i] = tbl[i];
     return true;
@@ -179,9 +180,12 @@ void Mach64GLUserClient::watchdog(void)
     release();                                   /* the reference taken when the timer was armed */
 }
 static UInt32 sApplMutex = 0;
+IOReturn Mach64GLUserClient::get_mode_gen(UInt32 *gen) { *gen = fProvider->modeGen(); return kIOReturnSuccess; }
+
 IOReturn Mach64GLUserClient::accel_hold(UInt32 mutexAddr)
 {
     if (fHeld) return kIOReturnBusy;
+    if (fProvider->modeChanging()) return kIOReturnNotReady;   /* Apple is stopping/re-initialising the engine: no user kicks until "did" */
     if (mutexAddr < 0x10000u || mutexAddr > 0xdfffffffu || (mutexAddr & 3u)) return kIOReturnBadArgument;
     if (sApplMutex && sApplMutex != mutexAddr) return kIOReturnBadArgument;
     sApplMutex = mutexAddr;

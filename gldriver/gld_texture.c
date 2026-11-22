@@ -117,6 +117,19 @@ typedef struct { uint32_t off, size; } mach64_free_blk;
 static mach64_free_blk g_free[MACH64_TEX_SLOTS];
 static int             g_nfree;
 
+/* The VRAM under the heap was re-laid out (display mode change): every resident texture's region is gone.  Put each slot in the evicted
+ * state (key + texobj kept, rsize 0) so its next bind re-uploads it from GLEngine's copy, forget the content hash so that upload is not
+ * skipped, and empty the heap. */
+void mach64_tex_invalidate_all(void)
+{
+    int i;
+    TEX_LOCK();
+    for (i = 0; i < MACH64_TEX_SLOTS; i++)
+        if (g_slots[i].key) { g_slots[i].off = 0; g_slots[i].rsize = 0; g_slots[i].h1 = g_slots[i].h2 = g_slots[i].hlen = 0; }
+    g_nfree = 0; g_heap_next = g_heap_base;
+    TEX_UNLOCK();
+}
+
 static void           *g_pending[16];   /* texobjs image-dirtied, to upload next draw */
 static int             g_npending;
 
@@ -475,6 +488,15 @@ int mach64_pathA(io_connect_t *conn, volatile uint8_t **regs, volatile uint8_t *
     return 1;
 }
 static unsigned dma_rd(uint32_t reg) { return OSReadLittleInt32((void *)g_dma.regs, reg); }
+/* Display-mode generation from Mach64Accelerator (odd while a mode change is in progress).  An older kext has no selector 19: the call
+ * fails and this stays 0, so mode tracking is simply off. */
+uint32_t mach64_mode_gen(void)
+{
+    uint32_t gen = 0;
+    if (!dma_ready_pathA()) return 0;
+    if (IOConnectMethodScalarIScalarO(g_dma.conn, kMach64Sel_get_mode_gen, 0, 1, &gen) != KERN_SUCCESS) return 0;
+    return gen;
+}
 /* CPU view of VRAM for the pixel paths (glReadPixels / glDrawPixels / glBitmap): BAR0 from Mach64Accelerator, offsets == engine VRAM
  * offsets, usable span [0, MACH64_VRAM_USABLE_END).  NOT ctx->regs -- that is Apple's type-1 COMMAND buffer (~768 KB); treating it as VRAM
  * read past its end (Chess: SIGBUS in glReadPixels) or, for small offsets, overwrote queued engine commands.  Drains every queued and in-flight

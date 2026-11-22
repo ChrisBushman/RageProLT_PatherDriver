@@ -420,6 +420,38 @@ void mach64_pathb_present(gld_context *ctx)
     IOConnectMethodScalarIStructureI(ctx->connect, kATIRPro_finish, 0, 0, NULL);
 }
 
+/* ---- display mode changes ----
+ * Between the framebuffer's "will" and "did" Apple drains, pages every surface buffer and texture out of VRAM, resets its VRAM heap and
+ * stops the engine; our kext redirects our aperture mapping and publishes an odd generation meanwhile (docs/re-notes/display-mode-change.md).
+ * Called at frame boundaries, not per draw (it is a kext call).  Returns 0 while a change is in progress: the caller renders and presents
+ * nothing.  When the generation has moved, every cached VRAM offset is stale: drop the Z / texture-heap records WITHOUT freeing them (the
+ * heap they came from was reset, freeing would corrupt the new one), evict every texture, discard the batch built against the old
+ * offsets, and re-prime the surface (setup_target re-reads the render target and re-allocates Z + texture heap). */
+int mach64_mode_check(gld_context *ctx)
+{
+    mach64_priv *p = ctx && ctx->backend ? MACH64_PRIV(ctx) : 0;
+    uint32_t gen;
+    if (!p) return 1;
+    gen = mach64_mode_gen();
+    if (!p->mode_seen) { p->mode_gen = gen & ~1u; p->mode_seen = 1; }
+    if (gen & 1u) {                     /* changing: fail to blank, like an invalid surface */
+        p->render_skip = 1; p->present_unsafe = 1; p->repaint_ok = 0;
+        return 0;
+    }
+    if (gen == p->mode_gen) return 1;
+    p->mode_gen = gen;
+    mach64_dma_fence();
+    p->z_record = 0; p->tex_record = 0; p->z_off = 0;
+    mach64_tex_invalidate_all();
+    m64_cb_init(&p->batch, M64_BSTORE(p), 32768);
+    p->dirty |= MACH64_DIRTY_STATE;
+    p->repaint_ok = 0;
+    p->frame_new = 1;
+    if (p->apple_surf_cn) mach64_pathb_setup_target(ctx);   /* resets render_skip / present_unsafe from the new surface */
+    else { p->render_skip = 0; p->present_unsafe = 0; }
+    return 1;
+}
+
 /* ---- idle repaint (windowed Path B) ----
  * The present above blits the surface buffer straight onto the live screen; the WindowServer does not know those pixels are there, and
  * repaints the window from its own backing (white -- GL never draws into it) whenever it refreshes that window.  An app that redraws every
@@ -443,6 +475,7 @@ static void mach64_repaint_fire(CFRunLoopTimerRef timer, void *info)
     if (!p || !p->repaint_ok || !p->apple_surf_cn || !p->win_mode || p->present_unsafe || p->render_skip || p->off_display) return;
     if (p->batch.buf && p->batch.n) return;                       /* a frame is being built: not idle */
     if (mach64_ns_since(p->repaint_t) < MACH64_REPAINT_NS) return; /* the app is presenting by itself */
+    if (!mach64_mode_check(ctx) || !p->repaint_ok) return;        /* mode changed: the buffer no longer holds the frame */
     mach64_pathb_present(ctx);   /* same visibility rules as a real present; a reshape clears repaint_ok (the new buffer holds no frame) */
 }
 static void mach64_repaint_arm(gld_context *ctx)
@@ -802,6 +835,7 @@ static void mach64_frame_start(gld_context *ctx)
 {
     mach64_priv *p = MACH64_PRIV(ctx);
     p->repaint_ok = 0;   /* the buffer is about to change: no idle re-present until this frame is presented */
+    if (p->frame_new) mach64_mode_check(ctx);   /* once per frame: re-validate VRAM offsets after a display mode change */
     if (p->render_skip) { p->frame_new = 0; return; }   /* invalid surface -> no clear into live VRAM */
     if (p->frame_new) {
         /* Batch the colour clear into p->batch (NOT a separate mach64_submit) so the clear and the
@@ -1175,6 +1209,8 @@ int mach64_ctl08(void *rb_ctx, int x, int y, int w, int h,
     uint32_t toff  = p ? p->target_off   : 0;
     uint32_t tpitch= p ? p->target_pitch : 0;    /* pixels */
     if (!p || !height) return 0;
+    if (!mach64_mode_check(gc) || p->render_skip) return 0;   /* offsets below may be stale or invalid */
+    toff = p->target_off; tpitch = p->target_pitch;          /* re-read: the check may have re-validated them */
 
     /* DEPTH readback: GL_DEPTH_COMPONENT from our 16-bit Z buffer (p->z_off/z_pitch, Z16 stored LE).
      * GLEngine already rejected this if no depth buffer is bound, but guard anyway. */
@@ -1627,6 +1663,7 @@ void mach64_dispatch_render_ctl(gld_context *ctx, uint32_t a4, uint32_t a5,
     mach64_priv *p = MACH64_PRIV(ctx);
     (void)a4; (void)a5; (void)a6; (void)a7; (void)a8;
     if (!p) return;
+    if (!mach64_mode_check(ctx)) { p->frame_new = 1; return; }   /* display mode change in progress: present nothing */
     /* PATH B: present through Apple's bound surface (surface_flush), the once-per-frame
      * hook.  Takes priority over the legacy VRAM back->front blit (which needs our-kext
      * buffers Path B doesn't allocate). */

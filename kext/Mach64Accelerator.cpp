@@ -19,6 +19,8 @@ OSDefineMetaClassAndStructors(Mach64Accelerator, IOService)
 /* PPC store barrier: flush our uncached ring/command writes to RAM and order
  * them before the MMIO kick.  Mirrors the mb() in the proven userspace tools. */
 static inline void mach64_sync(void) { __asm__ volatile("sync; eieio" ::: "memory"); }
+static bool     fbPublishedTramp(void *target, void *ref, IOService *svc);
+static IOReturn fbEventTramp(OSObject *self, void *ref, IOFramebuffer *fb, IOIndex event, void *info);
 
 bool Mach64Accelerator::start(IOService *provider)
 {
@@ -110,8 +112,74 @@ bool Mach64Accelerator::start(IOService *provider)
         if (nw != hd) regWrite(MACH64_HW_DEBUG, nw);
     }
 
+    /* Display mode changes: Apple's ATIRagePro resets its VRAM heap, stops the engine and redirects every user mapping of the VRAM
+     * aperture between "will" and "did" (docs/re-notes/display-mode-change.md).  Our BAR0 mapping is a separate descriptor, so do the
+     * same for it, and publish a generation the GL plugin polls to drop its cached VRAM offsets.  addNotification also calls back for
+     * framebuffers that are already published. */
+    fNumFB = 0; fModeDepth = 0; fModeGen = 0; fRedirected = false;
+    fFBPublish = addNotification(gIOPublishNotification, serviceMatching("IOFramebuffer"), &fbPublishedTramp, this, 0);
+    if (!fFBPublish) IOLog("Mach64Accelerator: no IOFramebuffer publish notification (mode changes will not be tracked)\n");
+
     registerService();
     return true;
+}
+
+static bool fbPublishedTramp(void *target, void *ref, IOService *svc)
+{
+    (void)ref;
+    return ((Mach64Accelerator *)target)->fbPublished(svc);
+}
+static IOReturn fbEventTramp(OSObject *self, void *ref, IOFramebuffer *fb, IOIndex event, void *info)
+{
+    (void)ref;
+    return ((Mach64Accelerator *)self)->fbEvent(fb, event, info);
+}
+
+bool Mach64Accelerator::fbPublished(IOService *svc)
+{
+    IOFramebuffer *fb = OSDynamicCast(IOFramebuffer, svc);
+    IOService *s;
+    if (!fb || !fLock) return true;
+    for (s = fb; s && s != fPCI; s = s->getProvider()) ;
+    if (!s) return true;                              /* another card's framebuffer */
+    IOLockLock(fLock);
+    {   int i; bool have = false;
+        for (i = 0; i < fNumFB; i++) if (fFBs[i] == fb) have = true;
+        if (!have && fNumFB < kMaxFB) {
+            IONotifier *n = fb->addFramebufferNotification(&fbEventTramp, this, 0);
+            if (n) { fFBs[fNumFB] = fb; fFBNotify[fNumFB] = n; fNumFB++; }
+            IOLog("Mach64Accelerator: tracking mode changes of %s (%s)\n", fb->getName(), n ? "ok" : "FAILED");
+        }
+    }
+    IOLockUnlock(fLock);
+    return true;
+}
+
+/* Same event mapping as IOATIRProAccelerator::display_change_handler: mode will/did change, and sleep/wake without info, bracket a VRAM
+ * re-layout.  Counted across heads so the first "will" starts it and the last "did" ends it. */
+IOReturn Mach64Accelerator::fbEvent(IOFramebuffer *fb, IOIndex event, void *info)
+{
+    (void)fb;
+    bool will = (event == kIOFBNotifyDisplayModeWillChange) || (event == kIOFBNotifyWillSleep && !info);
+    bool did  = (event == kIOFBNotifyDisplayModeDidChange)  || (event == kIOFBNotifyDidWake && !info);
+    if (will) {
+        if (OSIncrementAtomic((SInt32 *)&fModeDepth) == 0) {
+            OSIncrementAtomic((SInt32 *)&fModeGen);       /* odd: changing -- accel_hold is refused, the plugin renders nothing */
+            mach64_sync();
+            /* Block user access to the aperture (VRAM + registers) until "did": a user touch now waits in the fault handler instead of
+             * hitting a chip Apple is stopping and re-initialising.  Our own kernel mapping (kernel_task) stays usable. */
+            if (fFB && fFB->redirect(kernel_task, true) == kIOReturnSuccess) fRedirected = true;
+            IOLog("Mach64Accelerator: display mode will change (gen %lu)\n", (unsigned long)fModeGen);
+        }
+    } else if (did) {
+        if (fModeDepth > 0 && OSDecrementAtomic((SInt32 *)&fModeDepth) == 1) {
+            if (fRedirected) { fFB->redirect(kernel_task, false); fRedirected = false; }
+            mach64_sync();
+            OSIncrementAtomic((SInt32 *)&fModeGen);       /* even: new layout -- the plugin re-validates every cached VRAM offset */
+            IOLog("Mach64Accelerator: display mode did change (gen %lu)\n", (unsigned long)fModeGen);
+        }
+    }
+    return kIOReturnSuccess;
 }
 
 void Mach64Accelerator::stop(IOService *provider)
@@ -124,6 +192,9 @@ void Mach64Accelerator::stop(IOService *provider)
         regWrite(MACH64_CRTC_OFF_PITCH, fOrigCrtc);
         fOrigCrtc = 0;
     }
+    if (fFBPublish) { fFBPublish->remove(); fFBPublish = 0; }
+    {   int i; for (i = 0; i < fNumFB; i++) if (fFBNotify[i]) { fFBNotify[i]->remove(); fFBNotify[i] = 0; } fNumFB = 0; }
+    if (fRedirected && fFB) { fFB->redirect(kernel_task, false); fRedirected = false; }
     super::stop(provider);
 }
 

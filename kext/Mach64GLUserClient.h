@@ -50,6 +50,7 @@ public:
     IOReturn wait_for_stamp(UInt32 stamp);                            // sel 9
     IOReturn accel_hold(UInt32 mutexAddr);                            // sel 17
     IOReturn accel_release(void);                                     // sel 18
+    IOReturn get_mode_gen(UInt32 *gen);                               // sel 19
     virtual void free(void);
     void     watchdog(void);                                          // force-release a hold that lasted too long (owner stalled or died)
     // ... new_texture / delete_texture / read_buffer / swap etc. ...
