@@ -28,7 +28,6 @@ static io_service_t atirpro_match_service(void)
 int gldGetRendererInfo(gld_renderer_info *out, uint32_t renderer_mask)
 {
     (void)renderer_mask;
-    gld_log("gldGetRendererInfo(mask=0x%x)\n", renderer_mask);
     io_service_t svc = atirpro_match_service();
     if (!svc) return 0x2719;                 /* no device                  */
 
@@ -69,7 +68,6 @@ int gldCreateContext(gld_context **outp, void *pixfmt, void *shared,
     gld_context *ctx = calloc(1, 0x200);     /* 512-byte struct (verified)  */
     if (!ctx) return 0x2720;
 
-    gld_log("gldCreateContext(pixfmt=%p)\n", pixfmt);
 
     /* PATH B: ctx->connect IS Apple's ATIRagePro GL user client (type 1).  There is
      * no separate probe connection any more -- the bundle drives Apple's kext directly. */
@@ -147,18 +145,13 @@ int gldCreateContext(gld_context **outp, void *pixfmt, void *shared,
          * context never has 0x8000, and a DB context WITH it gets zero geometry
          * dispatched (GLEngine routes it off the hardware path).  Strip 0x8000 for
          * DB so the caps match a hardware context plus the double-buffer bit 0x400. */
-        if (ctx->backend && ((f0c & 8) || getenv("MACH64_FORCE_DBUF"))) {
-            /* MACH64_FORCE_DBUF: treat a single-buffered request as double-buffered.  Diagnostic +
-             * possible fix for the screensaver: our WORKING windowed/fullscreen tools are all dbuf=1
-             * (their surface_flush present does NOT wedge), while the dbuf=0 screensaver contexts wedge
-             * or stay white.  Forcing dbuf=1 routes them through the proven double-buffered setup +
-             * present path -- if they then render, single-buffered was the whole problem class. */
+        if (ctx->backend && (f0c & 8)) {
             caps &= ~0x8000u;
             MACH64_PRIV(ctx)->dbuf = 1;
         }
+        /* Colour depth from the node's finalized colour-buffer code (node[0x14]: 0x800000 = 32 bpp, 0x8000 = 16 bpp; see gld_pixelformat.c). */
+        if (ctx->backend && (n[5] & 0x8000u) && !(n[5] & 0x800000u)) mach64_set_cbpp(ctx, 2u);
         *(uint32_t *)((unsigned char *)ctx + 0x2c) = caps;
-        gld_log("  ctx+0x2c fmt_caps = 0x%x (node [08]=0x%x [0c]=0x%x)%s\n",
-                caps, f08, f0c, (f0c & 8) ? "  DBUF armed" : "");
     }
 
     /* Store GLEngine's gli context (6th arg, r8) at ctx+0x10 -- the render flush
@@ -169,16 +162,19 @@ int gldCreateContext(gld_context **outp, void *pixfmt, void *shared,
      * attach flags for double buffering (sub_a524 sets bit1 of *(ctx+0x14)).  We
      * ignored it before; gldAttachDrawable needs it to set the DB dispatch gate. */
     *(void **)((unsigned char *)ctx + 0x14) = a7;
-    gld_log("  ctx+0x10 <- a8=%p, ctx+0x14 <- a7=%p (a9=%p)\n", a8, a7, a9);
 
     *outp = ctx;
     return 0;
 }
 
 /* ---- gldDestroyContext: tear down the handshake --------------------- */
+extern void mach64_gli_forget(gld_context *ctx);
+extern void mach64_dma_fence(void);
 int gldDestroyContext(gld_context *ctx)
 {
     if (!ctx) return 0;
+    mach64_dma_fence();   /* a queued frame (batch + present) may still be running on the DMA worker: finish it before anything it uses is freed */
+    mach64_gli_forget(ctx);
     /* Return Apple-allocated Z/texture VRAM if the app destroyed without detaching (no-op if detach
      * already freed them).  Must run while ctx->connect is still open (closed below). */
     if (ctx->backend && ctx->connect) {

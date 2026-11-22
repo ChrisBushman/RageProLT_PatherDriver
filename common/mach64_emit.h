@@ -29,6 +29,7 @@ typedef struct {
     size_t    cap;    /* capacity in dwords                                */
     size_t    n;      /* dwords written so far                             */
     int       overflow;
+    int       multitex; /* 1 => m64_emit_vertex also writes SECONDARY_S/T/W (set by the draw path from m64_state.multitex) */
 } m64_cmdbuf;
 
 /* Post-transform vertex (Apple's GLEngine does T&L; we only rasterize).
@@ -41,6 +42,7 @@ typedef struct {
     int32_t  s, t;    /* texcoords (float bits)                            */
     uint32_t spec_argb; /* specular colour (0 if unused)                   */
     uint32_t argb;    /* primary colour (per-vertex, gouraud)              */
+    int32_t  s2, t2, w2; /* SECONDARY texture S,T,W (float bits); emitted only when m64_state.multitex */
 } m64_vertex;
 
 /* Register shadow: the full untextured-gouraud state we proved on hardware.
@@ -79,6 +81,15 @@ typedef struct {
     uint32_t tex_mip_off[12]; /* per-level offset, index = level maxLog2      */
     int      tex_maxlog2;     /* highest TEX_n_OFF register used (base)       */
     int      tex_mip;         /* 1 => a full mip chain is loaded              */
+    /* Two-texture compositing (ARB_multitexture, one pass): when multitex, SECONDARY_TEX_OFF = tex2_off, TEX_SIZE_PITCH gets tex2_size_pitch
+     * (unit-1 log2 sizes in [31:16]) OR-ed in, tex_cntl carries the composite bits, and every vertex also writes SECONDARY_S/T/W. */
+    int      multitex;
+    uint32_t tex2_off;
+    uint32_t tex2_size_pitch;
+    uint32_t tex2_cntl_bits;   /* the secondary map's TEX_CNTL composite bits (change detection only) */
+    /* Texel datatype of the primary / secondary map (DP_PIX_WIDTH SCALE_PIX_WIDTH [31:28] / COMPOSITE_PIX_WIDTH [7:4]): 6 ARGB8888, 4 RGB565, 3 ARGB1555,
+     * 15 ARGB4444.  0 = leave dp_pix_width as is (ARGB8888). */
+    uint32_t tex_fmt, tex2_fmt;
 } m64_state;
 
 void m64_cb_init(m64_cmdbuf *cb, uint32_t *storage, size_t cap_dwords);

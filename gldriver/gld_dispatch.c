@@ -30,37 +30,12 @@
 
 #define SET(off, fn)  (*(void **)((unsigned char *)table + (off)) = (void *)(fn))
 
-/* DISPATCH PROBE: log every primitive-slot call with its slot offset + the raw
- * PPC argument registers r4..r8, to recover the true slot->GL-primitive mapping
- * AND each slot's calling convention (the garbage `n` for fans implies the arg
- * positions differ per slot).  Draws nothing -- pure RE.  Toggle with the build
- * flag -DGLD_DISPATCH_PROBE. */
-#ifdef GLD_DISPATCH_PROBE
-#define MKPROBE(hx) static void dprobe_##hx(void *a,void *b,void *c,void *d,void *e,void *f) \
-    { (void)a; gld_log("DISP 0x" #hx ": r4=%p r5=%p r6=%p r7=%p r8=%p\n", b,c,d,e,f); }
-MKPROBE(18) MKPROBE(1c) MKPROBE(20) MKPROBE(24) MKPROBE(28) MKPROBE(2c)
-MKPROBE(30) MKPROBE(34) MKPROBE(38) MKPROBE(3c) MKPROBE(40) MKPROBE(44) MKPROBE(48)
-#endif
-
 int gldUpdateDispatch(gld_context *ctx, void *table, uint32_t flags)
 {
     (void)ctx; (void)flags;   /* single untextured variant for now */
-    gld_log("gldUpdateDispatch(table=%p flags=0x%x) caller=%p arg5[0..2]=0x%x 0x%x 0x%x\n",
-            table, flags, __builtin_return_address(0),
-            ((uint32_t *)(uintptr_t)flags)[0], ((uint32_t *)(uintptr_t)flags)[1],
-            ((uint32_t *)(uintptr_t)flags)[2]);
 
-#ifdef GLD_DISPATCH_PROBE
-    SET(0x18, dprobe_18); SET(0x1c, dprobe_1c); SET(0x20, dprobe_20);
-    SET(0x24, dprobe_24); SET(0x28, dprobe_28); SET(0x2c, dprobe_2c);
-    SET(0x30, dprobe_30); SET(0x34, dprobe_34); SET(0x38, dprobe_38);
-    SET(0x3c, dprobe_3c); SET(0x40, dprobe_40); SET(0x44, dprobe_44);
-    SET(0x48, dprobe_48);
-#else
-    /* Slot->GL-primitive mapping recovered empirically by the GLD_DISPATCH_PROBE
-     * run (tools/mach64_dispatchprobe drives each GL primitive with a UNIQUE vertex
-     * count; the probe logs each slot's offset + raw arg registers).  The table is
-     * NOT laid out in GL-mode order, and the earlier labels were wrong:
+    /* Slot->GL-primitive mapping, recovered empirically.  The table is
+     * NOT laid out in GL-mode order:
      *   0x18 POINTS  0x1c LINES  0x20 LINE_STRIP(+LINE_LOOP)  0x28 POLYGON
      *   0x2c TRIANGLES  0x30 TRIANGLE_FAN  0x34 TRIANGLE_STRIP
      *   0x38 QUADS  0x3c QUAD_STRIP        (0x24 never fired for DrawArrays)
@@ -90,18 +65,14 @@ int gldUpdateDispatch(gld_context *ctx, void *table, uint32_t flags)
     SET(SLOT_ELT_POINTS, mach64_render_elt_points); /* clipped points (pointer array) */
     SET(SLOT_ELT_LINES,  mach64_render_elt_lines);  /* clipped lines  (pointer-pair array) */
     SET(SLOT_ELT_TRIS,   mach64_render_elt_tris);   /* clipped convex polygons (pointer array) */
-#endif  /* GLD_DISPATCH_PROBE */
 
     /* control slots (0x58/0x5c symbol-confirmed == gldFinish/gldFlush) */
     SET(SLOT_FINISH,     gldFinish);
     SET(SLOT_FLUSH,      gldFlush);
     /* 0x4c (buffer-complete) / 0x60 (render-control): the reference installs
-     * these; install logging bodies to see if GLEngine calls them to flush. */
+     * these. */
     SET(SLOT_COMPLETE,   mach64_dispatch_complete);
     SET(0x60,            mach64_dispatch_render_ctl);
-
-    gld_log("  slot[0x28]=%p slot[0x48]=%p installed at table+off\n",
-            (void *)mach64_render_triangles, (void *)mach64_render_triangles);
 
     /* DOUBLE-BUFFER PRESENT lives in mach64_dispatch_render_ctl (slot 0x60), NOT here.
      * gldUpdateDispatch fires per state-change (~29-48x/frame in a real app), so presenting

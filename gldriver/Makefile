@@ -9,12 +9,12 @@ CC     ?= cc
 # GLD_DBUF enables double-buffered pixel formats (node[0x0c] bit3) -- WITHOUT it the CGL
 # scorer rejects every DB request (npix=0), and since all real apps ask for double buffering
 # they fall back to software (white).  Both flags are mandatory for the Path-B bundle.
-CFLAGS ?= -O2 -Wall -std=gnu99 -I.. -DGLD_APPLE_PROBE -DGLD_DBUF
+CFLAGS ?= -O2 -Wall -std=gnu99 -mcpu=750 -fsingle-precision-constant -I.. -DGLD_APPLE_PROBE -DGLD_DBUF
 
 EXEC   := ATIRageProGLDriver
 BUNDLE := $(EXEC).bundle
 SRC    := gld_glue.c gld_context.c gld_state.c gld_render.c gld_prims.c \
-          gld_texture.c gld_dispatch.c gld_pixelformat.c gld_entry.c gld_cgs.c \
+          gld_texture.c gld_dispatch.c gld_pixelformat.c gld_entry.c gld_cgs.c gld_engine.c \
           ../common/mach64_emit.c
 
 .PHONY: bundle clean

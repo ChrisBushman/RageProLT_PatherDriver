@@ -22,19 +22,18 @@
 #include "../common/mach64_abi.h"
 #include "../common/atiragepro_abi.h"   /* Path-B: cmdbuf header + finish selector */
 #include "../common/mach64_regs.h"
-#include <string.h>   /* memset (mach64_pathb_present) */
+#include <string.h>
+#include <stdlib.h>
+#include <pthread.h>
+#include <fcntl.h>
+#include <sys/file.h>   /* flock (DMA lock shared with the texture upload) */
 
-#ifdef GLD_PERF
-/* Frame-time profiler: split each frame into GPU/DMA time (blocked in mach64_submit waiting
- * for the engine) vs wait-flip (vblank) vs the remainder (CPU building triangles).  Prints to
- * the app's stderr (survives MACH64_GLD_NOLOG) once every 15 frames from render_ctl. */
-#include <sys/time.h>
-#include <stdio.h>
-unsigned long g_perf_submit_us = 0, g_perf_wait_us = 0, g_perf_copy_us = 0,
-              g_perf_dispatch_us = 0, g_perf_present_us = 0;
-unsigned long perf_now_us(void)   /* non-static: gld_prims.c times emit_tri into g_perf_dispatch_us */
-{ struct timeval t; gettimeofday(&t, 0); return (unsigned long)t.tv_sec * 1000000UL + t.tv_usec; }
-#endif
+#define M64_BSTORE(p) ((p)->batch_sel == 0 ? (p)->batchbuf : (p)->batch_sel == 1 ? (p)->batchbuf2 : (p)->batch_sel == 2 ? (p)->batchbuf3 : (p)->batchbuf4)
+void mach64_dma_fence(void);
+int  mach64_eng_single(void);
+int  mach64_eng_ready(gld_context *ctx);
+int  mach64_eng_kick(gld_context *ctx, const uint32_t *w, size_t n);
+void mach64_eng_fence(void);
 
 /* ---- geometry: post-T&L float vertex -> hardware m64_vertex ----------
  * GLEngine gives window-space x,y (pixels, top-left origin), z, w, and a packed
@@ -43,15 +42,16 @@ unsigned long perf_now_us(void)   /* non-static: gld_prims.c times emit_tri into
 void mach64_pack_vertex(m64_vertex *out, float x, float y, float z,
                         float w, uint32_t argb)
 {
-    int xi = (int)(x * 4.0f);
-    int yi = (int)(y * 4.0f);
-    int zi = (int)(z * 65535.0f + 0.5f);        /* depth [0,1] -> 16-bit Z */
+    int xi = m64_f2i(x, 2);
+    int yi = m64_f2i(y, 2);
+    int zi = m64_f2i(z * 65535.0f + 0.5f, 0);   /* depth [0,1] -> 16-bit Z */
     float wf = (w != 0.0f) ? w : 1.0f;
     if (zi < 0) zi = 0; else if (zi > 0xffff) zi = 0xffff;
     out->x_y = (int32_t)(((xi & 0xffff) << 16) | (yi & 0xffff));
     out->z   = (int32_t)((uint32_t)zi << 15);   /* 17.15: 16-bit depth in [30:15] */
     __builtin_memcpy(&out->w, &wf, 4);
     out->s = out->t = 0;
+    out->s2 = out->t2 = out->w2 = 0;
     out->spec_argb = 0;
     out->argb = argb;
 }
@@ -70,6 +70,7 @@ void mach64_pack_vertex(m64_vertex *out, float x, float y, float z,
 uint32_t mach64_submit(gld_context *ctx, m64_cmdbuf *cb)
 {
     mach64_priv *p = MACH64_PRIV(ctx);
+    mach64_dma_fence();   /* an async vertex-DMA job must finish before anything else drives the engine */
     /* HW-PROVEN Path-B recipe (2026-09-06):
      *  - the REAL command buffer is the type-2 map (ATIRPRO_MEM_CONTEXT -> ctx->fb == kext ctx[0xdc]),
      *    NOT type-1 (which is the surface buffer).
@@ -89,6 +90,13 @@ uint32_t mach64_submit(gld_context *ctx, m64_cmdbuf *cb)
 
     body = hdr->body;
     cap  = hdr->capacity;          /* body capacity in DWORDS = (regionsize-0x20)/4 */
+    /* The header lives in memory shared with the kernel, and `capacity` is read from it.  Never write more than the mapped region
+     * can hold, whatever the header claims: a context whose ctx->fb is not Apple's context buffer (e.g. a hand-built test context,
+     * or a stale header) must be refused, not scribbled over. */
+    {   uint32_t maxdw = ctx->fb_size > ATIRPRO_CMDBUF_HDR_BYTES ? (ctx->fb_size - ATIRPRO_CMDBUF_HDR_BYTES) / 4u : 0u;
+        if (cap > maxdw) cap = maxdw;
+        if (!cap) return p->last_stamp;
+    }
     while (i < cb->n) {
         uint32_t h   = cb->buf[i++];
         uint32_t adr = h & 0xffffu;
@@ -109,6 +117,9 @@ uint32_t mach64_submit(gld_context *ctx, m64_cmdbuf *cb)
              * this[0x550]+0x240 = real 0x640 (WRONG registers) -> the setup engine got no vertex
              * data -> the triangle was submitted but rasterized nothing (2D fills still worked). */
             uint32_t reg = base + k * 4u;
+            /* Apple's drain does stwbrx(this[0x550] + (reg-0x400)) with NO bounds check: a register above the DRI window
+             * lands past the mapped register page (kernel fault).  Our emitters never go there; refuse rather than trust. */
+            if (reg > MACH64_DRI_REG_MAX) { cb->overflow = 1; break; }
             if (out + 2 > cap) { cb->overflow = 1; break; }   /* body full -> drop rest */
             body[out++] = reg - 0x400u;    /* Apple MMIO offset (base = BAR+0x400) */
             body[out++] = cb->buf[i++];    /* val (kext byte-reverses to the LE regs) */
@@ -119,31 +130,31 @@ uint32_t mach64_submit(gld_context *ctx, m64_cmdbuf *cb)
         /* The packed stream didn't fit the hardware body -> it is TRUNCATED mid-geometry.
          * Draining a truncated stream WEDGES the engine (the Flurry freeze).  Drop it instead:
          * lose this batch's geometry but keep the machine alive.  The draw_triangle batch sizing
-         * (fb_size-0x20)/8 should keep us from ever getting here; log loudly if we do. */
-        gld_log("  [submit] *** OVERFLOW: packed %u dw > body cap %u -- DROPPING (would wedge) ***\n",
-                out, cap);
+         * (fb_size-0x20)/8 should keep us from ever getting here. */
         return p->last_stamp;
     }
     hdr->count  = out;                                 /* # body dwords for the kext to drain */
     hdr->flags |= ATIRPRO_CMDBUF_FLAG_SUBMIT;          /* bit0 = VALID/SUBMIT */
-    { static int slog = 0; if (slog < 5) {
-        gld_log("  [submit #%d] out=%u dw (cap=%u) off0=0x%x val0=0x%x -> drain...\n",
-                slog, out, cap, out ? body[0] : 0, out ? body[1] : 0); slog++; } }
     /* SUBMIT = map type-1 (surface buffer): clientMemoryForType drains our command buffer through
      * the engine.  Map+unmap (the drain is the side effect of the map call). */
-    if (!IOConnectMapMemory(ctx->connect, ATIRPRO_MEM_COMMAND, mach_task_self(),
-                            &sub, &subsz, kIOMapAnywhere | kIOMapInhibitCache) && sub)
-        IOConnectUnmapMemory(ctx->connect, ATIRPRO_MEM_COMMAND, mach_task_self(), sub);
-    /* NOTE: a per-drain finish-fence (sel 8) was tried here to serialise the multiple mid-frame drains
-     * a heavy frame needs -- it did NOT stop the high-volume engine wedge (just made it slower before
-     * wedging), so the wedge is NOT simple drain overlap.  Reverted.  The multi-drain-per-frame model
-     * (forced by the 4KB command body) needs a different fix -- see the offline RE plan. */
+    {   kern_return_t mkr;
+        mkr = IOConnectMapMemory(ctx->connect, ATIRPRO_MEM_COMMAND, mach_task_self(),
+                                 &sub, &subsz, kIOMapAnywhere | kIOMapInhibitCache);
+        if (!mkr && sub) IOConnectUnmapMemory(ctx->connect, ATIRPRO_MEM_COMMAND, mach_task_self(), sub);
+    }
     p->last_stamp = hdr->stamp;                        /* kext-updated submit stamp */
-    { static int slog2 = 0; if (slog2 < 5) {
-        gld_log("  [submit #%d] drained OK stamp=0x%x\n", slog2, p->last_stamp); slog2++; } }
     return p->last_stamp;
 }
 
+/* Rows a Z clear must cover: the 3D engine addresses Z with the SCREEN y (window origin included), so a windowed context needs
+ * h + win_y rows cleared (the allocation is padded by the same amount in mach64_pathb_setup_target).  Clearing only h rows left rows
+ * h..h+win_y-1 holding stale data and every depth-tested draw in the bottom win_y window rows failed. */
+static uint32_t m64_zclear_rows(gld_context *ctx, uint32_t h)
+{
+    mach64_priv *p = MACH64_PRIV(ctx);
+    if (p->win_mode) h += (uint32_t)(p->win_y > 0 ? p->win_y : 0);
+    return h;
+}
 /* Clear the bound Z buffer to far (0xffff) via a 2D solid fill through the DMA
  * path (proven mach64_fill register sequence).  The 16-bit Z buffer is filled
  * as 32bpp 0xffffffff (= two 0xffff Z values), so the fill is z_pitch/2 wide.
@@ -154,7 +165,7 @@ void mach64_clear_zbuffer(gld_context *ctx)
     m64_cmdbuf cb;
     uint32_t zoff = p->z_off;
     uint32_t w32  = p->z_pitch / 2;                 /* 16-bit px -> 32-bit px */
-    uint32_t h    = *(const uint32_t *)((const char *)ctx + 0x1f4);  /* height */
+    uint32_t h    = m64_zclear_rows(ctx, *(const uint32_t *)((const char *)ctx + 0x1f4));  /* height (+ window y: see m64_zclear_rows) */
     /* Skip the Z clear (and its whole DMA submit) when depth testing is off -- there is
      * no depth buffer in use to clear, so it is pure per-frame overhead. */
     if (!(p->hw.z_cntl & MACH64_Z_EN)) return;
@@ -187,7 +198,7 @@ void mach64_clear_zbuffer(gld_context *ctx)
  * buffered) or the back buffer (double-buffered); dims are ctx+0x1f0/0x1f4. */
 #define GLI_CLEAR_COLOR 0x6320
 static uint32_t mach64_gli(gld_context *ctx);   /* defined below */
-static uint32_t clampc(float f){ int c=(int)(f*255.0f+0.5f); return c<0?0:(c>255?255:(uint32_t)c); }
+static uint32_t clampc(float f){ return m64_f2u8(f); }
 void mach64_clear_color(gld_context *ctx)
 {
     mach64_priv *p = MACH64_PRIV(ctx);
@@ -195,16 +206,21 @@ void mach64_clear_color(gld_context *ctx)
     uint32_t w = *(const uint32_t *)((const char *)ctx + 0x1f0);
     uint32_t h = *(const uint32_t *)((const char *)ctx + 0x1f4);
     uint32_t col = 0;
-    if (!p->target_off || !w || !h) return;
+    /* offset 0 is a VALID target (Apple's surface allocator hands out VRAM from 0): invalidity is render_skip, not target_off==0 */
+    if (p->render_skip || !w || !h) return;
     if (gli) {
         float rf, gf, bf;
         uint32_t rb = mach64_gli_u32(ctx, GLI_CLEAR_COLOR + 0);
         uint32_t gb = mach64_gli_u32(ctx, GLI_CLEAR_COLOR + 4);
         uint32_t bb = mach64_gli_u32(ctx, GLI_CLEAR_COLOR + 8);
+        uint32_t ab = mach64_gli_u32(ctx, GLI_CLEAR_COLOR + 12);
+        float af;
         __builtin_memcpy(&rf, &rb, 4);
         __builtin_memcpy(&gf, &gb, 4);
         __builtin_memcpy(&bf, &bb, 4);
-        col = (clampc(rf) << 16) | (clampc(gf) << 8) | clampc(bf);
+        __builtin_memcpy(&af, &ab, 4);
+        /* the clear alpha goes into the ARGB8888 target's alpha byte too (destination alpha: DST_ALPHA blend factors, alpha readback) */
+        col = (clampc(af) << 24) | (clampc(rf) << 16) | (clampc(gf) << 8) | clampc(bf);
     }
     mach64_fill_rect(ctx, p->target_off, 0, 0, w, h, p->target_pitch, col);
 }
@@ -223,25 +239,28 @@ void mach64_batch_clear_color(gld_context *ctx)
     uint32_t h = *(const uint32_t *)((const char *)ctx + 0x1f4);
     uint32_t off = p->target_off, op = (p->target_pitch / 8) << 22;
     uint32_t col = 0;
-    if (!off || !w || !h) return;
+    if (p->render_skip || !w || !h) return;   /* offset 0 is a valid target (see mach64_clear_color) */
     if (gli) {
         float rf, gf, bf;
         uint32_t rb = mach64_gli_u32(ctx, GLI_CLEAR_COLOR + 0);
         uint32_t gb = mach64_gli_u32(ctx, GLI_CLEAR_COLOR + 4);
         uint32_t bb = mach64_gli_u32(ctx, GLI_CLEAR_COLOR + 8);
+        uint32_t ab = mach64_gli_u32(ctx, GLI_CLEAR_COLOR + 12);
+        float af;
         __builtin_memcpy(&rf, &rb, 4);
         __builtin_memcpy(&gf, &gb, 4);
         __builtin_memcpy(&bf, &bb, 4);
-        col = (clampc(rf) << 16) | (clampc(gf) << 8) | clampc(bf);
+        __builtin_memcpy(&af, &ab, 4);
+        /* the clear alpha goes into the ARGB8888 target's alpha byte too (destination alpha: DST_ALPHA blend factors, alpha readback) */
+        col = (clampc(af) << 24) | (clampc(rf) << 16) | (clampc(gf) << 8) | clampc(bf);
     }
     if (!p->batch.buf)
-        m64_cb_init(&p->batch, p->batchbuf,
-                    sizeof(p->batchbuf) / sizeof(p->batchbuf[0]));
+        m64_cb_init(&p->batch, M64_BSTORE(p), 32768);
     m64_reg(&p->batch, MACH64_Z_CNTL,           0);
     m64_reg(&p->batch, MACH64_SCALE_3D_CNTL,    0);
     m64_reg(&p->batch, MACH64_GUI_TRAJ_CNTL,    (1u<<0) | (1u<<1));
-    m64_reg(&p->batch, MACH64_DP_PIX_WIDTH,     0x60060666u);
-    m64_reg(&p->batch, MACH64_DP_FRGD_CLR,      col);
+    m64_reg(&p->batch, MACH64_DP_PIX_WIDTH,     M64_PIXW(p));
+    m64_reg(&p->batch, MACH64_DP_FRGD_CLR,      m64_pack_cpix(p, col));
     m64_reg(&p->batch, MACH64_DP_WRITE_MASK,    0xffffffffu);
     m64_reg(&p->batch, MACH64_DP_MIX,           (3u<<0) | (7u<<16));
     m64_reg(&p->batch, MACH64_DP_SRC,           (1u<<0) | (1u<<8));
@@ -265,11 +284,10 @@ void mach64_batch_clear_zbuffer(gld_context *ctx)
     mach64_priv *p = MACH64_PRIV(ctx);
     uint32_t zoff = p->z_off;
     uint32_t w32  = p->z_pitch / 2;                 /* 16-bit px -> 32-bit px */
-    uint32_t h    = *(const uint32_t *)((const char *)ctx + 0x1f4);
+    uint32_t h    = m64_zclear_rows(ctx, *(const uint32_t *)((const char *)ctx + 0x1f4));
     if (!zoff || !w32 || !h) return;
     if (!p->batch.buf)
-        m64_cb_init(&p->batch, p->batchbuf,
-                    sizeof(p->batchbuf) / sizeof(p->batchbuf[0]));
+        m64_cb_init(&p->batch, M64_BSTORE(p), 32768);
     m64_reg(&p->batch, MACH64_Z_CNTL,           0);            /* Z off for the fill itself */
     m64_reg(&p->batch, MACH64_SCALE_3D_CNTL,    0);
     m64_reg(&p->batch, MACH64_GUI_TRAJ_CNTL,    (1u<<0) | (1u<<1));
@@ -298,14 +316,15 @@ void mach64_fill_rect(gld_context *ctx, uint32_t off, uint32_t x, uint32_t y,
     mach64_priv *p = MACH64_PRIV(ctx);
     m64_cmdbuf cb;
     uint32_t op = (pitch_px / 8) << 22;
-    if (!off || !w || !h) return;
+    if (p->render_skip || !w || !h) return;   /* offset 0 is a valid destination (Apple's surface allocator starts at 0) */
+    if (!mach64_vram_span_ok(off, ((uint64_t)y + h) * pitch_px * M64_CBPP(p))) return;
     mach64_flush_batch(ctx);   /* order: pending triangles before the fill */
     m64_cb_init(&cb, p->scratch, sizeof(p->scratch) / sizeof(p->scratch[0]));
     m64_reg(&cb, MACH64_Z_CNTL,           0);
     m64_reg(&cb, MACH64_SCALE_3D_CNTL,    0);
     m64_reg(&cb, MACH64_GUI_TRAJ_CNTL,    (1u<<0) | (1u<<1));    /* L->R, T->B */
-    m64_reg(&cb, MACH64_DP_PIX_WIDTH,     0x60060666u);          /* 32bpp */
-    m64_reg(&cb, MACH64_DP_FRGD_CLR,      color);
+    m64_reg(&cb, MACH64_DP_PIX_WIDTH,     M64_PIXW(p));
+    m64_reg(&cb, MACH64_DP_FRGD_CLR,      m64_pack_cpix(p, color));
     m64_reg(&cb, MACH64_DP_WRITE_MASK,    0xffffffffu);
     m64_reg(&cb, MACH64_DP_MIX,           (3u<<0) | (7u<<16));   /* BKGD_MIX_D|FRGD_MIX_S */
     m64_reg(&cb, MACH64_DP_SRC,           (1u<<0) | (1u<<8));    /* both srcs = FRGD_CLR */
@@ -343,38 +362,55 @@ typedef struct {
     uint32_t tail[16];                /* +20.. (idx@+48 etc.)                        */
 } apple_surf_data;
 
-/* PATH B present: composite the bound surface to the live scanout via Apple's
- * surface_flush (surface sel 10) -- the LIVE-confirmed, race-free PIO 2D blit
- * (build_swap, backing->scanout, NO CRTC touch).  write_lock/unlock bracket the
- * surface's CPU-coherence protocol and hand back the backing geometry.  For now this
- * also LOGS the backing so the first HW run resolves the open question: is a GL-bound
- * surface's backing VRAM (engine renders straight in) or system memory (needs a
- * render->backing copy bridge)?  The pixel bridge is finished once HW answers that. */
-/* Extract the app's glClearColor from the gli as 0xAARRGGBB (alpha forced 0xff). */
-static uint32_t mach64_clear_argb(gld_context *ctx)
-{
-    uint32_t gli = mach64_gli(ctx);
-    float rf = 0.0f, gf = 0.0f, bf = 0.0f;
-    if (gli) {
-        uint32_t rb = mach64_gli_u32(ctx, GLI_CLEAR_COLOR + 0);
-        uint32_t gb = mach64_gli_u32(ctx, GLI_CLEAR_COLOR + 4);
-        uint32_t bb = mach64_gli_u32(ctx, GLI_CLEAR_COLOR + 8);
-        __builtin_memcpy(&rf, &rb, 4); __builtin_memcpy(&gf, &gb, 4); __builtin_memcpy(&bf, &bb, 4);
-    }
-    return 0xff000000u | (clampc(rf) << 16) | (clampc(gf) << 8) | clampc(bf);
-}
-
-/* PATH B present (Increment 2, HW-PROVEN 2026-09-06): the engine has ALREADY rendered into the
+/* PATH B present (HW-PROVEN 2026-09-06): the engine has ALREADY rendered into the
  * surface's VRAM buffer (surf[0x12c] == p->target_off) via mach64_submit.  Present = surface_flush
  * ONLY: flush_surface -> build_swap blits the buffer to the live scanout.  Do NOT write_lock /
  * CPU-fill the backing -- that sets the surface dirty bit, so clientMemoryForType/flush would copy
  * the backing OVER our engine render and clobber it (the prime cleared that bit; keep it clear). */
-void mach64_pathb_present(gld_context *ctx)
+/* Visible part of the window (its rect minus every window in front of it, from CGS) -> the surface shape.  build_swap blits the backing only to
+ * the shape's rectangles, so this is what keeps a window from painting over windows raised above it.  Returns 1 if the shape was changed (set_shape
+ * re-allocates the backing: the caller must re-prime / re-read the render target, and must not flush the frame that was rendered into the old one).
+ * `force` re-derives now; otherwise every 4th call.  Also maintains p->vis_hidden (completely covered -> present nothing). */
+int mach64_vis_update(gld_context *ctx, int force)
 {
     mach64_priv *p = MACH64_PRIV(ctx);
+    short vr[32][4]; int n, i;
+    uint32_t sig = 2166136261u;
+    if (!p->apple_surf_cn || !p->win_mode || !p->cgs_win) return 0;
+    if (!force && (p->vis_tick++ & 3u) != 0) return 0;
+    n = mach64_cgs_visible_rects(p->cgs_win, p->cgs_surf, (int)p->win_x, (int)p->win_y, (int)p->fb_w, (int)p->fb_h, vr, 32);
+    if (n < 0) return 0;
+    p->vis_hidden = (n == 0) ? 1u : 0u;
+    for (i = 0; i < n; i++) { int k; for (k = 0; k < 4; k++) sig = (sig ^ (uint16_t)vr[i][k]) * 16777619u; }
+    sig ^= (uint32_t)n << 24;
+    if (sig == p->vis_sig) return 0;
+    p->vis_sig = sig;
+    mach64_dma_fence();   /* a queued present may still be blitting through this surface: let it finish before the backing is re-allocated */
+    mach64_apple_reshape((unsigned)p->apple_surf_cn, (const short (*)[4])vr, n, (int)p->win_x, (int)p->win_y, (int)p->fb_w, (int)p->fb_h);
+    return 1;
+}
+
+int mach64_async_present_ok(gld_context *ctx);
+int mach64_frame_end_async(gld_context *ctx);
+int mach64_present_async(gld_context *ctx, unsigned surf);
+void mach64_pathb_present(gld_context *ctx)
+{
+    int async_ok = mach64_async_present_ok(ctx);
+    mach64_priv *p = MACH64_PRIV(ctx);
     io_connect_t surf = (io_connect_t)p->apple_surf_cn;
+    if (!async_ok) mach64_dma_fence();
     if (!surf) return;
+    /* set_shape re-allocated the backing (the render target moved): re-prime and re-read the target, and do NOT flush this frame -- it was
+     * rendered into the old, now freed, backing.  The next frame renders into the new one. */
+    if (mach64_vis_update(ctx, 0)) { mach64_pathb_setup_target(ctx); return; }
+    /* Completely covered by windows in front: present NOTHING (a stale shape made the window keep painting over the screen saver / a Terminal
+     * window).  The check runs every 4th frame, so the window is presented again as soon as part of it is uncovered. */
+    if (p->win_mode && p->cgs_win && p->vis_hidden) return;
+    if (async_ok && mach64_present_async(ctx, (unsigned)surf) == 0) return;   /* queued behind the frame's batches: the worker does finish + surface_flush + finish */
+    mach64_dma_fence();
     IOConnectMethodScalarIScalarO(surf, kATIRProSurf_surface_flush, 2, 0, 1u, 0u);
+    /* the present's scaler blit runs asynchronously: without this fence the NEXT frame's colour clear races it and wipes the bottom rows before they are read */
+    IOConnectMethodScalarIStructureI(ctx->connect, kATIRPro_finish, 0, 0, NULL);
 }
 
 /* After the surface is bound: (1) PRIME it -- surface write_lock(14)+unlock(15)+flush(10) allocates
@@ -397,19 +433,15 @@ uint32_t mach64_vram_alloc(gld_context *ctx, uint32_t size, uint32_t *record_out
     kern_return_t k;
     if (record_out) *record_out = 0;
     in[0] = kATIRPro_TEXOP_ALLOC; in[1] = size;
-    gld_log("[vram] -> calling new_texture ALLOC size=%u (sel 10 op=1)...\n", size);   /* fsync'd: last line if it panics */
     k = IOConnectMethodStructureIStructureO(ctx->connect, kATIRPro_new_texture,
                                             sizeof in, &osz, in, out);
-    gld_log("[vram] <- alloc returned kr=0x%x out=[0x%x,0x%x]\n", (unsigned)k, out[0], out[1]);
-    if (k != 0) { gld_log("[vram] alloc(%u) kr=0x%x (allocator selector absent)\n", size, (unsigned)k); return 0; }
-    if (!out[0] || out[0] >= 0x800000u || (out[0] & 7u)) {   /* insane -> reject (OOM or wrong kext) */
-        gld_log("[vram] alloc(%u) -> bad off=0x%x rec=0x%x -- reject\n", size, out[0], out[1]);
+    if (k != 0) return 0;
+    if (!out[0] || !mach64_vram_span_ok(out[0], size) || (out[0] & 7u)) {   /* insane -> reject (OOM or wrong kext) */
         if (out[1]) { uint32_t f[2]={kATIRPro_TEXOP_FREE,out[1]}, o2[2]; IOByteCount z=sizeof o2;   /* free the record */
             IOConnectMethodStructureIStructureO(ctx->connect, kATIRPro_new_texture, sizeof f, &z, f, o2); }
         return 0;
     }
     if (record_out) *record_out = out[1];
-    gld_log("[vram] alloc(%u) -> off=0x%x record=0x%x\n", size, out[0], out[1]);
     return out[0];
 }
 
@@ -421,63 +453,13 @@ void mach64_vram_free(gld_context *ctx, uint32_t record)
     IOConnectMethodStructureIStructureO(ctx->connect, kATIRPro_new_texture, sizeof in, &osz, in, out);
 }
 
-/* AGP/GART texture ALLOC via the multiplexed new_texture selector (sel 10, op=3) on the v7 kext.
- * The kext calls new_agp_texture(Shared=userclient[0x88], j=0, size, &out)@0xf64c to reserve `size`
- * bytes of SYSTEM RAM through the GART aperture, then GART-maps it via addToGART(accel, tex[0x04],
- * &gart)@0x4398 -- both under the accel[0x544] mutex.  Input is just {op, size} (8 bytes), so no MIG
- * size limit.  Returns the aperture offset to program as TEX_0_OFF (0 on failure) and reports the
- * client token, the buffer's KERNEL VA (for chunked uploads), and the kernel tex handle.  Independent
- * of VRAM, so it works at FULLSCREEN where VRAM is too cramped for a texheap.  Texels are NOT sent
- * here (they'd blow the ~4KB inline-struct limit -> MIG_ARRAY_TOO_LARGE); upload them separately with
- * mach64_agp_upload().  Free is op=4 (not yet wired -- leak is fine for now). */
-uint32_t mach64_agp_alloc(gld_context *ctx, uint32_t size,
-                          uint32_t *token_out, uint32_t *kva_out, uint32_t *handle_out)
+int m64_peek(io_connect_t conn, int selector, uint32_t kaddr, uint32_t *out)
 {
-    uint32_t in[2] = { kATIRPro_TEXOP_AGP_ALLOC, 0 };
-    uint32_t out[4] = {0,0,0,0};
-    IOByteCount osz = sizeof out;
-    kern_return_t k;
-    if (token_out)  *token_out  = 0;
-    if (kva_out)    *kva_out    = 0;
-    if (handle_out) *handle_out = 0;
-    if (!ctx->connect || !size) return 0;
-    in[1] = size;
-    gld_log("[agp] -> new_agp_texture ALLOC size=%u (sel 10 op=3)...\n", size);   /* fsync'd: last line if it panics */
-    k = IOConnectMethodStructureIStructureO(ctx->connect, kATIRPro_new_texture,
-                                            sizeof in, &osz, in, out);
-    gld_log("[agp] <- kr=0x%x out=[gart=0x%x token=0x%x kva=0x%x handle=0x%x]\n",
-            (unsigned)k, out[0], out[1], out[2], out[3]);
-    if (k != 0 || !out[0]) return 0;
-    if (token_out)  *token_out  = out[1];
-    if (kva_out)    *kva_out    = out[2];
-    if (handle_out) *handle_out = out[3];
-    return out[0];
-}
-
-/* Upload ARGB texels into a previously-agp-allocated buffer via sel 10 op=5 (chunked).  The kext
- * memcpy's each chunk into (handle[0x94] + dst_off) -- i.e. the buffer's kernel VA.  Chunked the same
- * way as the VRAM op=0 path (<= 2000 texels/call) to stay under the inline-struct limit. */
-void mach64_agp_upload(gld_context *ctx, uint32_t handle, const uint32_t *argb, uint32_t count)
-{
-    uint32_t i = 0;
-#define AGP_CHUNK 2000u                      /* texels/call -> struct <= 12 + 8000 bytes */
-    if (!ctx->connect || !handle || !argb) return;
-    gld_log("[agp] -> upload handle=0x%x count=%u (sel 10 op=5, chunked)...\n", handle, count);
-    while (i < count) {
-        uint32_t n = count - i; if (n > AGP_CHUNK) n = AGP_CHUNK;
-        uint32_t buf[3 + AGP_CHUNK];         /* [0]=op(5) [1]=handle [2]=dst byte off [3..]=ARGB */
-        uint32_t out[2] = {0,0}; IOByteCount osz = sizeof out;
-        uint32_t j;
-        buf[0] = kATIRPro_TEXOP_AGP_UPLOAD;
-        buf[1] = handle;
-        buf[2] = i * 4u;
-        for (j = 0; j < n; j++) buf[3 + j] = argb[i + j];
-        IOConnectMethodStructureIStructureO(ctx->connect, kATIRPro_new_texture,
-                                            (uint32_t)(12u + n * 4u), &osz, buf, out);
-        i += n;
+    if (kaddr < 0x10000u || kaddr > M64_KADDR_MAX || (kaddr & 3u)) {
+        if (out) *out = 0;
+        return -1;
     }
-    gld_log("[agp] upload done (no panic)\n");
-#undef AGP_CHUNK
+    return IOConnectMethodScalarIScalarO(conn, selector, 1, 1, 0x80000000u | kaddr, out);
 }
 
 void mach64_pathb_setup_target(gld_context *ctx)
@@ -485,27 +467,20 @@ void mach64_pathb_setup_target(gld_context *ctx)
     mach64_priv *p = MACH64_PRIV(ctx);
     io_connect_t sc = (io_connect_t)p->apple_surf_cn;
     io_connect_t gc = ctx->connect;
-    uint32_t surf = 0, desc = 0, rt = 0, mode154 = 0, d178 = 0, d12c = 0;
-    gld_log("[st] begin sc=0x%x gc=0x%x\n", (unsigned)sc, (unsigned)gc);   /* DIAG: fsync'd step markers */
-    /* PROBE (log-only, BEFORE the prime present): read the surface's display association.  Per RE, a
+    uint32_t surf = 0, desc = 0, rt = 0, d178 = 0;
+    /* Read the surface's display association (before the prime present).  Per RE, a
      * surface with a VALID display index (surf[0x178] != 0xffff) has resetFullScreen repoint its present
      * DST (surf[0x12c]) to the LIVE scanout (ignoring the 0x20 blit bit), which races Apple's IONDRV
      * framebuffer -> panic.  surf[0x12c]==surf+0xcc means the DST is the private backing (safe). */
     IOConnectMethodScalarIScalarO(gc, kATIRPro_scale_surface, 1, 1, 0x10cu, &surf);
-    if (surf > 0x10000u && surf < 0x40000000u) {
-        IOConnectMethodScalarIScalarO(gc, kATIRPro_scale_surface, 1, 1, 0x80000000u | (surf + 0x178u), &d178);
-        IOConnectMethodScalarIScalarO(gc, kATIRPro_scale_surface, 1, 1, 0x80000000u | (surf + 0x12cu), &d12c);
-        IOConnectMethodScalarIScalarO(gc, kATIRPro_scale_surface, 1, 1, 0x80000000u | (surf + 0x154u), &mode154);
-        gld_log("[st] PROBE surf=0x%x surf[0x178]=0x%x surf[0x12c]=0x%x surf[0x154]=0x%x\n",
-                surf, d178, d12c, mode154);
+    if (surf > 0x10000u && surf <= M64_KADDR_MAX) {
+        m64_peek(gc, kATIRPro_scale_surface, (surf + 0x178u), &d178);
         /* SAFETY BAIL: windowed (works) has surf[0x178]==0xffff (HW-confirmed).  A surface with a valid
          * display index has its present DST repointed to the LIVE scanout -> races IONDRV -> panic.  So
          * do NOT prime/present a display-associated surface: bail here (no prime), and render_ctl skips
          * the present too (p->present_unsafe).  Renders nothing rather than panicking. */
         if ((d178 & 0xffffu) != 0xffffu) {
             p->present_unsafe = 1;
-            gld_log("[st] surf[0x178]=0x%x != 0xffff -> DISPLAY-ASSOCIATED (present races scanout); "
-                    "BAILING, no prime/present\n", d178);
             return;
         }
         p->present_unsafe = 0;
@@ -518,96 +493,26 @@ void mach64_pathb_setup_target(gld_context *ctx)
          * in the surface, never a stale/scanout offset), but skip the prime present here and the frame
          * present in render_ctl -- blank well, no garbage, no panic.  EVERY working case (windowed +
          * fullscreen, textured/flat) is double-buffered, so dbuf=1 paths are unaffected. */
-        p->preview_lock = 0;
-        if (!p->dbuf) {
-            /* Peek the DESKTOP SCANOUT base+pitch from accel[0x130] (the kext's cached CRTC_OFF_PITCH,
-             * same packed format as our rt) -- the DST for the stock-ICD-style windowed present blit. */
-            uint32_t acc = 0, sop = 0;
-            IOConnectMethodScalarIScalarO(gc, 14, 1, 1, 0xb0u, &acc);   /* ctx[0xb0] = accel */
-            if (acc > 0x10000u && acc < 0x40000000u)
-                IOConnectMethodScalarIScalarO(gc, 14, 1, 1, 0x80000000u | (acc + 0x130u), &sop);
-            if (sop) { p->scanout_off = (sop & 0x3fffffu) << 3; p->scanout_pitch = ((sop >> 22) & 0x3ffu) << 3; }
-            gld_log("[st] scanout: accel=0x%x accel[0x130]=0x%x -> off=0x%x pitch=%upx\n",
-                    acc, sop, p->scanout_off, p->scanout_pitch);
-        }
-        if (!p->dbuf && getenv("MACH64_SB_PRESENT") && p->win_x == 0 && p->win_y == 0 && p->fb_w >= 640) {
-            /* SINGLE-BUFFERED FULLSCREEN present via the kext's surface_flush (build_swap presents to the
-             * REAL scanout, like our fullscreen path).  GATED to fullscreen-ish (origin + >=640 wide) --
-             * the small composited PREVIEW well surface_flush mis-positions to (0,0) AND WEDGES the engine
-             * (HW-confirmed twice), so the preview must NOT take this path; it stays blank-safe below. */
-            gld_log("[st] single-buffered FULLSCREEN SB_PRESENT -> surface_flush at gldFlush (kext scanout)\n");
-        }
-        else if (!p->dbuf && getenv("MACH64_PREVIEW_LOCK")) {
-            /* OPT-IN: present the single-buffered windowed surface via the IOAccelSurface lock/unlock
-             * arbitration (render_ctl), the CORRECT Quartz-Extreme windowed protocol -- NOT surface_flush
-             * (which mis-positions + wedges).  Skip the prime flush below too.  Safe-but-blank if our
-             * surface isn't the CGS-bound one QE composites; never wedges (lock/unlock arbitrates). */
-            p->preview_lock = 1;
-            gld_log("[st] single-buffered PREVIEW_LOCK -> lock/unlock present (QE composite), no flush\n");
-        } else if (!p->dbuf) {
+        /* A single-buffered window other than a fullscreen-ish one (origin + >= 640 wide) is the small composited PREVIEW well:
+         * surface_flush mis-positions it to (0,0) AND wedges the engine (HW-confirmed twice), so it stays blank-safe. */
+        if (!p->dbuf && !(p->win_x == 0 && p->win_y == 0 && p->fb_w >= 640))
             p->present_unsafe = 1;
-            gld_log("[st] single-buffered surface (dbuf=0, win_mode=%u %ux%u @ %u,%u) -> present SKIPPED "
-                    "(blank, safe); still binding RT\n", p->win_mode, p->fb_w, p->fb_h, p->win_x, p->win_y);
-        }
-        /* FULLSCREEN SHRINK-SURFACE (MACH64_FS_SHRINK): reallocate the color backing to a smaller WxH
-         * via set_scale (writes surf[0x140]/[0x142] -> shape_surface resizes the backing), freeing a
-         * VRAM hole for a real texheap; build_swap then presents it SCALED to the native display (the
-         * shape stays native).  Driver-only.  Log the backing off/pitch before & after (shape_surface
-         * may RELOCATE it) so the texheap lands in the freed hole.  Build A: shrink+log only, texheap
-         * still OFF (flat) -- confirms set_scale doesn't panic and reveals the hole + scale-vs-letterbox. */
-        if (p->fs_shrink_w && sc) {
-            uint32_t buf=0, rt0=0, s140=0, s158=0, shp=0;
-            uint16_t st[22];                     /* set_scale struct: 0x2c bytes; halfword [4]=w [6]=h */
-            kern_return_t kr;
-            IOConnectMethodScalarIScalarO(gc, kATIRPro_scale_surface, 1, 1, 0x80000000u|(surf+0x12cu), &buf);
-            if (buf > 0x10000u && buf < 0x40000000u)
-                IOConnectMethodScalarIScalarO(gc, kATIRPro_scale_surface, 1, 1, 0x80000000u|(buf+0x28u), &rt0);
-            IOConnectMethodScalarIScalarO(gc, kATIRPro_scale_surface, 1, 1, 0x80000000u|(surf+0x29cu), &shp);
-            gld_log("[fs] BEFORE set_scale: buf=0x%x rt=0x%x -> off=0x%x pitch=%u  shape[8:a]=0x%x\n",
-                    buf, rt0, (rt0 & 0x3fffffu) << 3, ((rt0 >> 22) & 0x3ffu) << 3, shp);
-            memset(st, 0, sizeof st);
-            st[2] = (uint16_t)p->fs_shrink_w;    /* byte 4 -> surf[0x140] width  */
-            st[3] = (uint16_t)p->fs_shrink_h;    /* byte 6 -> surf[0x142] height */
-            gld_log("[fs] -> set_scale %ux%u flags=0x3 size=0x2c...\n", p->fs_shrink_w, p->fs_shrink_h);
-            kr = IOConnectMethodScalarIStructureI(sc, kATIRProSurf_set_scale, 1, 0x2c, 0x3u, st);
-            gld_log("[fs] <- set_scale kr=0x%x\n", (unsigned)kr);
-            buf = 0; rt0 = 0;
-            IOConnectMethodScalarIScalarO(gc, kATIRPro_scale_surface, 1, 1, 0x80000000u|(surf+0x12cu), &buf);
-            if (buf > 0x10000u && buf < 0x40000000u)
-                IOConnectMethodScalarIScalarO(gc, kATIRPro_scale_surface, 1, 1, 0x80000000u|(buf+0x28u), &rt0);
-            IOConnectMethodScalarIScalarO(gc, kATIRPro_scale_surface, 1, 1, 0x80000000u|(surf+0x140u), &s140);
-            IOConnectMethodScalarIScalarO(gc, kATIRPro_scale_surface, 1, 1, 0x80000000u|(surf+0x158u), &s158);
-            gld_log("[fs] AFTER  set_scale: buf=0x%x rt=0x%x -> off=0x%x pitch=%u  surf[0x140:142]=0x%x active[0x158]=0x%x\n",
-                    buf, rt0, (rt0 & 0x3fffffu) << 3, ((rt0 >> 22) & 0x3ffu) << 3, s140, s158);
-        }
     }
-    if (sc && !p->present_unsafe && !p->preview_lock) {   /* skip prime for a blank-safe OR lock/unlock (preview) surface */
+    if (sc && !p->present_unsafe) {   /* skip prime for a blank-safe surface */
         apple_surf_data sd; IOByteCount ol = sizeof sd; memset(&sd, 0, sizeof sd);
-        gld_log("[st] write_lock...\n");
         IOConnectMethodScalarIStructureO(sc, kATIRProSurf_surface_write_lock, 0, &ol, &sd);
-        gld_log("[st] write_unlock...\n");
         IOConnectMethodScalarIScalarO(sc, kATIRProSurf_surface_write_unlock, 0, 0);
-        gld_log("[st] surface_flush (prime present)...\n");
         IOConnectMethodScalarIScalarO(sc, kATIRProSurf_surface_flush, 2, 0, 1u, 0u);
-        gld_log("[st] primed OK\n");
     }
     /* KERNEL-PEEK HAZARD: these are absolute kernel reads (0x80000000 flag).  Dereferencing a
      * bogus pointer PANICS the machine (docs hazard).  VALIDATE each peeked pointer is in the
      * kernel-heap range before feeding it to the next absolute peek -- a garbage value (0,
      * ~0, a userspace address) is skipped, leaving target_off 0 (caller renders nothing) rather
      * than panicking.  Observed-good: surf~0x1d84400, desc~0x1d8449c (kernel zalloc zone). */
-#define PEEK_OK(pp)  ((pp) > 0x10000u && (pp) < 0x40000000u)
-    gld_log("[st] peek ctx[0x10c]=surf...\n");
+#define PEEK_OK(pp)  ((pp) > 0x10000u && (pp) <= M64_KADDR_MAX)
     IOConnectMethodScalarIScalarO(gc, kATIRPro_scale_surface, 1, 1, 0x10cu, &surf);
-    gld_log("[st] surf=0x%x %s\n", surf, PEEK_OK(surf) ? "ok" : "BAD-skip");
-    if (PEEK_OK(surf)) {   /* DIAG: read surf[0x154] mode -> confirm blit bit 0x20 (else CRTC flip -> panic) */
-        IOConnectMethodScalarIScalarO(gc, kATIRPro_scale_surface, 1, 1, 0x80000000u | (surf + 0x154u), &mode154);
-        gld_log("[st] surf[0x154] mode=0x%x  (blit-bit 0x20 %s)\n", mode154, (mode154 & 0x20) ? "SET" : "CLEAR!");
-    }
-    if (PEEK_OK(surf)) IOConnectMethodScalarIScalarO(gc, kATIRPro_scale_surface, 1, 1, 0x80000000u | (surf + 0x12cu), &desc);
-    gld_log("[st] desc=0x%x %s\n", desc, PEEK_OK(desc) ? "ok" : "BAD-skip");
-    if (PEEK_OK(desc)) IOConnectMethodScalarIScalarO(gc, kATIRPro_scale_surface, 1, 1, 0x80000000u | (desc + 0x28u), &rt);
-    gld_log("[st] rt=0x%x\n", rt);
+    if (PEEK_OK(surf)) m64_peek(gc, kATIRPro_scale_surface, (surf + 0x12cu), &desc);
+    if (PEEK_OK(desc)) m64_peek(gc, kATIRPro_scale_surface, (desc + 0x28u), &rt);
 #undef PEEK_OK
     /* SAFETY: if the bound surface's backing didn't resolve (rt=0) we have NO valid render target --
      * geometry would fall back to the scratch/base offset and can render into live VRAM (HW-confirmed
@@ -616,7 +521,6 @@ void mach64_pathb_setup_target(gld_context *ctx)
     if (surf > 0x10000u && !rt) {
         p->render_skip = 1;
         p->present_unsafe = 1;
-        gld_log("[st] rt=0 (surface backing unresolved) -> RENDER SKIPPED (fail-to-black, no VRAM corruption)\n");
     } else if (rt) {
         p->render_skip = 0;
     }
@@ -630,6 +534,15 @@ void mach64_pathb_setup_target(gld_context *ctx)
          * the winpool set_render_target (0x6bb800) -- rendered into a buffer never presented,
          * so geometry was invisible while the clear showed. */
         mach64_set_render_target(ctx, toff, tpitch);
+        /* Bound the hardware scissor to the render surface.  GLEngine clips to its own viewport, which can extend past the bottom of the surface
+         * (Sonic R: 44 rows = the window's screen y-offset); with the scissor wide open that overshoot was rasterized into the VRAM after the
+         * colour surface and, for depth, after the Z buffer -- over the first texture of the texture heap (the 3D "R"'s) and into rows that are
+         * never cleared (stale Z failing later frames' pixels).  SC_RIGHT/SC_BOTTOM are inclusive. */
+        {   uint32_t sh = *(const uint32_t *)((const char *)ctx + 0x1f4);
+            if (sh && tpitch) {
+                MACH64_PRIV(ctx)->hw.sc_left_right = ((tpitch - 1u) << 16) | 0u;
+                MACH64_PRIV(ctx)->hw.sc_top_bottom = ((sh - 1u) << 16) | 0u;
+                MACH64_PRIV(ctx)->dirty |= MACH64_DIRTY_STATE; } }
         /* Depth buffer: place it in VRAM immediately AFTER our colour surface, overriding the
          * winpool guess (0x6bb800+).  [HW] the card is 8MB (ATY,MEMSIZE=0x800000), but the winpool
          * region collides with VRAM Apple actively uses (WindowServer backing / cursor) -> Z writes
@@ -638,50 +551,48 @@ void mach64_pathb_setup_target(gld_context *ctx)
          * Keep the drawable SMALL so colour(0x301000..) + Z stay below Apple's desktop surfaces:
          * a 320x240 window's colour(0x4b000)+Z(0x25800) end ~0x372000, well under 0x400000. */
         {   uint32_t vis_h = *(const uint32_t *)((const char *)ctx + 0x1f4);
-            uint32_t color_bytes = tpitch * 4u * vis_h;
+            uint32_t color_bytes = tpitch * M64_CBPP(MACH64_PRIV(ctx)) * vis_h;
             uint32_t zsize   = tpitch * 2u * vis_h;               /* 16-bit Z, same pixel width */
+            if (MACH64_PRIV(ctx)->win_mode) zsize += tpitch * 2u * (uint32_t)(MACH64_PRIV(ctx)->win_y > 0 ? MACH64_PRIV(ctx)->win_y : 0);   /* the present's blit addresses Z by SCREEN y (window origin included): cover rows up to win_y+h or the rows past the end read the texture heap as Z and fail the depth test */
             uint32_t texsize = 0x180000u;                         /* 1.5 MB texture heap        */
             uint32_t zoff = 0, theap = 0;
             /* PREFERRED: allocate Z + texture heap from Apple's OWN VRAM allocator (sel 10 op=ALLOC on
              * the v4 kext) -- collision-free at ANY surface size, so large/fullscreen textures+depth
              * work.  Falls back to the small-window guessed placement if the allocator isn't present
              * (unpatched kext) or is out of VRAM. */
-            /* OPT-IN (MACH64_VRAM_ALLOC=1): the v3 allocator PANICKED because it drove the shared VRAM
-             * heap UNLOCKED, racing the WindowServer.  The v4 kext wraps the best-fit in the
-             * accel[0x544] mutex (as the stock methods do), which should fix it -- but it still runs on
-             * EVERY attach, so keep it gated until validated on hardware.  Without the env var, use the
-             * proven small-window guessed placement. */
             /* Allocator ONLY for WINDOWED (win_mode): there Apple's best-fit heap knows the
              * WindowServer's allocations and is collision-free (HW-proven: agltexbig).  At FULLSCREEN
              * (win_mode==0) the same best-fit can return an offset overlapping the LIVE SCANOUT, and
              * the texture upload into it corrupts the display -> KERNEL PANIC (HW-proven: flurryfs).
              * So fullscreen uses NO allocator: Z falls back (depth off if it won't fit) and the texheap
              * is placed manually in the tail past our own backing (below). */
-            int use_alloc = (getenv("MACH64_VRAM_ALLOC") != 0) && MACH64_PRIV(ctx)->win_mode;
+            int use_alloc = MACH64_PRIV(ctx)->win_mode;   /* the guessed gap past the colour surface collides with a second window's surface/Z (measured: overlapping Atlantis windows corrupted each other) */
             if (p->z_record)   { mach64_vram_free(ctx, p->z_record);   p->z_record = 0; }   /* re-attach: no leak */
             if (p->tex_record) { mach64_vram_free(ctx, p->tex_record); p->tex_record = 0; }
             if (vis_h && use_alloc) {
                 zoff  = mach64_vram_alloc(ctx, zsize,   &p->z_record);
-                theap = mach64_vram_alloc(ctx, texsize, &p->tex_record);
+                /* Largest texture heap the allocator will give: the card has 8 MB and a 640x480 window needs well under half; a bigger heap stops
+                 * Sonic R's ~50 tpages from thrashing.  Try 4, 3, 2 MB, then the 1.5 MB default. */
+                {   static const uint32_t try_kb[] = { 4096, 3072, 2048, 0 }; int ti = 0;
+                    for (ti = 0; try_kb[ti]; ti++) {
+                        if (p->tex_record) { mach64_vram_free(ctx, p->tex_record); p->tex_record = 0; }
+                        theap = mach64_vram_alloc(ctx, try_kb[ti] * 1024u, &p->tex_record);
+                        if (theap) { texsize = try_kb[ti] * 1024u; break; }
+                    }
+                    if (!theap) { if (p->tex_record) { mach64_vram_free(ctx, p->tex_record); p->tex_record = 0; } texsize = 0x180000u; theap = mach64_vram_alloc(ctx, texsize, &p->tex_record); }
+                }
             }
             if (zoff) {
                 mach64_set_zbuffer(ctx, zoff, tpitch);
-                gld_log("[pathb] z-buffer -> off=0x%x pitch=%u (Apple allocator)\n", p->z_off, p->z_pitch);
-            } else if (vis_h && !p->fs_shrink_w) {   /* fullscreen-shrink sets Z in its own branch below */
+            } else if (vis_h) {
                 /* FALLBACK: gap past the colour surface (small windows only -- see the historical
                  * white-clobber note; writing Z inside the surface's tracked range clobbers present).
                  * BOUNDS-GUARD: at fullscreen size this gap lands PAST 8MB VRAM (e.g. 1024x768 ->
                  * 0xa78000) -- writing Z there is out-of-bounds and corrupts the machine.  Only use it
-                 * if it fits; otherwise skip Z (depth off) -- use MACH64_VRAM_ALLOC=1 for depth here. */
+                 * if it fits; otherwise skip Z (depth off). */
                 uint32_t zguess = toff + 2u * color_bytes;
-                if (zguess + zsize <= 0x800000u) {
+                if (zguess + zsize <= 0x800000u)
                     mach64_set_zbuffer(ctx, zguess, tpitch);
-                    gld_log("[pathb] z-buffer -> off=0x%x pitch=%u (guessed gap; small window only)\n",
-                            p->z_off, p->z_pitch);
-                } else {
-                    gld_log("[pathb] z-buffer SKIPPED: guess 0x%x+0x%x past 8MB VRAM -- depth off "
-                            "(set MACH64_VRAM_ALLOC=1 for depth at this size)\n", zguess, zsize);
-                }
             }
             if (theap) {
                 mach64_set_texheap(theap, theap + texsize);       /* windowed: Apple-allocated -> safe */
@@ -689,84 +600,16 @@ void mach64_pathb_setup_target(gld_context *ctx)
                 /* WINDOWED small-window fallback (no allocator): gap after Z, < 0x400000. */
                 uint32_t g = p->z_off ? p->z_off + zsize : (toff + 2u * color_bytes);
                 if (g < 0x3f0000u) mach64_set_texheap(g, 0x400000u);
-                else { mach64_set_texheap(0, 0);
-                       gld_log("[pathb] texheap: no safe room (0x%x) -- textures OFF\n", g); }
-            } else if (vis_h && p->fs_shrink_w) {
-                /* FULLSCREEN SHRINK-SURFACE: with the color backing shrunk to 800x600 (~1.9MB) there's
-                 * now free VRAM for a texheap.  Get it from Apple's MUTEX-LOCKED best-fit heap (op=1) --
-                 * the SAFE way: the heap tracks Apple's surfaces so it hands back a genuine hole, not a
-                 * scanout/surface collision (unlike a fixed guessed offset -- the backing was already
-                 * 800x600 at attach, so the "tail" past it is NOT known-free).  Validate the returned
-                 * offset is in VRAM and doesn't overlap our own color backing before enabling textures;
-                 * fall back to flat (texheap OFF, stable) if it fails.  Reuses the proven op0 upload. */
-                uint32_t fs_texsize = 0x100000u;   /* 1MB heap: fits the freed hole, holds a 512^2 + a few */
-                uint32_t th = 0, zh = 0;
-                /* DEPTH: place the Z buffer via the same locked heap.  It found the texheap hole safely
-                 * (right after the color backing), so it also finds Z room (e.g. the ~1.5MB gap before
-                 * the backing).  Z and tex come from the same heap -> guaranteed non-overlapping; both
-                 * validated vs the color backing.  Falls back to depth-off (not a panic) if unsafe. */
-                if (p->z_record) { mach64_vram_free(ctx, p->z_record); p->z_record = 0; }
-                zh = mach64_vram_alloc(ctx, zsize, &p->z_record);
-                if (zh && zh + zsize <= 0x800000u &&
-                    (zh + zsize <= toff || zh >= toff + color_bytes)) {
-                    mach64_set_zbuffer(ctx, zh, tpitch);
-                    gld_log("[pathb] z-buffer: FULLSCREEN SHRINK -> off=0x%x pitch=%u (Apple allocator)\n", zh, tpitch);
-                } else {
-                    if (p->z_record) { mach64_vram_free(ctx, p->z_record); p->z_record = 0; }
-                    gld_log("[pathb] z-buffer: FS-SHRINK alloc unsafe/failed (0x%x vs color [0x%x,0x%x)) -- depth off\n",
-                            zh, toff, toff + color_bytes);
-                }
-                if (p->tex_record) { mach64_vram_free(ctx, p->tex_record); p->tex_record = 0; }
-                th = mach64_vram_alloc(ctx, fs_texsize, &p->tex_record);   /* validates VRAM-range/align */
-                if (th && th + fs_texsize <= 0x800000u &&
-                    (th + fs_texsize <= toff || th >= toff + color_bytes)) {   /* not over color backing */
-                    mach64_set_texheap(th, th + fs_texsize);
-                    gld_log("[pathb] texheap: FULLSCREEN SHRINK -> [0x%x,0x%x) (Apple allocator; color [0x%x,0x%x))\n",
-                            th, th + fs_texsize, toff, toff + color_bytes);
-                } else {
-                    if (p->tex_record) { mach64_vram_free(ctx, p->tex_record); p->tex_record = 0; }
-                    mach64_set_texheap(0, 0);
-                    gld_log("[pathb] texheap: FS-SHRINK alloc unsafe/failed (off=0x%x vs color [0x%x,0x%x)) -- OFF (flat)\n",
-                            th, toff, toff + color_bytes);
-                }
+                else mach64_set_texheap(0, 0);
             } else if (vis_h) {
-                /* FULLSCREEN (no shrink): at native size the VRAM is too cramped for a KNOWN-safe texheap
+                /* FULLSCREEN: at native size the VRAM is too cramped for a KNOWN-safe texheap
                  * -- the tail past our backing collides with Apple's framebuffer/cursor (HW: black->panic),
                  * and the allocator can hand back a scanout-colliding offset.  Mark the heap INVALID (0,0)
-                 * so texture uploads SKIP -> fullscreen renders UNTEXTURED but STABLE (HW-proven flat).
-                 * Textured fullscreen uses the shrink-surface path above (MACH64_FS_SHRINK=1). */
+                 * so texture uploads SKIP -> fullscreen renders UNTEXTURED but STABLE (HW-proven flat). */
                 mach64_set_texheap(0, 0);
-                gld_log("[pathb] texheap: FULLSCREEN -> OFF (no known-safe region; untextured, stable)\n");
-                /* AGP PROBE (opt-in, MACH64_AGP_PROBE=1): confirm the v6 kext AGP path end-to-end and
-                 * reveal gart_off's address space BEFORE wiring TEX_0_OFF sampling.  Allocs+uploads one
-                 * 64x64 texture in GART and logs the returned aperture offset.  Does NOT program any
-                 * texture register, so the render stays the stable untextured path -- no panic risk from
-                 * sampling a mis-mapped address.  Once gart_off is confirmed sane (>= 8MB aperture range),
-                 * the real path programs TEX_0_OFF = gart_off. */
-                if (getenv("MACH64_AGP_PROBE")) {
-                    uint32_t tok = 0, kva = 0, hnd = 0;
-                    uint32_t g = mach64_agp_alloc(ctx, 64u * 64u * 4u, &tok, &kva, &hnd);
-                    gld_log("[agp] PROBE gart_off=0x%x token=0x%x kva=0x%x handle=0x%x %s\n", g, tok, kva, hnd,
-                            g ? (g >= 0x800000u ? "(APERTURE range >8MB -- TEX_0_OFF=gart_off)"
-                                                : "(LOW/VRAM range -- needs aperture base)")
-                              : "(FAILED)");
-                    /* exercise the chunked upload path too (op=5): 64x64 checkerboard into the GART
-                     * buffer.  Still NO sampling (no TEX_0_OFF programmed) -- just proves op=5 doesn't
-                     * panic and the kernel-VA memcpy works. */
-                    if (g && hnd) {
-                        static uint32_t chk[64 * 64];
-                        int yy, xx;
-                        for (yy = 0; yy < 64; yy++)
-                            for (xx = 0; xx < 64; xx++)
-                                chk[yy * 64 + xx] = ((xx ^ yy) & 8) ? 0xffff0000u : 0xff00ff00u;
-                        mach64_agp_upload(ctx, hnd, chk, 64u * 64u);
-                    }
-                }
             }
         }
     }
-    gld_log("[pathb] setup target: surf=0x%x desc=0x%x rt=0x%08x -> off=0x%x pitch=%u\n",
-            surf, desc, rt, p->target_off, p->target_pitch);
 }
 
 /* Page-flip: switch the CRTC scanout base to the colour buffer at byte offset `off`.
@@ -789,13 +632,7 @@ void mach64_flip(gld_context *ctx, uint32_t off)
 void mach64_wait_flip(gld_context *ctx)
 {
     if (!ctx->connect) return;
-#ifdef GLD_PERF
-    { unsigned long a = perf_now_us();
-      IOConnectMethodScalarIScalarO(ctx->connect, kMach64Sel_wait_flip, 0, 0);
-      g_perf_wait_us += perf_now_us() - a; }
-#else
     IOConnectMethodScalarIScalarO(ctx->connect, kMach64Sel_wait_flip, 0, 0);
-#endif
 }
 
 /* ---- screen-to-screen (VRAM->VRAM) blit via the 2D GUI engine --------
@@ -812,12 +649,14 @@ void mach64_blit_surface(gld_context *ctx, uint32_t src_off, uint32_t dst_off,
     m64_cmdbuf cb;
     uint32_t op = (pitch_px / 8) << 22;
     if (!src_off || !dst_off || !w || !h) return;
+    if (!mach64_vram_span_ok(src_off, ((uint64_t)sy + h) * pitch_px * M64_CBPP(p)) || !mach64_vram_span_ok(dst_off, ((uint64_t)dy + h) * pitch_px * M64_CBPP(p)))
+        return;
     mach64_flush_batch(ctx);   /* order: pending triangles before the blit */
     m64_cb_init(&cb, p->scratch, sizeof(p->scratch) / sizeof(p->scratch[0]));
     m64_reg(&cb, MACH64_Z_CNTL,           0);               /* Z off for the blit */
     m64_reg(&cb, MACH64_SCALE_3D_CNTL,    0);
     m64_reg(&cb, MACH64_GUI_TRAJ_CNTL,    (1u<<0) | (1u<<1));    /* L->R, T->B */
-    m64_reg(&cb, MACH64_DP_PIX_WIDTH,     0x60060666u);          /* 32bpp */
+    m64_reg(&cb, MACH64_DP_PIX_WIDTH,     M64_PIXW(p));
     m64_reg(&cb, MACH64_DP_WRITE_MASK,    0xffffffffu);
     m64_reg(&cb, MACH64_DP_MIX,           MACH64_DP_MIX_DS);     /* BKGD_MIX_D|FRGD_MIX_S */
     m64_reg(&cb, MACH64_DP_SRC,           MACH64_DP_SRC_BLIT);   /* FRGD_SRC_BLIT */
@@ -852,7 +691,7 @@ void mach64_blit_2pitch(gld_context *ctx, uint32_t src_off, uint32_t src_pitch_p
     m64_reg(&cb, MACH64_Z_CNTL,           0);
     m64_reg(&cb, MACH64_SCALE_3D_CNTL,    0);
     m64_reg(&cb, MACH64_GUI_TRAJ_CNTL,    (1u<<0) | (1u<<1));
-    m64_reg(&cb, MACH64_DP_PIX_WIDTH,     0x60060666u);
+    m64_reg(&cb, MACH64_DP_PIX_WIDTH,     M64_PIXW(p));
     m64_reg(&cb, MACH64_DP_WRITE_MASK,    0xffffffffu);
     m64_reg(&cb, MACH64_DP_MIX,           MACH64_DP_MIX_DS);
     m64_reg(&cb, MACH64_DP_SRC,           MACH64_DP_SRC_BLIT);
@@ -879,13 +718,15 @@ void mach64_blit_2pitch(gld_context *ctx, uint32_t src_off, uint32_t src_pitch_p
 /* Submit the accumulated triangle batch (if any) as ONE DMA kick, then reset it.
  * Called at frame boundaries (gldFlush/Finish/FlushBuffer) and before any operation
  * that must observe the triangles (fill/blit/clear/texture upload). */
+uint32_t mach64_batch_gen = 1;   /* bumped at every real submit; texture slots stamp the generation they were last bound in */
 void mach64_flush_batch(gld_context *ctx)
 {
     mach64_priv *p = MACH64_PRIV(ctx);
+    mach64_dma_fence();   /* 'drain everything' must include a job in flight */
     if (!p->batch.buf || p->batch.n == 0) return;
+    mach64_batch_gen++;
     mach64_submit(ctx, &p->batch);
-    m64_cb_init(&p->batch, p->batchbuf,
-                sizeof(p->batchbuf) / sizeof(p->batchbuf[0]));
+    m64_cb_init(&p->batch, M64_BSTORE(p), 32768);
     /* A submit only guarantees the emitted stream ran; the next batch must re-emit the
      * render state (don't assume it survives the submit's engine quiesce/restore).  Needed
      * now that large geometry splits across several submits within one frame. */
@@ -912,15 +753,148 @@ static void mach64_frame_start(gld_context *ctx)
          * screen.  batch_clear_color marks state dirty so the following triangle re-emits full 3D
          * state after the 2D clear regs. */
         mach64_batch_clear_color(ctx);
-        if (p->z_off && (p->hw.z_cntl & MACH64_Z_EN))
-            mach64_batch_clear_zbuffer(ctx);   /* batched (NOT a separate submit): keep the frame
-                                                * a single drain so the backing copy can't clobber */
+        p->z_clear_pending = 1;   /* the Z clear is OWED for this frame -- see below */
         p->frame_new = 0;
+    }
+    /* Z clear: do it on the first draw of the frame that actually uses depth.  A frame's FIRST draws
+     * are often depth-off (backgrounds, fade overlays); clearing Z only if Z_EN happened to be set on
+     * the frame's very first draw consumed the clear without clearing, so depth from earlier frames
+     * (e.g. a full-window quad at z=220 from a logo screen) survived and failed the later frames'
+     * geometry (Sonic R: the bottom of the title and chunks of the in-game scene missing).  Draws
+     * made with Z_EN off never touch the depth buffer, so deferring the clear loses nothing. */
+    if (p->z_clear_pending && p->z_off && (p->hw.z_cntl & MACH64_Z_EN)) {
+        mach64_batch_clear_zbuffer(ctx);   /* batched (NOT a separate submit): keep the frame
+                                            * a single drain so the backing copy can't clobber */
+        p->z_clear_pending = 0;
     }
 }
 
-int mach64_draw_triangle(gld_context *ctx, const m64_vertex *v0,
-                         const m64_vertex *v1, const m64_vertex *v2)
+/* ---- vertex-DMA overflow flush (docs/re-notes/vertex-dma-plan.md) ----
+ * The patched ATIRagePro (patched9) answers GL selector 7 with a kernel bus-master submit handler: APPEND register-write packets (<= 4 KB per call, the IOKit
+ * struct-input limit), then SUBMIT = one descriptor-chained DMA through the engine, synchronous (returns when the engine has drained).  Unlike the PIO drain
+ * (map of type 1) it does not present, so it can run mid-frame.  Used only where the plugin used to DROP geometry: when the batch reaches one PIO command buffer. */
+static int vdma_avail(gld_context *ctx)
+{
+    static int st = -1;
+    if (mach64_eng_single() && mach64_eng_ready(ctx)) return 1;   /* single-thread engine: no kernel handler needed */
+    if (st >= 0) return st;
+    st = 0;
+    {   uint32_t a = 0, b = 0, c = 0;
+        /* sel 6 = get_surface_info on an unpatched kext (cold-safe miss -> 0xe00002c2) but kIOReturnUnsupported (0xe00002c7) on patched9, where sel 7 is the DMA handler */
+        kern_return_t kr = IOConnectMethodScalarIScalarO(ctx->connect, 6, 1, 3, 0xdead0000u, &a, &b, &c);
+        if (kr != 0xe00002c7u) return 0;
+        { uint32_t in[2] = { 7, 0 }, out[4]; size_t osz = 16;
+          kr = IOConnectMethodStructureIStructureO(ctx->connect, 7, 8, &osz, in, out);
+          if (kr) return 0; } }
+    st = 1; return 1;
+}
+
+/* Flush the batch (no terminator: the kernel appends its own) by DMA.  0 = done; -1 = nothing was drawn (caller drops, as before). */
+/* ---- asynchronous vertex-DMA submit ----
+ * The kernel submit blocks until the engine has drained (~36 of ~100 ms/frame in Sonic R) and spins the CPU meanwhile.  A worker thread performs vdma_flush while the game keeps
+ * building the next batch in the second buffer.  Rules: (1) at most one job in flight; handing off a second one first waits for the first (the fence); (2) EVERY other engine user
+ * -- PIO submit, batch flush, present, finish, real texture upload -- calls mach64_dma_fence() first, so ordering is exactly as before; (3) the kernel handler still holds
+ * accel[0x544] for the whole submit, so WindowServer exclusion is unchanged. */
+static int vdma_flush(gld_context *ctx, m64_cmdbuf *cb);
+#define VDMA_RING 4   /* number of batch buffers: up to ring-1 jobs queued/running at once, the game builds in the remaining buffer */
+static struct { pthread_mutex_t mu; pthread_cond_t cv_job, cv_done; m64_cmdbuf q[VDMA_RING]; gld_context *qctx[VDMA_RING]; unsigned qsurf[VDMA_RING]; /* 0 = batch job, else = present job on this surface connection */ int qhead, qcount, outstanding, started; } g_aw = { PTHREAD_MUTEX_INITIALIZER, PTHREAD_COND_INITIALIZER, PTHREAD_COND_INITIALIZER };
+void mach64_dma_fence(void)
+{
+    mach64_eng_fence();                      /* single-thread engine: drain it and give the accelerator back (no-op otherwise) */
+    if (!g_aw.started) return;
+    pthread_mutex_lock(&g_aw.mu); while (g_aw.outstanding > 0) pthread_cond_wait(&g_aw.cv_done, &g_aw.mu); pthread_mutex_unlock(&g_aw.mu);
+}
+static void *vdma_worker(void *arg)
+{
+    (void)arg;
+    for (;;) {
+        m64_cmdbuf job; gld_context *jc; unsigned jsurf;
+        pthread_mutex_lock(&g_aw.mu); while (g_aw.qcount == 0) pthread_cond_wait(&g_aw.cv_job, &g_aw.mu);
+        job = g_aw.q[g_aw.qhead]; jc = g_aw.qctx[g_aw.qhead]; jsurf = g_aw.qsurf[g_aw.qhead]; g_aw.qhead = (g_aw.qhead + 1) % VDMA_RING; g_aw.qcount--; pthread_mutex_unlock(&g_aw.mu);
+        if (jsurf) {   /* present job: retire the geometry, blit the surface to the scanout, retire the blit (the same three calls the synchronous present makes) */
+            IOConnectMethodScalarIStructureI(jc->connect, kATIRPro_finish, 0, 0, NULL);
+            IOConnectMethodScalarIScalarO((io_connect_t)jsurf, kATIRProSurf_surface_flush, 2, 0, 1u, 0u);
+            IOConnectMethodScalarIStructureI(jc->connect, kATIRPro_finish, 0, 0, NULL);
+        } else vdma_flush(jc, &job);
+        pthread_mutex_lock(&g_aw.mu); g_aw.outstanding--; pthread_cond_broadcast(&g_aw.cv_done); pthread_mutex_unlock(&g_aw.mu);
+    }
+    return 0;
+}
+/* hand the batch to the worker; the caller must then build in the OTHER buffer.  returns 0 on success */
+static int vdma_enqueue(gld_context *ctx, m64_cmdbuf *cb, unsigned surf)
+{
+    int slot;
+    if (!surf && (cb->overflow || cb->n == 0 || cb->n > 32000)) return -1;
+    if (mach64_eng_single() && mach64_eng_ready(ctx)) {     /* single-thread engine: no worker */
+        if (!surf) return mach64_eng_kick(ctx, (const uint32_t *)cb->buf, cb->n);
+        mach64_eng_fence();                                  /* present: drain the engine and release the accelerator, then the three Apple calls in this thread */
+        IOConnectMethodScalarIStructureI(ctx->connect, kATIRPro_finish, 0, 0, NULL);
+        IOConnectMethodScalarIScalarO((io_connect_t)surf, kATIRProSurf_surface_flush, 2, 0, 1u, 0u);
+        IOConnectMethodScalarIStructureI(ctx->connect, kATIRPro_finish, 0, 0, NULL);
+        return 0;
+    }
+    if (!g_aw.started) {
+        pthread_t th;
+        if (pthread_create(&th, 0, vdma_worker, 0) != 0) return -1;
+        pthread_detach(th); g_aw.started = 1;
+    }
+    {   /* back-pressure: at most ring-1 jobs queued/running, so the buffer the game moves to next is always free */
+        pthread_mutex_lock(&g_aw.mu);
+        while (g_aw.outstanding >= VDMA_RING - 1) pthread_cond_wait(&g_aw.cv_done, &g_aw.mu);
+        slot = (g_aw.qhead + g_aw.qcount) % VDMA_RING;
+        if (cb) g_aw.q[slot] = *cb; g_aw.qctx[slot] = ctx; g_aw.qsurf[slot] = surf; g_aw.qcount++; g_aw.outstanding++; pthread_cond_signal(&g_aw.cv_job);
+        pthread_mutex_unlock(&g_aw.mu); }
+    return 0;
+}
+static int vdma_submit_async(gld_context *ctx, m64_cmdbuf *cb) { return vdma_enqueue(ctx, cb, 0); }
+
+/* ---- asynchronous frame end -------------------------------------------------------------------------------
+ * The frame's last batch and the present (finish, surface_flush, finish) are queued as jobs behind the frame's other batches on the DMA worker, so
+ * the main thread returns to the game immediately instead of waiting ~7 ms for the engine and the blit.  Everything else that touches the engine or
+ * the surface fences first (mach64_dma_fence), so ordering is unchanged. */
+int mach64_async_present_ok(gld_context *ctx)
+{
+    return vdma_avail(ctx);
+}
+/* Queue the frame's last batch (called instead of mach64_flush_batch + finish).  Returns 0 on success, -1 if it could not be queued (caller falls back). */
+int mach64_frame_end_async(gld_context *ctx)
+{
+    mach64_priv *p = MACH64_PRIV(ctx);
+    if (!p->batch.buf || p->batch.n == 0) return 0;
+    if (vdma_submit_async(ctx, &p->batch)) return -1;
+    mach64_batch_gen++;
+    p->batch_sel = (p->batch_sel + 1) % VDMA_RING;
+    m64_cb_init(&p->batch, M64_BSTORE(p), 32768);
+    p->dirty |= MACH64_DIRTY_STATE;
+    return 0;
+}
+int mach64_present_async(gld_context *ctx, unsigned surf) { return vdma_enqueue(ctx, 0, surf); }
+
+static int vdma_flush(gld_context *ctx, m64_cmdbuf *cb)
+{
+    static int lockfd = -2; static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
+    uint32_t in[2 + 1000], out[4]; size_t i = 0, osz; kern_return_t kr; int rc = -1;
+    if (cb->overflow || cb->n == 0 || cb->n > 32000) return -1;
+    if (mach64_eng_single() && mach64_eng_ready(ctx)) { int r = mach64_eng_kick(ctx, (const uint32_t *)cb->buf, cb->n); if (!r) mach64_eng_fence(); return r; }   /* synchronous flush on the single-thread engine */
+    pthread_mutex_lock(&mu);
+    if (lockfd == -2) lockfd = open("/var/tmp/mach64_dma.lock", O_RDWR | O_CREAT, 0666);   /* same lock as the DMA texture upload: one bus-master user at a time */
+    if (lockfd >= 0) flock(lockfd, LOCK_EX);
+    in[0] = 0; in[1] = 0; osz = 0;
+    kr = IOConnectMethodStructureIStructureO(ctx->connect, 7, 8, &osz, in, NULL);          /* reset */
+    while (!kr && i < cb->n) {
+        size_t k = cb->n - i; if (k > 1000) k = 1000;
+        in[0] = 1; in[1] = 0; memcpy(in + 2, cb->buf + i, k * 4); osz = 0;
+        kr = IOConnectMethodStructureIStructureO(ctx->connect, 7, 8 + k * 4, &osz, in, NULL);
+        i += k;
+    }
+    if (!kr) { in[0] = 2; in[1] = 0; osz = 16; kr = IOConnectMethodStructureIStructureO(ctx->connect, 7, 8, &osz, in, out); if (!kr) rc = 0; }
+    if (kr) { in[0] = 0; in[1] = 0; osz = 0; IOConnectMethodStructureIStructureO(ctx->connect, 7, 8, &osz, in, NULL); }
+    if (lockfd >= 0) flock(lockfd, LOCK_UN);
+    pthread_mutex_unlock(&mu);
+    return rc;
+}
+
+int mach64_draw_triangle(gld_context *ctx, const m64_vertex *v0, const m64_vertex *v1, const m64_vertex *v2)
 {
     mach64_priv *p = MACH64_PRIV(ctx);
     size_t limit, need;
@@ -929,8 +903,7 @@ int mach64_draw_triangle(gld_context *ctx, const m64_vertex *v0,
     mach64_frame_start(ctx);   /* deferred glClear -> colour/Z clear on the frame's first draw */
 
     if (!p->batch.buf)
-        m64_cb_init(&p->batch, p->batchbuf,
-                    sizeof(p->batchbuf) / sizeof(p->batchbuf[0]));
+        m64_cb_init(&p->batch, M64_BSTORE(p), 32768);
 
     /* Bound the batch to ONE hardware command buffer, and DROP triangles that don't fit this frame
      * rather than flushing mid-frame.  RE-PROVEN (2026-09-07): IOConnectMapMemory(type-1) -- our only
@@ -954,25 +927,42 @@ int mach64_draw_triangle(gld_context *ctx, const m64_vertex *v0,
     if (limit > 32000) limit = 32000;  /* <= batchbuf[32768], with headroom */
     if (limit < 256) limit = 256;      /* fb not mapped yet / tiny buffer: a single tri fits */
     need = ((p->dirty & MACH64_DIRTY_STATE) ? 96u : 0u) + 64u;
-    if (p->batch.n + need > limit - 8) {
-        static int droplog = 0;
-        if (droplog < 3) { gld_log("  [draw] batch full (%zu dw, limit %zu) -- DROPPING triangle "
-                                   "(one cmd buffer/frame; needs vertex-DMA for more)\n",
-                                   p->batch.n, limit); droplog++; }
-        return 0;   /* buffer full this frame -> drop; a mid-frame flush would present+flip -> wedge */
+    if (p->batch.n + need > limit - 8 && vdma_avail(ctx) && vdma_submit_async(ctx, &p->batch) == 0) {
+        p->batch_sel = (p->batch_sel + 1) % VDMA_RING;   /* the job owns the old buffer until it has run; build in the next one (free: at most ring-1 jobs are outstanding) */
+        m64_cb_init(&p->batch, M64_BSTORE(p), 32768);
+        p->dirty |= MACH64_DIRTY_STATE;
+        need = 96u + 64u;
+    } else
+    if (p->batch.n + need > limit - 8 && vdma_avail(ctx) && vdma_flush(ctx, &p->batch) == 0) {
+        /* batch drawn by bus-master DMA (no present): start a fresh one and re-emit the render state */
+        m64_cb_init(&p->batch, M64_BSTORE(p), 32768);
+        p->dirty |= MACH64_DIRTY_STATE;
+        need = 96u + 64u;
     }
+    if (p->batch.n + need > limit - 8)
+        return 0;   /* buffer full this frame -> drop; a mid-frame flush would present+flip -> wedge */
 
     if (p->dirty & MACH64_DIRTY_STATE) {
         m64_emit_state(&p->batch, &p->hw);
         p->dirty &= ~MACH64_DIRTY_STATE;
     }
-    { static int tlog = 0; if (tlog < 3) {
-        gld_log("  [tri #%d] v0 xy=0x%08x argb=0x%08x | v1 xy=0x%08x argb=0x%08x | v2 xy=0x%08x argb=0x%08x\n",
-                tlog, (unsigned)v0->x_y, v0->argb, (unsigned)v1->x_y, v1->argb, (unsigned)v2->x_y, v2->argb);
-        gld_log("  [tri #%d] scale3d=0x%x setup=0x%x zc=0x%x dstop=0x%x sc_lr=0x%x sc_tb=0x%x dp_mix=0x%x dp_src=0x%x wmask=0x%x\n",
-                tlog, p->hw.scale_3d_cntl, p->hw.setup_cntl, p->hw.z_cntl, p->hw.dst_off_pitch,
-                p->hw.sc_left_right, p->hw.sc_top_bottom, p->hw.dp_mix, p->hw.dp_src, p->hw.dp_write_mask);
-        tlog++; } }
+    p->batch.multitex = p->hw.textured && p->hw.multitex;
+    /* Normalise the perspective W so the triangle's largest is 1.0: S,T are raw and the engine computes interp(S*W)/interp(W), so a common scale leaves the
+     * result unchanged, but a tiny W (Sonic R's far-plane 2D background: W = 1/3000) underflows the setup engine's fixed-point range -> black texture. */
+    if (p->hw.textured) {
+        float wa, wb, wc, mx, k;
+        __builtin_memcpy(&wa, &v0->w, 4); __builtin_memcpy(&wb, &v1->w, 4); __builtin_memcpy(&wc, &v2->w, 4);
+        mx = wa > wb ? wa : wb; if (wc > mx) mx = wc;
+        if (mx > 0.0f && mx < 0.5f) {
+            m64_vertex a = *v0, b = *v1, c = *v2;      /* copies only on the (rare) far-plane normalisation path */
+            k = 1.0f / mx; wa *= k; wb *= k; wc *= k;
+            __builtin_memcpy(&a.w, &wa, 4); __builtin_memcpy(&b.w, &wb, 4); __builtin_memcpy(&c.w, &wc, 4);
+            a.w2 = a.w; b.w2 = b.w; c.w2 = c.w;
+            p->batch.multitex = p->hw.textured && p->hw.multitex;
+            if (!m64_emit_triangle(&p->batch, &a, &b, &c)) return 0;
+            return 1;
+        }
+    }
     if (!m64_emit_triangle(&p->batch, v0, v1, v2))
         return 0;                  /* degenerate: nothing emitted */
     return 1;
@@ -987,7 +977,6 @@ int mach64_draw_triangle(gld_context *ctx, const m64_vertex *v0,
 
 void *gldAllocVertexBuffer(gld_context *ctx, uint32_t size)
 {
-    gld_log("gldAllocVertexBuffer(size=%u)\n", size);
     /* The type-4 command buffer IS our vertex/command staging.  A real impl
      * returns a sub-allocation to fill; single-buffer synchronous today, so we
      * just hand back the base and rely on mach64_submit to serialize. */
@@ -996,7 +985,6 @@ void *gldAllocVertexBuffer(gld_context *ctx, uint32_t size)
 
 int gldCompleteVertexBuffer(gld_context *ctx, void *vb)
 {
-    gld_log("gldCompleteVertexBuffer(vb=%p)\n", vb);
     (void)vb;
     /* GLEngine has finished filling the primitive; flush whatever the dispatch
      * callbacks assembled.  With per-triangle submit this is already kicked, so
@@ -1010,97 +998,19 @@ void gldFreeVertexBuffer(gld_context *ctx, void *vb) { (void)ctx; (void)vb; }
 /* glFlush: ensure submitted work is kicked (already synchronous today). */
 int gldFlush(gld_context *ctx)
 {
-    gld_log("gldFlush()\n");
-    mach64_flush_batch(ctx);
-    /* SINGLE-BUFFERED WINDOWED PRESENT (screensaver preview) -- MACH64_PREVIEW_BLIT.  Single-buffered
-     * contexts present at glFlush (no swap hook fires), so this is the present point.  Do the stock Rage
-     * Pro ICD's windowed present: fence the geometry, then 2D-blit our rendered backing to the live
-     * desktop framebuffer at the window's screen rect (win_x,win_y) -- NOT surface_flush.  Scanout base
-     * is 0 / pitch 1024 by default (HW layout: 1024x768x32 desktop @ VRAM 0, our surface right after at
-     * 0x301000); override via MACH64_SCANOUT_BASE/PITCH if wrong.  Gated so the default stays blank-safe. */
-    {   mach64_priv *p = MACH64_PRIV(ctx);
-        /* FORCED-DBUF screensaver present: with MACH64_FORCE_DBUF the wedge is gone (dbuf=1), but the
-         * app still presents at gldFlush (render_ctl/swap hook never fires for it).  So present here via
-         * the kext surface_flush (build_swap).  build_swap anchors DST to (0,0) -> CORRECT for the
-         * FULLSCREEN screensaver; the windowed preview mis-positions (separate fix).  Safe now (dbuf). */
-        if (p && p->dbuf && p->apple_surf_cn && p->target_off && getenv("MACH64_FORCE_DBUF")) {
-            /* Present via the SAFE manual 2D blit (surface_flush wedges per-frame) from our render
-             * buffer to the desktop scanout (accel[0x130]) at the window rect.  dbuf killed the setup
-             * wedge; the manual blit never wedges.  base override via MACH64_SCANOUT_BASE (single known
-             * position, not the sweep). */
-            uint32_t acc = 0, sop = 0, base = 0, pitch = 1024;
-            const char *e;
-            IOConnectMethodScalarIScalarO(ctx->connect, 14, 1, 1, 0xb0u, &acc);
-            if (acc > 0x10000u && acc < 0x40000000u)
-                IOConnectMethodScalarIScalarO(ctx->connect, 14, 1, 1, 0x80000000u | (acc + 0x130u), &sop);
-            if (sop) { base = (sop & 0x3fffffu) << 3; pitch = ((sop >> 22) & 0x3ffu) << 3; }
-            e = getenv("MACH64_SCANOUT_BASE");  if (e) base  = (uint32_t)strtoul(e, 0, 0);
-            e = getenv("MACH64_SCANOUT_PITCH"); if (e) pitch = (uint32_t)strtoul(e, 0, 0);
-            IOConnectMethodScalarIStructureI(ctx->connect, kATIRPro_finish, 0, 0, NULL);
-            mach64_blit_2pitch(ctx, p->target_off, p->target_pitch, base, pitch ? pitch : 1024,
-                               0, 0, p->win_x, p->win_y, p->fb_w, p->fb_h);
-            { static int fp = 0; if (fp < 4) {
-                gld_log("  [force-dbuf-present] MANUAL blit src=0x%x/%u -> scanout=0x%x/%u @ (%u,%u) %ux%u\n",
-                        p->target_off, p->target_pitch, base, pitch, p->win_x, p->win_y, p->fb_w, p->fb_h); fp++; } }
-            return 0;
-        }
-        /* BASE-SWEEP (MACH64_BASE_SWEEP): find the true desktop scanout base empirically with the SAFE
-         * 2D fill (no surface_flush -> no wedge).  Fill a magenta 200x200 block at a VRAM offset that
-         * steps +0x40000 every ~48 frames; when the block appears on the real desktop at ~(100,100), the
-         * base logged at that moment is the scanout.  Wrong bases write invisible/other VRAM (transient
-         * garbage at worst).  Quit the instant magenta shows; I read the last logged base. */
-        if (p && !p->dbuf && p->target_off && getenv("MACH64_BASE_SWEEP")) {
-            static uint32_t swf = 0;
-            uint32_t HOLD = 10, STEP = 0x20000u, NSTEPS = 64;   /* 0..0x800000 in 128KB steps, loops */
-            uint32_t idx = (swf / HOLD) % NSTEPS, base = idx * STEP;
-            mach64_fill_rect(ctx, base, 100, 100, 200, 200, 1024, 0xffff00ffu);
-            if (swf % HOLD == 0)
-                gld_log("  [base-sweep] idx=%u base=0x%x -- magenta 200x200 @ screen(100,100)\n", idx, base);
-            swf++;
-            return 0;
-        }
-        if (p && !p->dbuf && p->apple_surf_cn && getenv("MACH64_SB_PRESENT")
-            && p->win_x == 0 && p->win_y == 0 && p->fb_w >= 640) {   /* FULLSCREEN only -- preview wedges */
-            /* Single-buffered FULLSCREEN present via the kext (surface_flush -> build_swap to the REAL
-             * scanout the kext tracks).  gldFlush is the single-buffered present point (no swap hook
-             * fires).  Fence geometry first so build_swap sees a complete frame. */
-            IOConnectMethodScalarIStructureI(ctx->connect, kATIRPro_finish, 0, 0, NULL);
-            mach64_pathb_present(ctx);
-            { static int sp = 0; if (sp < 4) {
-                gld_log("  [sb-present] surface_flush (kext scanout) win_mode=%u %ux%u @ %u,%u\n",
-                        p->win_mode, p->fb_w, p->fb_h, p->win_x, p->win_y); sp++; } }
-        }
-        else if (p && p->win_mode && !p->dbuf && p->target_off && getenv("MACH64_PREVIEW_BLIT")) {
-            /* DST = the desktop scanout peeked from accel[0x130] (setup_target); env can override. */
-            uint32_t base = p->scanout_off, pitch = p->scanout_pitch ? p->scanout_pitch : 1024;
-            const char *e = getenv("MACH64_SCANOUT_BASE"); if (e) base  = (uint32_t)strtoul(e, 0, 0);
-            e = getenv("MACH64_SCANOUT_PITCH");            if (e) pitch = (uint32_t)strtoul(e, 0, 0);
-            /* DIAGNOSTIC (MACH64_PREVIEW_TESTFILL): paint the render buffer a solid MAGENTA so the blit
-             * is unambiguous -- if a magenta 324x236 block appears at (442,178) the scanout base is right
-             * and the blit works (then the only issue is Flurry rendering at the wrong size).  Sweep
-             * MACH64_SCANOUT_BASE with this on to find where the block lands = the real scanout base. */
-            if (getenv("MACH64_PREVIEW_TESTFILL")) {
-                /* DIRECT scanout fill at a FIXED block on the OPEN DESKTOP (top-left (10,10) 200x200),
-                 * away from the preview well.  Isolates two things: (a) is base 0x1000 the VISIBLE
-                 * scanout at all? (b) is the WELL specifically being repainted white by the WS?  If
-                 * magenta appears at (10,10) but the well stays white -> the well is WS-overwritten.
-                 * If nothing at (10,10) -> base 0x1000 isn't the live front / engine can't reach it. */
-                uint32_t fx = 10, fy = 10, fw = 200, fh = 200;
-                const char *xe = getenv("MACH64_TESTFILL_X"); if (xe) fx = (uint32_t)strtoul(xe,0,0);
-                xe = getenv("MACH64_TESTFILL_Y"); if (xe) fy = (uint32_t)strtoul(xe,0,0);
-                mach64_fill_rect(ctx, base, fx, fy, fw, fh, pitch, 0xffff00ffu);
-                { static int fl=0; if (fl<3){ gld_log("  [preview-testfill] DESKTOP fill magenta @ base=0x%x (%u,%u) %ux%u pitch=%u\n",
-                        base, fx, fy, fw, fh, pitch); fl++; } }
-            } else {
-                IOConnectMethodScalarIStructureI(ctx->connect, kATIRPro_finish, 0, 0, NULL);   /* retire geometry */
-                mach64_blit_2pitch(ctx, p->target_off, p->target_pitch, base, pitch,
-                                   0, 0, p->win_x, p->win_y, p->fb_w, p->fb_h);
-            }
-            { static int blog = 0; if (blog < 4) {
-                gld_log("  [preview-blit] src=0x%x/%upx -> scanout base=0x%x/%upx at (%u,%u) %ux%u\n",
-                        p->target_off, p->target_pitch, base, pitch, p->win_x, p->win_y, p->fb_w, p->fb_h);
-                blog++; } }
-        }
+    /* Path B windowed/double-buffered: glFlush must NOT drain.  Every drain is a type-1 submit that the kext follows with its backing copy, so an
+     * app that glFlush()es between passes (Sonic R: EndFrame after the background clear, after the iris, after the logo) got 2-3 drains per frame and
+     * the later passes were clobbered (title background black during the iris, bottom rows missing).  The once-per-frame present (render_ctl, slot 0x60)
+     * drains everything in ONE submit; operations that must observe the triangles (readback, texture re-upload, fills) still flush for themselves. */
+    mach64_priv *p = MACH64_PRIV(ctx);
+    if (!p || !p->apple_surf_cn || !p->dbuf) mach64_flush_batch(ctx);
+    /* Single-buffered FULLSCREEN present via the kext (surface_flush -> build_swap to the REAL
+     * scanout the kext tracks).  gldFlush is the single-buffered present point (no swap hook
+     * fires).  Fence geometry first so build_swap sees a complete frame.  FULLSCREEN only -- the
+     * small preview well wedges. */
+    if (p && !p->dbuf && p->apple_surf_cn && p->win_x == 0 && p->win_y == 0 && p->fb_w >= 640) {
+        IOConnectMethodScalarIStructureI(ctx->connect, kATIRPro_finish, 0, 0, NULL);
+        mach64_pathb_present(ctx);
     }
     return 0;
 }
@@ -1109,7 +1019,7 @@ int gldFlush(gld_context *ctx)
 int gldFinish(gld_context *ctx)
 {
     mach64_priv *p = MACH64_PRIV(ctx);
-    gld_log("gldFinish() last_stamp=%u\n", (unsigned)p->last_stamp);
+    mach64_dma_fence();
     mach64_flush_batch(ctx);   /* submit any pending triangles before fencing */
     IOConnectMethodScalarIStructureI(ctx->connect, kMach64Sel_wait_for_stamp,
                                      1, 0, (int)p->last_stamp, NULL);
@@ -1118,8 +1028,6 @@ int gldFinish(gld_context *ctx)
      * the explicit swap (gldFlushBuffer).  Fence again so the blit completes before
      * the app draws the next frame over the back buffer. */
     if (p->dbuf) {
-        gld_log("  [dbuf] present back=0x%x -> front=0x%x on gldFinish\n",
-                p->back_off, p->front_off);
         mach64_present(ctx);
         IOConnectMethodScalarIStructureI(ctx->connect, kMach64Sel_wait_for_stamp,
                                          1, 0, (int)p->last_stamp, NULL);
@@ -1131,24 +1039,10 @@ int gldFinish(gld_context *ctx)
     return 0;
 }
 
-/* Control-slot probes: the reference installs table[0x00,0x08,0x0c,0x10,0x14] as
+/* Control slots: the reference installs table[0x00,0x08,0x0c,0x10,0x14] as
  * its vertex/render engine (0x10=primitive-mode dispatcher, 0x08=vertex process).
- * We install none, so GLEngine's render calls no-op.  Log which one carries the
- * vertex batch (dump ptr-looking args' memory). */
-static void ctl_dump(const char *w, gld_context *ctx, uint32_t a2, uint32_t a3,
-                     uint32_t a4, uint32_t a5, uint32_t a6, uint32_t a7)
-{
-    int i;
-    gld_log(">>> %s(ctx=%p a2=0x%x a3=0x%x a4=0x%x a5=0x%x a6=0x%x a7=0x%x)\n",
-            w, (void *)ctx, a2, a3, a4, a5, a6, a7);
-    { uint32_t v[6]; int k=0; v[k++]=a2; v[k++]=a3; v[k++]=a4; v[k++]=a5; v[k++]=a6; v[k++]=a7;
-      for (k=0;k<6;k++) if (v[k]>0x10000 && v[k]<0x40000000) {
-        const uint32_t *p=(const uint32_t *)v[k];
-        gld_log("     arg%d=0x%x -> %08x %08x %08x %08x\n", k+2, v[k], p[0],p[1],p[2],p[3]);
-      } }
-    (void)i;
-}
-int mach64_ctl00(gld_context *c,uint32_t a,uint32_t b,uint32_t d,uint32_t e,uint32_t f,uint32_t g){ctl_dump("table[0x00]",c,a,b,d,e,f,g);return 0;}
+ * All but 0x08 (readback, below) are no-ops here. */
+int mach64_ctl00(gld_context *c,uint32_t a,uint32_t b,uint32_t d,uint32_t e,uint32_t f,uint32_t g){(void)c;(void)a;(void)b;(void)d;(void)e;(void)f;(void)g;return 0;}
 
 /* table[0x08] = GLEngine's per-renderer glReadPixels READBACK hook.  glReadPixels validation
  * (GLEngine+0x2dc4c, verified via tools/mach64_rpdisp) tail-calls [gc+0x78b0] = this, as
@@ -1221,8 +1115,6 @@ int mach64_ctl08(void *rb_ctx, int x, int y, int w, int h,
     uint32_t height = gc ? *(uint32_t *)((unsigned char *)gc + 0x1f4) : 0;   /* drawable height (gldAttachDrawable) */
     uint32_t toff  = p ? p->target_off   : 0;
     uint32_t tpitch= p ? p->target_pitch : 0;    /* pixels */
-    gld_log(">>> READBACK x=%d y=%d w=%d h=%d fmt=0x%x type=0x%x px=%p  target_off=0x%x pitch=%u H=%u vram=%p\n",
-            x, y, w, h, format, type, pixels, toff, tpitch, height, gc ? (void *)gc->regs : 0);
     if (!p || !gc->regs || !height) return 0;
 
     /* DEPTH readback: GL_DEPTH_COMPONENT from our 16-bit Z buffer (p->z_off/z_pitch, Z16 stored LE).
@@ -1270,8 +1162,6 @@ int mach64_ctl08(void *rb_ctx, int x, int y, int w, int h,
                 }
             }
         }
-        gld_log("     READBACK depth %dx%d type=0x%x z_off=0x%x zpitch=%u H=%u\n",
-                w, h, type, zoff, zpitch, height);
         return 0;
     }
 
@@ -1302,7 +1192,7 @@ int mach64_ctl08(void *rb_ctx, int x, int y, int w, int h,
          * ROW_LENGTH@0x63c4, SKIP_PIXELS@0x63d0, SKIP_ROWS@0x63cc, SWAP_BYTES@0x63dc (byte). */
         {   const volatile unsigned char *vram = (const volatile unsigned char *)gc->regs;
             unsigned char *base = (unsigned char *)pixels;
-            uint32_t pitch_b = tpitch * 4u;
+            uint32_t pitch_b = tpitch * (p ? M64_CBPP(p) : 4u);
             int bpp_out = (pk || has_a) ? 4 : 3;
             int elem = pk ? 4 : 1;                                   /* element size (bytes) */
             int p_align, p_rowlen, p_skippix, p_skiprows, p_swap, l, row_stride, row, col;
@@ -1318,8 +1208,12 @@ int mach64_ctl08(void *rb_ctx, int x, int y, int w, int h,
                 o = base + row * row_stride;
                 for (col = 0; col < w; col++) {
                     const volatile unsigned char *s =
-                        vram + toff + (uint32_t)fbrow * pitch_b + (uint32_t)(x + col) * 4u;
-                    unsigned R = s[2], G = s[1], B = s[0], A = 0xFFu;   /* X8 -> opaque */
+                        vram + toff + (uint32_t)fbrow * pitch_b + (uint32_t)(x + col) * (p ? M64_CBPP(p) : 4u);
+                    unsigned R, G, B, A = 0xFFu;                          /* X8 / RGB565 -> opaque */
+                    if ((p ? M64_CBPP(p) : 4u) == 2u) {               /* RGB565, little-endian u16: expand with bit replication */
+                        unsigned v16 = s[0] | ((unsigned)s[1] << 8), r5 = (v16 >> 11) & 0x1fu, g6 = (v16 >> 5) & 0x3fu, b5 = v16 & 0x1fu;
+                        R = (r5 << 3) | (r5 >> 2); G = (g6 << 2) | (g6 >> 4); B = (b5 << 3) | (b5 >> 2);
+                    } else { R = s[2]; G = s[1]; B = s[0]; }
                     if (pk == 0) {
                         if (is_bgr) { *o++ = (unsigned char)B; *o++ = (unsigned char)G; *o++ = (unsigned char)R; }
                         else        { *o++ = (unsigned char)R; *o++ = (unsigned char)G; *o++ = (unsigned char)B; }
@@ -1340,8 +1234,6 @@ int mach64_ctl08(void *rb_ctx, int x, int y, int w, int h,
             }
         }
     }
-    gld_log("     READBACK filled %dx%d fmt=0x%x from target_off=0x%x pitch=%u H=%u\n",
-            w, h, format, toff, tpitch, height);
     return 0;
 }
 /* glDrawPixels.  GLEngine's glDrawPixels impl (GLEngine+0xe688) validates format/type then tail-calls
@@ -1395,22 +1287,19 @@ int mach64_ctl0c(gld_context *c, uint32_t a, uint32_t b, uint32_t d,
     uint32_t pitch_b;
     float zx = 1.0f, zy = 1.0f;
 
-    if (!p || !p->target_off || !p->target_pitch || !rp || !src || w <= 0 || h <= 0) {
-        ctl_dump("table[0x0c]", c, a, b, d, e, f, g); return 0;
-    }
-    (void)u_lsb;
+    if (!p || p->render_skip || !p->target_pitch || !rp || !src || w <= 0 || h <= 0) return 0;
     switch (format) {
         case 0x1908u: is_bgr = 0; has_a = 1; break;   /* GL_RGBA */
         case 0x80E1u: is_bgr = 1; has_a = 1; break;   /* GL_BGRA */
         case 0x1907u: is_bgr = 0; has_a = 0; break;   /* GL_RGB  */
         case 0x80E0u: is_bgr = 1; has_a = 0; break;   /* GL_BGR  */
-        default: ctl_dump("table[0x0c]", c, a, b, d, e, f, g); return 0;   /* unsupported format */
+        default: return 0;   /* unsupported format */
     }
     switch (type) {
         case 0x1401u: pk = 0; break;                                       /* GL_UNSIGNED_BYTE */
-        case 0x8035u: pk = 1; if (!has_a) { ctl_dump("table[0x0c]",c,a,b,d,e,f,g); return 0; } break; /* INT_8_8_8_8 */
-        case 0x8367u: pk = 2; if (!has_a) { ctl_dump("table[0x0c]",c,a,b,d,e,f,g); return 0; } break; /* INT_8_8_8_8_REV */
-        default: ctl_dump("table[0x0c]", c, a, b, d, e, f, g); return 0;   /* unsupported type */
+        case 0x8035u: pk = 1; if (!has_a) return 0; break; /* INT_8_8_8_8 */
+        case 0x8367u: pk = 2; if (!has_a) return 0; break; /* INT_8_8_8_8_REV */
+        default: return 0;   /* unsupported type */
     }
     vram = (volatile unsigned char *)c->regs;
     if (!vram) return 0;
@@ -1421,7 +1310,7 @@ int mach64_ctl0c(gld_context *c, uint32_t a, uint32_t b, uint32_t d,
     elem   = pk ? 4 : 1;                  /* element size (packed word / component), for row alignment */
     dx = (int)(rp[0] + 0.5f);
     dy = (int)(rp[1] + 0.5f);
-    pitch_b = p->target_pitch * 4u;
+    pitch_b = p->target_pitch * M64_CBPP(p);
     mach64_unpack_state(c, &align, &u_rowlen, &u_skippix, &u_skiprows, &u_swap, &u_lsb);
     {   unsigned char *gcp = mach64_ctx_gc(c);   /* glPixelZoom: GL_ZOOM_X @ gc+0x63bc, GL_ZOOM_Y @ +0x63c0 */
         if (gcp) { float rzx = *(const float *)(gcp + 0x63bc), rzy = *(const float *)(gcp + 0x63c0);
@@ -1431,8 +1320,6 @@ int mach64_ctl0c(gld_context *c, uint32_t a, uint32_t b, uint32_t d,
     rowstride = (elem >= align) ? (l * bpp_in)
                                 : (align * ((l * bpp_in + align - 1) / align));
     src += u_skiprows * rowstride + u_skippix * bpp_in;   /* GL_UNPACK_SKIP_ROWS/PIXELS */
-    gld_log("glDrawPixels: %dx%d fmt=0x%x type=0x%x -> (%d,%d) zoom=%.2f,%.2f [W=%d H=%d unpack a=%d rl=%d sp=%d sr=%d]\n",
-            w, h, format, type, dx, dy, zx, zy, W, H, align, u_rowlen, u_skippix, u_skiprows);
     mach64_frame_start(c);                /* deferred glClear -> clear before this upload */
     mach64_flush_batch(c);                /* pending geometry before the upload */
     for (row = 0; row < h; row++) {
@@ -1457,8 +1344,9 @@ int mach64_ctl0c(gld_context *c, uint32_t a, uint32_t b, uint32_t d,
                 for (wx = xlo; wx < xhi; wx++) {
                     volatile unsigned char *o;
                     if (wx < 0 || wx >= W) continue;
-                    o = orow + (uint32_t)wx * 4u;
-                    o[0] = B; o[1] = G; o[2] = R; o[3] = A;   /* native LE ARGB8888 */
+                    o = orow + (uint32_t)wx * M64_CBPP(p);
+                    if (M64_CBPP(p) == 2u) { unsigned v16 = ((R >> 3) << 11) | ((G >> 2) << 5) | (B >> 3); o[0] = (unsigned char)v16; o[1] = (unsigned char)(v16 >> 8); }
+                    else { o[0] = B; o[1] = G; o[2] = R; o[3] = A; }   /* native LE ARGB8888 */
                 }
             }
         }
@@ -1484,16 +1372,13 @@ int mach64_ctl10(gld_context *c, uint32_t a, uint32_t b, uint32_t d,
     int sx = (int)b, sy = (int)d, w = (int)e, h = (int)f;
     int dx, dy, svy, dvy, H, W;
     (void)g;
-    if (!p || !p->target_off || !p->target_pitch || !rp || w <= 0 || h <= 0) {
-        ctl_dump("table[0x10]", c, a, b, d, e, f, g);   /* unhandled shape -> log, no-op */
-        return 0;
-    }
+    if (!p || p->render_skip || !p->target_pitch || !rp || w <= 0 || h <= 0) return 0;   /* unhandled shape -> no-op */
     /* Drawable dims come from the context (ctx+0x1f0/0x1f4), NOT p->fb_h -- fb_h is only set for
      * double-buffered attaches, so it's 0 for a single-buffered context (same source readback and
      * mach64_clear_color use). */
     W = (int)*(uint32_t *)((unsigned char *)c + 0x1f0);
     H = (int)*(uint32_t *)((unsigned char *)c + 0x1f4);
-    if (W <= 0 || H <= 0) { ctl_dump("table[0x10]", c, a, b, d, e, f, g); return 0; }
+    if (W <= 0 || H <= 0) return 0;
     dx = (int)(rp[0] + 0.5f);
     dy = (int)(rp[1] + 0.5f);
     svy = H - sy - h;                 /* GL bottom-left block -> VRAM top-left row */
@@ -1501,7 +1386,6 @@ int mach64_ctl10(gld_context *c, uint32_t a, uint32_t b, uint32_t d,
     if (sx < 0 || dx < 0 || svy < 0 || dvy < 0 ||
         sx + w > W || dx + w > W || svy + h > H || dvy + h > H)
         return 0;                     /* out of bounds -> skip (first-cut clipping) */
-    gld_log("glCopyPixels: (%d,%d) %dx%d -> (%d,%d) [W=%d H=%d]\n", sx, sy, w, h, dx, dy, W, H);
     mach64_frame_start(c);            /* deferred glClear -> clear before this copy */
     mach64_flush_batch(c);            /* pending geometry before the copy */
     mach64_blit_surface(c, p->target_off, p->target_off,
@@ -1530,9 +1414,7 @@ int mach64_ctl14(gld_context *c, uint32_t a, uint32_t b, uint32_t d,
     uint32_t pitch_b;
     (void)e; (void)f;
 
-    if (!p || !p->target_off || !p->target_pitch || !rp || !bm || w <= 0 || h <= 0) {
-        ctl_dump("table[0x14]", c, a, b, d, e, f, g); return 0;
-    }
+    if (!p || p->render_skip || !p->target_pitch || !rp || !bm || w <= 0 || h <= 0) return 0;
     vram = (volatile unsigned char *)c->regs;
     if (!vram) return 0;
     W = (int)*(uint32_t *)((unsigned char *)c + 0x1f0);
@@ -1550,14 +1432,12 @@ int mach64_ctl14(gld_context *c, uint32_t a, uint32_t b, uint32_t d,
     } else { R = G = B = A = 0xFFu; }
     dx = (int)(rp[0] + 0.5f);
     dy = (int)(rp[1] + 0.5f);
-    pitch_b = p->target_pitch * 4u;
+    pitch_b = p->target_pitch * M64_CBPP(p);
     mach64_unpack_state(c, &u_align, &u_rowlen, &u_skippix, &u_skiprows, &u_swap, &u_lsb);
     (void)u_swap;                          /* SWAP_BYTES is a no-op for 1-bpp */
     lbits = u_rowlen > 0 ? u_rowlen : w;   /* GL_UNPACK_ROW_LENGTH (pixels/row) */
     rowbytes = (((lbits + 7) / 8 + u_align - 1) / u_align) * u_align;   /* row bytes padded to alignment */
     bm += u_skiprows * rowbytes;           /* GL_UNPACK_SKIP_ROWS */
-    gld_log("glBitmap: %dx%d -> (%d,%d) colour=%d,%d,%d,%d [W=%d H=%d unpack a=%d rl=%d lsb=%d]\n",
-            w, h, dx, dy, R, G, B, A, W, H, u_align, u_rowlen, u_lsb);
     mach64_frame_start(c);            /* deferred glClear -> clear before this bitmap */
     mach64_flush_batch(c);
     for (row = 0; row < h; row++) {
@@ -1573,34 +1453,35 @@ int mach64_ctl14(gld_context *c, uint32_t a, uint32_t b, uint32_t d,
                 unsigned char mask = u_lsb ? (unsigned char)(1u << bpos) : (unsigned char)(0x80u >> bpos);
                 if (!(brow[bitidx >> 3] & mask)) continue;   /* clear bit -> skip (MSB/LSB-first) */
             }
-            o = vram + p->target_off + (uint32_t)fbrow * pitch_b + (uint32_t)gx * 4u;
-            o[0] = B; o[1] = G; o[2] = R; o[3] = A;   /* native LE ARGB8888 */
+            o = vram + p->target_off + (uint32_t)fbrow * pitch_b + (uint32_t)gx * M64_CBPP(p);
+            if (M64_CBPP(p) == 2u) { unsigned v16 = ((R >> 3) << 11) | ((G >> 2) << 5) | (B >> 3); o[0] = (unsigned char)v16; o[1] = (unsigned char)(v16 >> 8); }
+            else { o[0] = B; o[1] = G; o[2] = R; o[3] = A; }   /* native LE ARGB8888 */
         }
     }
     return 0;
 }
 
-/* table[0x04] = THE flush entry.  GLEngine's render flow calls this to dispatch
- * accumulated geometry (ref gldInitDispatch installs it -> sub_cf68 -> sub_c3c0,
- * the driver's flush engine).  Our gldInitDispatch stubbed it, so GLEngine hit a
- * no-op and nothing rendered.  First: log that it's called + its args, to find
- * the vertex batch GLEngine passes; then wire it to our DMA path. */
 /* Find the gli context base from the driver ctx: ctx+0x10 points into the gli
  * (~+0x3610); scan back for the object whose [+0x7898] back-points to ctx. */
+/* The located gli base is cached per context (the scan below walks up to 8192 words and ran several times per triangle: ~90% of a geometry frame's CPU).  A hit
+ * is re-validated by the same back-pointer test as the scan; the entry is dropped when its context is destroyed (mach64_gli_forget), so a freed gli is never read. */
+gld_context *g_gli_ctx; uint32_t g_gli_p10, g_gli_g;
+void mach64_gli_forget(gld_context *ctx) { if (g_gli_ctx == ctx) { g_gli_ctx = 0; g_gli_g = 0; } }
 static uint32_t mach64_gli(gld_context *ctx)
 {
     uint32_t p10 = *(const uint32_t *)((const char *)ctx + 0x10), off;
+    if (g_gli_ctx == ctx && g_gli_p10 == p10 && g_gli_g && *(const uint32_t *)(uintptr_t)(g_gli_g + 0x7898) == (uint32_t)(uintptr_t)ctx) return g_gli_g;
     for (off = 0; off <= 0x8000; off += 4) {
         uint32_t g = p10 - off;
-        if (g < 0x10000 || g >= 0x40000000) break;
+        if (g < 0x10000 || g > M64_KADDR_MAX) break;
         if (*(const uint32_t *)(uintptr_t)(g + 0x7898) == (uint32_t)(uintptr_t)ctx)
-            return g;
+            { g_gli_ctx = ctx; g_gli_p10 = p10; g_gli_g = g; return g; }
     }
     return 0;
 }
 
 /* Read a 32-bit gli field (0 if the gli can't be located). */
-uint32_t mach64_gli_u32(gld_context *ctx, uint32_t off)
+uint32_t mach64_gli_u32_slow(gld_context *ctx, uint32_t off)
 {
     uint32_t g = mach64_gli(ctx);
     return g ? *(const uint32_t *)(uintptr_t)(g + off) : 0;
@@ -1649,12 +1530,9 @@ int mach64_flush(gld_context *ctx, uint32_t a2, uint32_t a3, uint32_t a4,
     return 0;
 }
 
-/* Dispatch slots 0x4c (buffer-complete) and 0x60 (render-control) -- the
- * reference installs these; we didn't, and immediate-mode geometry isn't
- * reaching our primitive slots.  Log them to map what GLEngine calls to flush. */
+/* Dispatch slot 0x4c (buffer-complete): the reference installs it; nothing to do here. */
 void mach64_dispatch_complete(gld_context *ctx, const void *v, uint32_t n)
 {
-    gld_log("mach64_dispatch_complete(0x4c) v=%p n=%u\n", v, n);
     (void)ctx;
 }
 /* Dispatch slot 0x60 = GLEngine's per-frame render-control / BUFFER-SWAP hook.
@@ -1671,150 +1549,90 @@ void mach64_dispatch_complete(gld_context *ctx, const void *v, uint32_t n)
 void mach64_dispatch_render_ctl(gld_context *ctx, uint32_t a4, uint32_t a5,
                                 uint32_t a6, uint32_t a7, uint32_t a8)
 {
+    mach64_priv *p = MACH64_PRIV(ctx);
     (void)a4; (void)a5; (void)a6; (void)a7; (void)a8;
-    {   mach64_priv *p = MACH64_PRIV(ctx);
-        { static int rclog = 0; if (rclog < 4) {
-            gld_log("mach64_dispatch_render_ctl(0x60) surf_cn=%u dbuf=%u back_off=0x%x\n",
-                    p?p->apple_surf_cn:0, p?p->dbuf:0, p?p->back_off:0); rclog++; } }
-        /* PATH B: present through Apple's bound surface (surface_flush), the once-per-frame
-         * hook.  Takes priority over the legacy VRAM back->front blit (which needs our-kext
-         * buffers Path B doesn't allocate). */
-        if (p && p->apple_surf_cn) {
-            /* A display-associated surface's present blits the LIVE scanout -> races IONDRV -> panic.
-             * setup_target flagged it (present_unsafe); skip the whole present here (render nothing this
-             * frame) rather than crash the machine.  The real fix is to keep the surface non-associated. */
-            if (p->present_unsafe) {
-                static int u = 0; if (u < 2) {
-                    gld_log("  [pathb] render_ctl: present_unsafe surface -> present SKIPPED (no scanout race)\n"); u++; }
-                p->frame_new = 1;
-                return;
-            }
-            /* WINDOWED-COMPOSITED present (screensaver preview): a single-buffered windowed surface must
-             * NOT surface_flush (build_swap is a fullscreen origin-anchored swap -> mis-positions to
-             * (0,0) AND wedges the engine racing Quartz Extreme).  The correct protocol is the
-             * IOAccelSurface arbitration cycle: surface_write_lock (syncs the engine, returns the backing)
-             * -> render into the backing -> surface_write_unlock (releases; the WindowServer composites
-             * the backing into the well on its next vblank -- positioning is CGS's job, not ours).  No
-             * flush, no scanout blit.  Opt-in (MACH64_PREVIEW_LOCK) while validating it composites (our
-             * surface may be private -> safe-but-blank if QE has no handle to it). */
-            {   int preview_lock = (p->preview_lock != 0);
-                if (preview_lock) {
-                    apple_surf_data sd; IOByteCount ol = sizeof sd; memset(&sd, 0, sizeof sd);
-                    kern_return_t lkr = IOConnectMethodScalarIStructureO((io_connect_t)p->apple_surf_cn,
-                                            kATIRProSurf_surface_write_lock, 0, &ol, &sd);
-                    static int llog = 0; if (llog < 3) {
-                        gld_log("  [pathb] preview write_lock kr=0x%x (arbitrate vs QE, no flush)\n",
-                                (unsigned)lkr); llog++; }
-                }
-            /* Render the frame's deferred glClear INTO the surface buffer with the engine (a
-             * clear-only app dispatches no triangle, so the lazy clear would otherwise never
-             * fire and we'd present the uninitialised buffer -> upper-left garbage). */
-            mach64_frame_start(ctx);
-            /* Flush THIS frame's pending triangles into the surface buffer BEFORE presenting.
-             * Without this the batch only drains at the NEXT frame's clear (fill_rect's implicit
-             * flush), so geometry lagged a frame and the clear/draw order was scrambled -> the
-             * spinning triangle left a trail (never-cleared accumulation into a jagged circle),
-             * and the mis-ordered per-frame 2D(clear)<->3D(tri) submits are the likely engine
-             * wedge behind the second-run panic.  Now each frame is a clean
-             * clear -> draw -> flush -> surface_flush. */
-            /* Reset the engine to 2D state (Z off, scaler off) at the TAIL of the geometry batch, so
-             * Apple's build_swap blit that follows does NOT inherit our Z_EN and depth-test its
-             * buffer->scanout copy (rejecting pixels -> white triangles on screen though the render
-             * buffer is correct).  Appended to p->batch so it stays ONE submit; marks state dirty so
-             * next frame's first triangle re-emits the full 3D+Z state. */
-            if (p->batch.buf && p->batch.n) {
-                m64_reg(&p->batch, MACH64_Z_CNTL,        0);
-                m64_reg(&p->batch, MACH64_SCALE_3D_CNTL, 0);
-                p->dirty |= MACH64_DIRTY_STATE;
-            }
+    if (!p) return;
+    /* PATH B: present through Apple's bound surface (surface_flush), the once-per-frame
+     * hook.  Takes priority over the legacy VRAM back->front blit (which needs our-kext
+     * buffers Path B doesn't allocate). */
+    if (p->off_display) {   /* window on another display: nothing of ours to present, and never the legacy CRTC page-flip below */
+        p->frame_new = 1;
+        return;
+    }
+    if (p->apple_surf_cn) {
+        /* A display-associated surface's present blits the LIVE scanout -> races IONDRV -> panic.
+         * setup_target flagged it (present_unsafe); skip the whole present here (render nothing this
+         * frame) rather than crash the machine.  The real fix is to keep the surface non-associated. */
+        if (p->present_unsafe) {
+            p->frame_new = 1;
+            return;
+        }
+        /* Render the frame's deferred glClear INTO the surface buffer with the engine (a
+         * clear-only app dispatches no triangle, so the lazy clear would otherwise never
+         * fire and we'd present the uninitialised buffer -> upper-left garbage). */
+        mach64_frame_start(ctx);
+        /* Flush THIS frame's pending triangles into the surface buffer BEFORE presenting.
+         * Without this the batch only drains at the NEXT frame's clear (fill_rect's implicit
+         * flush), so geometry lagged a frame and the clear/draw order was scrambled.  Now each
+         * frame is a clean clear -> draw -> flush -> surface_flush. */
+        /* Reset the engine to 2D state (Z off, scaler off) at the TAIL of the geometry batch, so
+         * Apple's build_swap blit that follows does NOT inherit our Z_EN and depth-test its
+         * buffer->scanout copy (rejecting pixels -> white triangles on screen though the render
+         * buffer is correct).  Appended to p->batch so it stays ONE submit; marks state dirty so
+         * next frame's first triangle re-emits the full 3D+Z state. */
+        if (p->batch.buf && p->batch.n) {
+            m64_reg(&p->batch, MACH64_Z_CNTL,        0);
+            m64_reg(&p->batch, MACH64_SCALE_3D_CNTL, 0);
+            p->dirty |= MACH64_DIRTY_STATE;
+        }
+        if (!(mach64_async_present_ok(ctx) && mach64_frame_end_async(ctx) == 0)) {
+            /* (otherwise the batch is queued on the DMA worker; the worker's present job does its own finish fence) */
             mach64_flush_batch(ctx);
             /* FENCE before present: the triangle submit KICKS the setup/scaler engine and returns;
              * surface_flush (build_swap) blits the surface buffer to scanout and can race ahead of
              * the still-rasterizing 3D engine, capturing the cleared-but-triangle-less buffer (black
-             * screen).  finish (sel 8, drain+idle) waits for the engine to retire our geometry first.
-             * (The old flush-at-next-clear timing hid this: the triangle had a whole frame to finish
-             * before its present -- but then never cleared, hence the trail.) */
-            { kern_return_t fkr = IOConnectMethodScalarIStructureI(ctx->connect,
-                                      kATIRPro_finish, 0, 0, NULL);
-              static int flog = 0; if (flog < 3) {
-                  gld_log("  [pathb] finish-fence kr=0x%x\n", fkr); flog++; } }
-                if (preview_lock) {
-                    /* release the arbitration lock -> Quartz Extreme composites the backing into the
-                     * well on its next vblank.  NO surface_flush (that would blit to scanout + wedge). */
-                    IOConnectMethodScalarIScalarO((io_connect_t)p->apple_surf_cn,
-                                                  kATIRProSurf_surface_write_unlock, 0, 0);
-                    static int ulog = 0; if (ulog < 3) {
-                        gld_log("  [pathb] preview write_unlock (QE composites; no scanout blit)\n"); ulog++; }
-                } else {
-                    mach64_pathb_present(ctx);   /* surface_flush -> blit the rendered buffer to scanout */
-                }
-            }   /* end preview_lock scope */
-            p->frame_new = 1;
-            return;
+             * screen).  finish (sel 8, drain+idle) waits for the engine to retire our geometry first. */
+            IOConnectMethodScalarIStructureI(ctx->connect, kATIRPro_finish, 0, 0, NULL);
         }
-        if (p && p->dbuf && p->back_off) {
-#ifdef GLD_PERF
-            unsigned long _pres0 = perf_now_us();
-#endif
-            /* DEFERRED-WAIT page-flip present (see the retired gldUpdateDispatch comment):
-             * wait the previous frame's flip here (overlapped with GLEngine's dispatch of
-             * this frame), submit this frame's clear+geometry to render_off, flip the CRTC
-             * to it (loads at vblank, tear-free, zero-copy), swap roles, then clear the
-             * newly-hidden buffer for the next frame. */
-            if (p->win_mode) {
-                /* WINDOWED present (coexistence probe): flush the w x h scene to the back
-                 * buffer, then BLIT it into the LIVE front at (win_x,win_y).  No page-flip --
-                 * the desktop stays visible and the WindowServer keeps compositing while our
-                 * bus-master blit + geometry DMA run.  We always render into `back`, never swap. */
-                mach64_frame_start(ctx);   /* apply a still-deferred clear BEFORE the blit, so a
-                                            * clear-only or first frame shows the clear colour rather
-                                            * than the uninitialised (per-context) back buffer. */
-                mach64_flush_batch(ctx);
+        mach64_pathb_present(ctx);   /* surface_flush -> blit the rendered buffer to scanout */
+        p->frame_new = 1;
+        return;
+    }
+    if (p->dbuf && p->back_off) {
+        if (p->win_mode) {
+            /* WINDOWED present: flush the w x h scene to the back
+             * buffer, then BLIT it into the LIVE front at (win_x,win_y).  No page-flip --
+             * the desktop stays visible and the WindowServer keeps compositing while our
+             * bus-master blit + geometry DMA run.  We always render into `back`, never swap. */
+            mach64_frame_start(ctx);   /* apply a still-deferred clear BEFORE the blit, so a
+                                        * clear-only or first frame shows the clear colour rather
+                                        * than the uninitialised (per-context) back buffer. */
+            mach64_flush_batch(ctx);
+            if (!p->win_no_blit)   /* win_no_blit: front geometry unknown / depth mismatch, see gld_entry.c */
                 mach64_blit_surface(ctx, p->back_off, p->front_off,
                                     0, 0, p->win_x, p->win_y, p->fb_w, p->fb_h, p->fb_pitch);
-                if (p->z_off) mach64_clear_zbuffer(ctx);
-                mach64_batch_clear_color(ctx);
-                p->frame_new = 0;
-            } else {
-                /* FULLSCREEN present via a 2D BLIT (back -> front scanout), NOT a CRTC
-                 * page-flip.  Writing CRTC_OFF_PITCH races Apple's framebuffer driver
-                 * (no shared lock between the two) -> the intermittent fullscreen HARD-LOCK.
-                 * A blit never touches the CRTC, so it is race-free -- and it is exactly how
-                 * Apple's own surface present works (ATIR3Surface::build_swap = a clipped 2D
-                 * blit executed by PIO, confirmed by RE; docs/re-notes/apple-glcontext-
-                 * protocol.md).  Same pattern as the windowed branch above (always render into
-                 * `back`, blit it to the live front at (0,0), NO buffer swap, NO CRTC touch);
-                 * once per frame at slot 0x60, so no multi-blit accumulation.  Tears against
-                 * the unsynced scan -- so we gate the blit on the vblank leading edge below,
-                 * where the 2D engine outruns the beam and the present stays tear-free. */
-                mach64_flush_batch(ctx);            /* geometry -> back, engine idle */
-                mach64_wait_flip(ctx);              /* vsync: kick the blit at vblank start */
-                mach64_blit_surface(ctx, p->back_off, p->front_off, 0, 0, 0, 0,
-                                    p->fb_w, p->fb_h, p->fb_pitch);
-                if (p->z_off) mach64_clear_zbuffer(ctx);
-                mach64_batch_clear_color(ctx);
-                p->frame_new = 0;
-            }
-#ifdef GLD_PERF
-            {   static unsigned long last = 0; static int fr = 0;
-                unsigned long now = perf_now_us();
-                g_perf_present_us += now - _pres0;   /* our present cycle (flip+clears+waitflip) */
-                if (last) {
-                    unsigned long wall = now - last;
-                    unsigned long ours = g_perf_dispatch_us + g_perf_present_us;   /* all OUR driver code */
-                    unsigned long gle  = wall > ours ? wall - ours : 0;            /* the rest = GLEngine T&L */
-                    if ((++fr % 5) == 0)
-                        fprintf(stderr,
-                            "PERF wall=%lu OUR[emit=%lu present=%lu] GLengine(T&L)=%lu us [GL %lu%%] (copy=%lu submit=%lu wait=%lu)\n",
-                            wall, g_perf_dispatch_us, g_perf_present_us, gle,
-                            wall ? (gle * 100UL / wall) : 0,
-                            g_perf_copy_us, g_perf_submit_us, g_perf_wait_us);
-                }
-                last = now;
-                g_perf_dispatch_us = 0; g_perf_present_us = 0;
-                g_perf_submit_us = 0; g_perf_wait_us = 0; g_perf_copy_us = 0;
-            }
-#endif
+            if (p->z_off) mach64_clear_zbuffer(ctx);
+            mach64_batch_clear_color(ctx);
+            p->frame_new = 0;
+        } else {
+            /* FULLSCREEN present via a 2D BLIT (back -> front scanout), NOT a CRTC
+             * page-flip.  Writing CRTC_OFF_PITCH races Apple's framebuffer driver
+             * (no shared lock between the two) -> the intermittent fullscreen HARD-LOCK.
+             * A blit never touches the CRTC, so it is race-free -- and it is exactly how
+             * Apple's own surface present works (ATIR3Surface::build_swap = a clipped 2D
+             * blit executed by PIO, confirmed by RE; docs/re-notes/apple-glcontext-
+             * protocol.md).  Same pattern as the windowed branch above (always render into
+             * `back`, blit it to the live front at (0,0), NO buffer swap, NO CRTC touch);
+             * once per frame at slot 0x60, so no multi-blit accumulation.  Tears against
+             * the unsynced scan -- so we gate the blit on the vblank leading edge below,
+             * where the 2D engine outruns the beam and the present stays tear-free. */
+            mach64_flush_batch(ctx);            /* geometry -> back, engine idle */
+            mach64_wait_flip(ctx);              /* vsync: kick the blit at vblank start */
+            mach64_blit_surface(ctx, p->back_off, p->front_off, 0, 0, 0, 0,
+                                p->fb_w, p->fb_h, p->fb_pitch);
+            if (p->z_off) mach64_clear_zbuffer(ctx);
+            mach64_batch_clear_color(ctx);
+            p->frame_new = 0;
         }
     }
 }

@@ -7,8 +7,8 @@
  * the next draw re-emits the block (see gld_render.c:mach64_draw_triangle).
  *
  * Only the untextured-gouraud subset we PROVED on hardware is wired up; the
- * values come straight from docs/re-notes/3d-triangle.md.  Texture/fog/blend
- * knobs are stubbed with TODOs.
+ * values come straight from docs/re-notes/3d-triangle.md.  (Texture, fog, blend, stipple and logic-op
+ * state is handled in gld_texture.c / gld_render.c / gli-register sync; hardware-verified by tools/mach64_pathb_suite.)
  *
  * Needs the 10.3 headers to build against the real bundle; this is the porting
  * skeleton.  The register bit values live in ../common/mach64_regs.h.
@@ -33,7 +33,7 @@ void mach64_init_state(mach64_priv *p)
     s->scale_3d_cntl = MACH64_SCALE_3D_CNTL_SOLID;  /* 0x100c1 shade pipe   */
     s->setup_cntl    = MACH64_SETUP_CNTL_SHADE;     /* 0  (0x40 breaks it)  */
     s->z_cntl        = 0;                           /* depth off            */
-    s->dp_pix_width  = 0x60060666;                  /* ARGB8888             */
+    s->dp_pix_width  = M64_PIXW(p);                 /* ARGB8888 (RGB565 when cbpp == 2) */
     s->dst_off_pitch = 0;                           /* set per drawable     */
     s->sc_left_right = 0x1fff0000;                  /* scissor wide open    */
     s->sc_top_bottom = 0x3fff0000;
@@ -45,6 +45,15 @@ void mach64_init_state(mach64_priv *p)
     p->dirty        |= MACH64_DIRTY_STATE;
 }
 
+/* Colour buffer depth for this context: 2 = RGB565, 4 = ARGB8888.  Switches the shadow DP_PIX_WIDTH the 3D pipe renders with. */
+void mach64_set_cbpp(gld_context *ctx, uint32_t bytes)
+{
+    mach64_priv *p = MACH64_PRIV(ctx);
+    p->cbpp = (bytes == 2u) ? 2u : 4u;
+    p->hw.dp_pix_width = M64_PIXW(p);
+    p->dirty |= MACH64_DIRTY_STATE;
+}
+
 /* Render target = the current GL drawable's back/front surface in VRAM. */
 void mach64_set_render_target(gld_context *ctx, uint32_t off, uint32_t pitch_px)
 {
@@ -54,9 +63,10 @@ void mach64_set_render_target(gld_context *ctx, uint32_t off, uint32_t pitch_px)
      * full-screen size (1024x768 -> 0x900000) and, if the engine ever renders there, PANICS the
      * machine.  Reject it: keep the previous (in-bounds) target so setup_target's real surface rt is
      * the one that sticks.  Legitimate offsets (< 8MB) pass through untouched -> windowed unaffected. */
-    if (off >= 0x800000u) {
-        gld_log("[state] set_render_target OOB off=0x%x REJECTED (>=8MB VRAM)\n", off);
-        return;
+    {   uint32_t h = *(const uint32_t *)((const char *)ctx + 0x1f4);
+        if (!mach64_vram_span_ok(off, (uint64_t)pitch_px * M64_CBPP(p) * h)) {     /* whole span, not just the start: the register window is the top 2KB */
+            return;
+        }
     }
     p->target_off   = off;
     p->target_pitch = pitch_px;
@@ -86,9 +96,10 @@ void mach64_set_zbuffer(gld_context *ctx, uint32_t off, uint32_t pitch_px)
     /* OOB GUARD (same rationale as set_render_target): reject a depth-buffer offset >= 8MB VRAM.
      * The legacy path's guessed/winpool Z lands past 8MB at full-screen size; writing/clearing Z
      * there PANICS.  Reject -> keep the prior Z (setup_target's allocator sets the real one). */
-    if (off >= 0x800000u) {
-        gld_log("[state] set_zbuffer OOB off=0x%x REJECTED (>=8MB VRAM)\n", off);
-        return;
+    {   uint32_t h = *(const uint32_t *)((const char *)ctx + 0x1f4);
+        if (!mach64_vram_span_ok(off, (uint64_t)pitch_px * 2u * h)) {     /* 16-bit Z */
+            return;
+        }
     }
     p->z_off   = off;
     p->z_pitch = pitch_px;

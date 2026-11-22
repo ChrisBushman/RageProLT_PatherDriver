@@ -87,7 +87,7 @@ gli, emits SCALE_3D_CNTL/TEX_CNTL/ALPHA_TST_CNTL/DP_*) + gld_state.c.
      reduces to SRC_ALPHA and reads back the identical (100,50,25); no hang.  (Same header also revealed
      TEX_BLEND_FCN_LINEAR is 2<<26=0x08000000, not the 0x04000000 the min-filter probe had used -- value
      corrected in gld_texture.c though still moot, no mip chain.)
-5. **Multitexture -- N/A.**  The LT Pro has a single TMU; ARB_multitexture is not HW-supported.
+5. **Multitexture -- IMPLEMENTED (Nov 20).**  The first version of this audit said the LT Pro has a single TMU; wrong: the composite (second-texture) hardware exists and runs two units in one pass. See feature-audit.md gap 1.
 
 ## Status: AUDIT CLOSED (2026-08-27)
 Every gap is resolved or bounded by hardware.  Real wins shipped: bilinear MAGNIFICATION (#1),

@@ -52,6 +52,21 @@
  * rev 0xdc), matching the PCI IDs. */
 #define MACH64_REG_WINDOW       0x7FF800u   /* BAR0 + 8MB - 2KB */
 
+/* ---- Address-safety limits (the "what memory may the driver touch" map; see docs/memory-map.md) -------------------
+ * The chip's register window lives INSIDE the 8MB VRAM aperture, so usable VRAM ends where the window begins.  A surface,
+ * Z buffer, texture or blit that merely STRADDLES that line writes live registers (hang/panic); a start-offset check
+ * against 8MB is not enough.  Every VRAM span the driver hands to the engine must satisfy mach64_vram_span_ok(). */
+#define MACH64_VRAM_USABLE_END  MACH64_REG_WINDOW
+/* highest register offset Apple's submit_buffer may be asked for, in the DRI numbering the plugin builds (block 1 = 0x400..0x7ff).
+ * Apple writes base+(R-0x400) with no bounds check of its own, so anything above this lands outside the mapped register window. */
+#define MACH64_DRI_REG_MAX      0x7FCu
+/* len is 64-bit so callers can do the pitch*bytes*rows product in 64 bits too: a garbage 32-bit product wraps to a small value and would
+ * pass (found by host test Nov 20). */
+static inline int mach64_vram_span_ok(uint32_t off, uint64_t len)
+{
+    return off < MACH64_VRAM_USABLE_END && len <= (uint64_t)(MACH64_VRAM_USABLE_END - off);
+}
+
 /* ---- Bus-master data port (submission target) ----------------------- */
 #define MACH64_BM_ADDR          0x0648
 
@@ -70,7 +85,10 @@
 
 /* Verified solid/gouraud untextured no-depth triangle state (3d-triangle.md) */
 #define MACH64_SCALE_3D_CNTL_SOLID  0x000100c1u  /* shade, opaque, no tex/fog */
-/* SETUP_CNTL: use 0 for BOTH flat and gouraud.  The flat triangle happened to
+/* [Nov 20 2026] LOG_MAX_INC_ADJ (0x40) does NOT break gouraud: textured gradients and untextured gouraud after a hardware-mip draw both verified
+ * (suite tex_mip_gouraud).  The plugin sets it only for hardware-mip draws (it is the setup-engine bit mip level selection needs; the Win98 driver
+ * sets it always, docs/re-notes/win98-mipmap.md).  The note below predates that and is kept for history.
+ * SETUP_CNTL: use 0 for BOTH flat and gouraud.  The flat triangle happened to
  * work with 0x40 (LOG_MAX_INC_ADJ) because its colour came from DP_FRGD_CLR, but
  * that bit BREAKS the per-vertex colour-gradient setup (gouraud reads back solid
  * white).  0 is mesa's value.  VERIFIED on hardware -- see 3d-triangle.md. */

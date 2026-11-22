@@ -69,7 +69,9 @@ enum {
     kMach64Sel_scale_surface      = 14, /* ScalarI_StructI  in=3          */
     kMach64Sel_new_vertex_buffer  = 15, /* ScalarI_ScalarO  in=1 out=1    */
     kMach64Sel_delete_vertex_buffer = 16, /* ScalarI_StructI in=1         */
-    kMach64Sel_COUNT              = 17,
+    kMach64Sel_accel_hold         = 17, /* ScalarI_ScalarO in=1 out=0: take Apple's accelerator mutex (kernel address passed in: accel[0x544], read through Apple's patched peek selector) and KEEP it across the return */
+    kMach64Sel_accel_release      = 18, /* ScalarI_ScalarO in=0 out=0: release it (same thread; the dying-client path releases it safely too) */
+    kMach64Sel_COUNT              = 19,
 };
 
 /* get_config (selector 3) returns 3 dwords into the plugin's context. */

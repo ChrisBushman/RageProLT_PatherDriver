@@ -22,6 +22,10 @@ class Mach64GLUserClient : public IOUserClient
     Mach64Accelerator     *fProvider;
     task_t                 fTask;
     IOExternalMethod       fMethods[kMach64Sel_COUNT];
+    IOService             *fAccel;     // Apple's IOATIRProAccelerator (found lazily)
+    void                  *fMutex;     // Apple's accelerator mutex (accel[0x544]) while this client holds it
+    UInt32                 fHeld;      // 1 while held (OSCompareAndSwap: release, watchdog and client death race for it)
+    void                  *fCall;      // thread_call: the hold watchdog
 
 public:
     // IOUserClient overrides
@@ -44,6 +48,10 @@ public:
     IOReturn delete_vertex_buffer(UInt32 bufferID);                    // sel 16
     IOReturn finish(void);                                             // sel 8
     IOReturn wait_for_stamp(UInt32 stamp);                            // sel 9
+    IOReturn accel_hold(UInt32 mutexAddr);                            // sel 17
+    IOReturn accel_release(void);                                     // sel 18
+    virtual void free(void);
+    void     watchdog(void);                                          // force-release a hold that lasted too long (owner stalled or died)
     // ... new_texture / delete_texture / read_buffer / swap etc. ...
 };
 

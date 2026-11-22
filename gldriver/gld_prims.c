@@ -41,7 +41,7 @@
 #define GVOFF_G    0x34
 #define GVOFF_B    0x38
 
-static uint32_t chan(float f){ int c = (int)(f*255.0f + 0.5f); return c<0?0:(c>255?255:(uint32_t)c); }
+static uint32_t chan(float f){ return m64_f2u8(f); }
 
 void mach64_read_vertex(const void *vp, m64_vertex *o, float fb_h)
 {
@@ -49,19 +49,6 @@ void mach64_read_vertex(const void *vp, m64_vertex *o, float fb_h)
     float x = *(const float *)(v + GVOFF_X);
     float y = *(const float *)(v + GVOFF_Y);
     float w = *(const float *)(v + GVOFF_W);
-#ifdef GLD_WINSCAN
-    /* DIAGNOSTIC: track the window-space bounding box of the geometry GLEngine hands
-     * us.  If x/y span ~[0..1024]x[0..768] the T&L transform is correct (any tiny render
-     * is ours); if they cluster near the center in a tiny range, GLEngine's viewport
-     * transform was fed a bad drawable size (garbage descriptor). */
-    {   static float xmn=1e9f,xmx=-1e9f,ymn=1e9f,ymx=-1e9f,wmn=1e9f,wmx=-1e9f; static unsigned nn=0;
-        if(x<xmn)xmn=x; if(x>xmx)xmx=x; if(y<ymn)ymn=y; if(y>ymx)ymx=y;
-        if(w<wmn)wmn=w; if(w>wmx)wmx=w;
-        if((++nn & 0x7ff)==0)
-            gld_log("WINSCAN n=%u x[%.1f..%.1f] y[%.1f..%.1f] w(1/wc)[%.4f..%.4f] fb_h=%.0f\n",
-                    nn,xmn,xmx,ymn,ymx,wmn,wmx,fb_h);
-    }
-#endif
     /* Depth for the Z buffer.  The screen-Z slot (+0x08) is 0 (GLEngine's window depth range
      * is degenerate for our surface), so derive it from +0x18.  +0x18 is CLIP-space z
      * (pre-perspective-divide); the true NDC z is clip_z / w = clip_z * (1/w), and +0x0c
@@ -69,26 +56,13 @@ void mach64_read_vertex(const void *vp, m64_vertex *o, float fb_h)
      * w=1, but in perspective it left z well outside [-1,1] so depth clamped to the far plane
      * across much of the scene -> everything at max Z -> Z-fighting that flickered once a
      * textured cube rotated.)  window z = ndc_z*0.5 + 0.5 (default depth range). */
+    float rw = (w != 0.0f) ? 1.0f / w : 1.0f;       /* shared by every texcoord pair below (fdivs is ~17 cycles on the G3) */
     float ndcz  = *(const float *)(v + 0x18) * w;   /* w == 1/w_clip (from +0x0c) */
     float depth = ndcz * 0.5f + 0.5f;
     uint32_t argb = (chan(*(const float *)(v + 0x3c)) << 24)   /* vertex colour alpha */
                   | (chan(*(const float *)(v + GVOFF_R)) << 16)
                   | (chan(*(const float *)(v + GVOFF_G)) <<  8)
                   |  chan(*(const float *)(v + GVOFF_B));
-#ifdef GLD_FOGSCAN
-    /* Learn the fog factor (+0x4c) vs colour alpha (+0x3c): print only when +0x4c
-     * changes.  Tells us +0x4c's fog-OFF default (if a fixed 1.0, fog could run
-     * unconditionally without the enable flag) and confirms it varies with depth. */
-    {   static uint32_t fs_last = 0xdeadbeefu;
-        uint32_t f4c = *(const uint32_t *)(v + 0x4c);
-        if (f4c != fs_last) {
-            fs_last = f4c;
-            gld_log("FOGSCAN vtx +0x4c=0x%08x (%.3f)  +0x3c=0x%08x (%.3f)\n",
-                    f4c, *(const float *)(v + 0x4c),
-                    *(const uint32_t *)(v + 0x3c), *(const float *)(v + 0x3c));
-        }
-    }
-#endif
     mach64_pack_vertex(o, x, fb_h - y, depth, w, argb);  /* GL y-up -> FB y-down */
     /* Per-vertex texcoords.  GLEngine hands us PERSPECTIVE-PREMULTIPLIED coords: +0x80/+0x84
      * hold S/w and T/w, and +0x0c holds 1/w (HW-proven via the cube test).  But the mach64
@@ -97,12 +71,19 @@ void mach64_read_vertex(const void *vp, m64_vertex *o, float fb_h)
      * it the already-divided S/w makes it divide TWICE (address = S/w) and the texture warps
      * with perspective.  Un-premultiply here: raw S = (S/w)/(1/w).  (2D was immune: w=1.)
      * pack_vertex already put W = 1/w (from +0x0c) into o->w for the engine's divide. */
-    {   float sw = *(const float *)(v + 0x80);   /* S/w */
-        float tw = *(const float *)(v + 0x84);   /* T/w */
-        float rs = (w != 0.0f) ? sw / w : sw;    /* w == 1/w_clip (from +0x0c) -> raw S */
-        float rt = (w != 0.0f) ? tw / w : tw;
+    {   float sw = *(const float *)(v + mach64_tex_vofs[0]);        /* S/w (unit 0: +0x80) */
+        float tw = *(const float *)(v + mach64_tex_vofs[0] + 4);    /* T/w */
+        float rs = sw * rw;    /* w == 1/w_clip (from +0x0c) -> raw S = (S/w)/w; one reciprocal per vertex instead of a divide per coordinate */
+        float rt = tw * rw;
         __builtin_memcpy(&o->s, &rs, 4);
         __builtin_memcpy(&o->t, &rt, 4);
+    }
+    /* Secondary texture unit (ARB_multitexture): same gli vertex, coordinates one unit stride (0x10) further on (+0x90/+0x94; the Rage128 driver
+     * copies exactly these fields), un-premultiplied by the same 1/w.  The hardware has ONE W per vertex plus SECONDARY_W, both = 1/w. */
+    if (mach64_tex_vofs[1]) {
+        float sw = *(const float *)(v + mach64_tex_vofs[1]), tw = *(const float *)(v + mach64_tex_vofs[1] + 4);
+        float rs = sw * rw, rt = tw * rw;
+        __builtin_memcpy(&o->s2, &rs, 4); __builtin_memcpy(&o->t2, &rt, 4); o->w2 = o->w;
     }
     /* GL_FOG: the LT Pro sources the interpolated fog factor from the SPECULAR alpha
      * (VERTEX_SPEC_ARGB[31:24]) -- NOT the primary vertex alpha the Rage128 reference
@@ -111,6 +92,15 @@ void mach64_read_vertex(const void *vp, m64_vertex *o, float fb_h)
      * ALPHA_FOG_EN=FOG (bit12) in mach64_apply_fog.  mach64_fog_on is set per-draw by
      * mach64_bind_texture. */
     if (mach64_fog_on) o->spec_argb = chan(*(const float *)(v + 0x4c)) << 24;
+    if (mach64_spec_mode) {   /* separate specular colour: R,G,B floats at +0x40/+0x44/+0x48 */
+        uint32_t sr = chan(*(const float *)(v + 0x40)), sg = chan(*(const float *)(v + 0x44)), sb = chan(*(const float *)(v + 0x48));
+        if (mach64_spec_mode == 1) o->spec_argb |= (sr << 16) | (sg << 8) | sb;          /* hardware adds it after texturing */
+        else {                                                                         /* untextured: the hardware only adds it to textured pixels -> fold into the colour */
+            uint32_t r = ((o->argb >> 16) & 0xff) + sr, gg = ((o->argb >> 8) & 0xff) + sg, b = (o->argb & 0xff) + sb;
+            if (r > 255) r = 255; if (gg > 255) gg = 255; if (b > 255) b = 255;
+            o->argb = (o->argb & 0xff000000u) | (r << 16) | (gg << 8) | b;
+        }
+    }
 }
 
 #define VTX(base, i)  ((const void *)((const unsigned char *)(base) + (i) * MACH64_GLIVERTEX_STRIDE))
@@ -133,7 +123,7 @@ static void pack_at(const void *vp, float gx, float gy, float fb_h, m64_vertex *
      * so un-premultiply to raw S,T -- same as mach64_read_vertex.  draw_point passes the same
      * vertex for all 4 quad corners (uniform texcoord across the point); draw_line passes each
      * endpoint (the scaler interpolates the texture along the line). */
-    {   float sw = *(const float *)(v + 0x80), tw = *(const float *)(v + 0x84);
+    {   float sw = *(const float *)(v + mach64_tex_vofs[0]), tw = *(const float *)(v + mach64_tex_vofs[0] + 4);
         float rs = (w != 0.0f) ? sw / w : sw, rt = (w != 0.0f) ? tw / w : tw;
         /* Half-texel inset for a texcoord in [0,1] (same fix emit_tri does for triangles):
          * remap so the edge samples texel CENTRES [0.5/w..(w-0.5)/w] instead of the boundary
@@ -144,6 +134,11 @@ static void pack_at(const void *vp, float gx, float gy, float fb_h, m64_vertex *
             rt = rt * (float)(tex_h - 1) / (float)tex_h + 0.5f / (float)tex_h;
         }
         __builtin_memcpy(&o->s, &rs, 4); __builtin_memcpy(&o->t, &rt, 4);
+    }
+    if (mach64_tex_vofs[1]) {      /* secondary unit: same un-premultiply, no inset (points/lines sample the vertex coordinate directly) */
+        float sw = *(const float *)(v + mach64_tex_vofs[1]), tw = *(const float *)(v + mach64_tex_vofs[1] + 4);
+        float rs = (w != 0.0f) ? sw / w : sw, rt = (w != 0.0f) ? tw / w : tw;
+        __builtin_memcpy(&o->s2, &rs, 4); __builtin_memcpy(&o->t2, &rt, 4); o->w2 = o->w;
     }
 }
 
@@ -210,47 +205,88 @@ static float vst(int32_t bits) { float f; __builtin_memcpy(&f, &bits, 4); return
 static void  set_s(m64_vertex *v, float f) { __builtin_memcpy(&v->s, &f, 4); }
 static void  set_t(m64_vertex *v, float f) { __builtin_memcpy(&v->t, &f, 4); }
 
-static void emit_tri(gld_context *ctx, const void *base,
-                     uint32_t a, uint32_t b, uint32_t c)
+/* Draw one triangle from three vertices that mach64_read_vertex has already converted (r0..r2; gv0..gv2 are the matching GLEngine vertices, for the
+ * LOD area).  Fans, strips and quads convert each vertex ONCE and call this per triangle instead of re-reading 3 vertices per triangle. */
+/* G3 maths: no FPU compares / divides per triangle.
+ * m64_uv_within: all six texcoords in [-0.001, 1.001], tested on the float BIT PATTERNS (for IEEE singles the magnitude order equals the order of the bits with the sign cleared;
+ * NaN/Inf fail both tests exactly as the float compare did).  m64_inset: s' = s*(w-1)/w + 0.5/w constants; for the power-of-two sizes the hardware needs they are exact from a table
+ * (no fdivs); other sizes fall back to the divide. */
+static inline int m64_bits_in_range(int32_t b)
+{
+    uint32_t mag = (uint32_t)b & 0x7fffffffu;
+    return b < 0 ? mag <= 0x3a83126fu : mag <= 0x3f8020c5u;         /* 0.001f , 1.001f */
+}
+static inline int m64_uv_within(int32_t s0, int32_t s1, int32_t s2, int32_t t0, int32_t t1, int32_t t2)
+{
+    return m64_bits_in_range(s0) & m64_bits_in_range(s1) & m64_bits_in_range(s2) & m64_bits_in_range(t0) & m64_bits_in_range(t1) & m64_bits_in_range(t2);
+}
+static inline void m64_inset(int n, float *scale, float *bias)
+{
+    static const float inv[13] = { 1.0f, 0.5f, 0.25f, 0.125f, 0.0625f, 0.03125f, 0.015625f, 0.0078125f, 0.00390625f, 0.001953125f, 0.0009765625f, 0.00048828125f, 0.000244140625f };
+    unsigned u = (unsigned)n;
+    if (u && (u & (u - 1)) == 0 && u <= 4096u) { unsigned z; int lg; __asm__("cntlzw %0,%1" : "=r"(z) : "r"(u)); lg = 31 - (int)z; *scale = 1.0f - inv[lg]; *bias = 0.5f * inv[lg]; }
+    else { *scale = (float)(n - 1) / (float)n; *bias = 0.5f / (float)n; }
+}
+/* m64_vertex is 10 words: copy them inline (the struct assignment compiled to a memcpy() call per vertex, ~2% of the main thread) */
+static inline __attribute__((always_inline)) void m64_vcopy(m64_vertex *d, const m64_vertex *s)
+{
+    d->x_y = s->x_y; d->z = s->z; d->w = s->w; d->s = s->s; d->t = s->t; d->spec_argb = s->spec_argb; d->argb = s->argb; d->s2 = s->s2; d->t2 = s->t2; d->w2 = s->w2;
+}
+static void emit_tri_rv(gld_context *ctx, const m64_vertex *r0, const m64_vertex *r1, const m64_vertex *r2,
+                        const void *gv0, const void *gv1, const void *gv2)
 {
     mach64_priv *p = MACH64_PRIV(ctx);
-    m64_vertex v0, v1, v2;
-    float fb_h = (float)*(const uint32_t *)((const unsigned char *)ctx + 0x1f4);
-#ifdef GLD_PERF
-    unsigned long _et0 = perf_now_us();   /* time OUR per-triangle CPU: read_vertex + emit + inline flush */
-#endif
+    /* Work on the caller's vertices through const pointers; copy them (OWN) only when this triangle has to modify one (flat colour / texel inset): most triangles need no copy. */
+    const m64_vertex *q0 = r0, *q1 = r1, *q2 = r2;
+    m64_vertex v0, v1, v2; int own = 0;
+#define OWN() do { if (!own) { m64_vcopy(&v0, r0); m64_vcopy(&v1, r1); m64_vcopy(&v2, r2); q0 = &v0; q1 = &v1; q2 = &v2; own = 1; } } while (0)
+    /* glShadeModel(GL_FLAT): flatten to the provoking (GL default = LAST) vertex's colour so
+     * the 3D scaler interpolates a constant.  For GL_TRIANGLES v2 is the provoking vertex. */
+    if (mach64_flat_on) { OWN(); v0.argb = v2.argb; v1.argb = v2.argb; }
+    if (p->hw.textured && p->tex_slot) {        /* software mip level / min filter for this triangle */
+        const unsigned char *g0 = (const unsigned char *)gv0, *g1 = (const unsigned char *)gv1, *g2 = (const unsigned char *)gv2;
+        float x0 = *(const float *)(g0 + GVOFF_X), y0 = *(const float *)(g0 + GVOFF_Y);
+        float x1 = *(const float *)(g1 + GVOFF_X), y1 = *(const float *)(g1 + GVOFF_Y);
+        float x2 = *(const float *)(g2 + GVOFF_X), y2 = *(const float *)(g2 + GVOFF_Y);
+        float ds0 = vst(q0->s), ds1 = vst(q1->s), ds2 = vst(q2->s), dt0 = vst(q0->t), dt1 = vst(q1->t), dt2 = vst(q2->t);
+        mach64_tex_select_lod(ctx, 0.5f * ((x1 - x0) * (y2 - y0) - (x2 - x0) * (y1 - y0)),
+                                   0.5f * ((ds1 - ds0) * (dt2 - dt0) - (ds2 - ds0) * (dt1 - dt0)));
+    }
+    if (p->hw.textured && p->tex_w > 0 && p->tex_h > 0) {
+        if (m64_uv_within(q0->s, q1->s, q2->s, q0->t, q1->t, q2->t)) {      /* non-tiling: inset to texel centres */
+            float ss, bs, ts, bt; m64_inset(p->tex_w, &ss, &bs); m64_inset(p->tex_h, &ts, &bt);
+            OWN();
+            set_s(&v0, vst(v0.s)*ss+bs); set_s(&v1, vst(v1.s)*ss+bs); set_s(&v2, vst(v2.s)*ss+bs);
+            set_t(&v0, vst(v0.t)*ts+bt); set_t(&v1, vst(v1.t)*ts+bt); set_t(&v2, vst(v2.t)*ts+bt);
+        }
+    }
+    if (p->hw.textured && p->hw.multitex && p->tex2_w > 0 && p->tex2_h > 0) {      /* same half-texel inset for the secondary map */
+        if (m64_uv_within(q0->s2, q1->s2, q2->s2, q0->t2, q1->t2, q2->t2)) {
+            float ss, bs, ts, bt; m64_inset(p->tex2_w, &ss, &bs); m64_inset(p->tex2_h, &ts, &bt);
+            OWN();
+            { float f; f=vst(v0.s2)*ss+bs; __builtin_memcpy(&v0.s2,&f,4); f=vst(v1.s2)*ss+bs; __builtin_memcpy(&v1.s2,&f,4); f=vst(v2.s2)*ss+bs; __builtin_memcpy(&v2.s2,&f,4);
+                       f=vst(v0.t2)*ts+bt; __builtin_memcpy(&v0.t2,&f,4); f=vst(v1.t2)*ts+bt; __builtin_memcpy(&v1.t2,&f,4); f=vst(v2.t2)*ts+bt; __builtin_memcpy(&v2.t2,&f,4); }
+        }
+    }
+#undef OWN
+    mach64_draw_triangle(ctx, q0, q1, q2);
+}
+
+#define FBH_OF(ctx) ((float)*(const uint32_t *)((const unsigned char *)(ctx) + 0x1f4))
+static void emit_tri(gld_context *ctx, const void *base, uint32_t a, uint32_t b, uint32_t c)
+{
+    m64_vertex v0, v1, v2; float fb_h = FBH_OF(ctx);
     mach64_read_vertex(VTX(base, a), &v0, fb_h);
     mach64_read_vertex(VTX(base, b), &v1, fb_h);
     mach64_read_vertex(VTX(base, c), &v2, fb_h);
-    /* glShadeModel(GL_FLAT): flatten to the provoking (GL default = LAST) vertex's colour so
-     * the 3D scaler interpolates a constant.  For GL_TRIANGLES v2 is the provoking vertex. */
-    if (mach64_flat_on) { v0.argb = v2.argb; v1.argb = v2.argb; }
-    if (p->hw.textured && p->tex_w > 0 && p->tex_h > 0) {
-        float s0=vst(v0.s), s1=vst(v1.s), s2=vst(v2.s);
-        float t0=vst(v0.t), t1=vst(v1.t), t2=vst(v2.t);
-        int within = (s0>=-0.001f && s0<=1.001f && s1>=-0.001f && s1<=1.001f &&
-                      s2>=-0.001f && s2<=1.001f && t0>=-0.001f && t0<=1.001f &&
-                      t1>=-0.001f && t1<=1.001f && t2>=-0.001f && t2<=1.001f);
-        if (within) {                     /* non-tiling: inset to texel centres */
-            float ss=(float)(p->tex_w-1)/(float)p->tex_w, bs=0.5f/(float)p->tex_w;
-            float ts=(float)(p->tex_h-1)/(float)p->tex_h, bt=0.5f/(float)p->tex_h;
-            set_s(&v0,s0*ss+bs); set_s(&v1,s1*ss+bs); set_s(&v2,s2*ss+bs);
-            set_t(&v0,t0*ts+bt); set_t(&v1,t1*ts+bt); set_t(&v2,t2*ts+bt);
-        }
-    }
-    mach64_draw_triangle(ctx, &v0, &v1, &v2);
-#ifdef GLD_PERF
-    g_perf_dispatch_us += perf_now_us() - _et0;
-#endif
+    emit_tri_rv(ctx, &v0, &v1, &v2, VTX(base, a), VTX(base, b), VTX(base, c));
 }
 
 /* Reject an absurd vertex count: the STRIP/FAN/QUAD dispatch slots are mis-mapped
  * (labels off by one -- see gld_dispatch.c) and a mis-dispatched slot can hand us
  * a garbage count, which without this guard runs a loop over unmapped memory and
  * crashes the app.  GL_TRIANGLES is correctly dispatched and unaffected. */
-#define PRIM_SANE(n) do { if ((n) > 0x40000u) { \
-        gld_log("mach64: bogus vertex count 0x%x -- skipping primitive\n", (n)); \
-        return; } } while (0)
+#define PRIM_SANE(n) do { if ((n) > 0x40000u) return; } while (0)
 
 /* Elements-tris vector (dispatch slot 0x48).  Apple's GLEngine does T&L + clipping in
  * software: when a primitive is clipped (GL_SCISSOR_TEST, or a triangle crossing the view
@@ -268,17 +304,18 @@ void mach64_render_elt_tris(gld_context *ctx, const void *v, uint32_t n)
 {
     const uint32_t *pa = (const uint32_t *)v;
     float fb_h = (float)*(const uint32_t *)((const unsigned char *)ctx + 0x1f4);
-    m64_vertex v0, vp, vc;
+    m64_vertex v0, vq[2];
     uint32_t i;
     PRIM_SANE(n);
     if (!v || n < 3) return;
     mach64_sync_depth_from_gli(ctx);
     mach64_bind_texture(ctx);
     mach64_read_vertex((const void *)(uintptr_t)pa[0], &v0, fb_h);   /* fan apex */
-    for (i = 2; i < n; i++) {
-        mach64_read_vertex((const void *)(uintptr_t)pa[i-1], &vp, fb_h);
-        mach64_read_vertex((const void *)(uintptr_t)pa[i],   &vc, fb_h);
-        mach64_draw_triangle(ctx, &v0, &vp, &vc);
+    mach64_read_vertex((const void *)(uintptr_t)pa[1], &vq[1], fb_h);
+    for (i = 2; i < n; i++) {                                         /* each perimeter vertex is converted once and reused by the next triangle */
+        m64_vertex *vp = &vq[(i - 1) & 1], *vc = &vq[i & 1];
+        mach64_read_vertex((const void *)(uintptr_t)pa[i], vc, fb_h);
+        mach64_draw_triangle(ctx, &v0, vp, vc);
     }
 }
 
@@ -287,14 +324,6 @@ void mach64_render_triangles(gld_context *ctx, const void *v, uint32_t n)
 {
     uint32_t i;
     PRIM_SANE(n);
-    gld_log("mach64_render_triangles(n=%u v=%p)\n", n, v);
-    if (v && n > 0) {
-        const unsigned char *p = (const unsigned char *)v;
-        gld_log("  vtx0: XY=0x%08x ARGB=0x%08x Z=0x%08x\n",
-                *(const uint32_t *)(p + VOFF_XY),
-                *(const uint32_t *)(p + VOFF_ARGB),
-                *(const uint32_t *)(p + VOFF_Z));
-    }
     mach64_sync_depth_from_gli(ctx);     /* Z_CNTL follows the app's GL depth state (GL_TRIANGLES
                                           * was missing this -- strip/fan/quad have it -- so a
                                           * depth-tested glBegin(GL_TRIANGLES) never enabled Z). */
@@ -308,9 +337,16 @@ void mach64_render_tri_strip(gld_context *ctx, const void *v, uint32_t n)
     PRIM_SANE(n);
     mach64_sync_depth_from_gli(ctx);   /* Z_CNTL follows the app's GL depth state */
     mach64_bind_texture(ctx);          /* upload+program texture if bound */
-    for (i = 2; i < n; i++)                      /* flip winding on odd tris */
-        if (i & 1) emit_tri(ctx, v, i-1, i-2, i);
-        else       emit_tri(ctx, v, i-2, i-1, i);
+    if (n < 3) return;
+    {   m64_vertex q[3]; float fb_h = FBH_OF(ctx);        /* rolling window of 3 converted vertices: each vertex is read once */
+        mach64_read_vertex(VTX(v, 0), &q[0], fb_h);
+        mach64_read_vertex(VTX(v, 1), &q[1], fb_h);
+        for (i = 2; i < n; i++) {
+            m64_vertex *a = &q[(i - 2) % 3], *b = &q[(i - 1) % 3], *c = &q[i % 3];
+            mach64_read_vertex(VTX(v, i), c, fb_h);
+            if (i & 1) emit_tri_rv(ctx, b, a, c, VTX(v, i-1), VTX(v, i-2), VTX(v, i));   /* flip winding on odd tris */
+            else       emit_tri_rv(ctx, a, b, c, VTX(v, i-2), VTX(v, i-1), VTX(v, i));
+        } }
 }
 
 void mach64_render_tri_fan(gld_context *ctx, const void *v, uint32_t n)
@@ -319,7 +355,15 @@ void mach64_render_tri_fan(gld_context *ctx, const void *v, uint32_t n)
     PRIM_SANE(n);
     mach64_sync_depth_from_gli(ctx);
     mach64_bind_texture(ctx);          /* upload+program texture if bound */
-    for (i = 2; i < n; i++) emit_tri(ctx, v, 0, i-1, i);
+    if (n < 3) return;
+    {   m64_vertex a, q[2]; float fb_h = FBH_OF(ctx);      /* apex converted once, each perimeter vertex once */
+        mach64_read_vertex(VTX(v, 0), &a, fb_h);
+        mach64_read_vertex(VTX(v, 1), &q[1], fb_h);
+        for (i = 2; i < n; i++) {
+            m64_vertex *b = &q[(i - 1) & 1], *c = &q[i & 1];
+            mach64_read_vertex(VTX(v, i), c, fb_h);
+            emit_tri_rv(ctx, &a, b, c, VTX(v, 0), VTX(v, i-1), VTX(v, i));
+        } }
 }
 
 /* GL_TRIANGLE_FAN dispatch slot (table+0x30) uses a DIFFERENT calling convention
@@ -329,7 +373,7 @@ void mach64_render_tri_fan(gld_context *ctx, const void *v, uint32_t n)
  * apex) in r5, and the perimeter vertex count in r6 -- NOT f(ctx, verts, count).
  * The generic render_tri_fan reads the count from r5, which here is the perimeter
  * POINTER -> a garbage count -> a runaway loop over unmapped memory and a crash
- * (recovered via the GLD_DISPATCH_PROBE run, tools/mach64_dispatchprobe).  The
+ *.  The
  * apex is verts[0] and the perimeter is verts[1..], so the full contiguous array
  * is (perimeter_count + 1) vertices and the generic fan body over `apex` with that
  * total is correct. */
@@ -352,9 +396,11 @@ void mach64_render_quads(gld_context *ctx, const void *v, uint32_t n)
     PRIM_SANE(n);
     mach64_sync_depth_from_gli(ctx);
     mach64_bind_texture(ctx);          /* upload+program texture if bound */
-    for (i = 0; i + 4 <= n; i += 4) {            /* quad -> 2 tris */
-        emit_tri(ctx, v, i,   i+1, i+2);
-        emit_tri(ctx, v, i,   i+2, i+3);
+    for (i = 0; i + 4 <= n; i += 4) {            /* quad -> 2 tris (4 vertex conversions, not 6) */
+        m64_vertex q[4]; float fb_h = FBH_OF(ctx); int k;
+        for (k = 0; k < 4; k++) mach64_read_vertex(VTX(v, i + k), &q[k], fb_h);
+        emit_tri_rv(ctx, &q[0], &q[1], &q[2], VTX(v, i), VTX(v, i+1), VTX(v, i+2));
+        emit_tri_rv(ctx, &q[0], &q[2], &q[3], VTX(v, i), VTX(v, i+2), VTX(v, i+3));
     }
 }
 
@@ -365,16 +411,18 @@ void mach64_render_quad_strip(gld_context *ctx, const void *v, uint32_t n)
     mach64_sync_depth_from_gli(ctx);
     mach64_bind_texture(ctx);          /* upload+program texture if bound */
     for (i = 0; i + 4 <= n; i += 2) {            /* strip quad -> 2 tris */
-        emit_tri(ctx, v, i,   i+1, i+2);
-        emit_tri(ctx, v, i+2, i+1, i+3);
+        m64_vertex q[4]; float fb_h = FBH_OF(ctx); int k;
+        for (k = 0; k < 4; k++) mach64_read_vertex(VTX(v, i + k), &q[k], fb_h);
+        emit_tri_rv(ctx, &q[0], &q[1], &q[2], VTX(v, i), VTX(v, i+1), VTX(v, i+2));
+        emit_tri_rv(ctx, &q[2], &q[1], &q[3], VTX(v, i+2), VTX(v, i+1), VTX(v, i+3));
     }
 }
 
 /* ---- point/line family: the mach64 setup engine is triangle-only, so each
  * point expands to a size x size quad and each line to a width-2 quad (draw_point/
  * draw_line above), both fed through the proven triangle path.  Dispatch slots are
- * 0x18 (POINTS), 0x1c (LINES), 0x20 (LINE_STRIP + LINE_LOOP) -- recovered by the
- * GLD_DISPATCH_PROBE run.  Each path calls mach64_bind_texture so it honours the
+ * 0x18 (POINTS), 0x1c (LINES), 0x20 (LINE_STRIP + LINE_LOOP) -- recovered empirically.
+ * Each path calls mach64_bind_texture so it honours the
  * CURRENT GL texture state instead of inheriting whatever the last triangle draw
  * programmed (an untextured point stream after a textured quad would otherwise
  * sample stale texture bits).  pack_at now carries per-vertex texcoords, so a
@@ -421,7 +469,7 @@ void mach64_render_line_strip(gld_context *ctx, const void *v, uint32_t n)
  * endpoints (moved onto the box edge).  Each pointer targets a vertex in the usual layout,
  * so draw_point/draw_line (which read window x,y @ +0x00/+0x04) work on the deref.  The
  * elt_is_ptr guard skips any non-pointer entry defensively. */
-static int elt_is_ptr(uint32_t p) { return p > 0x10000u && p < 0x40000000u; }
+static int elt_is_ptr(uint32_t p) { return p > 0x10000u && p <= M64_UADDR_MAX; }
 
 void mach64_render_elt_points(gld_context *ctx, const void *v, uint32_t n)
 {

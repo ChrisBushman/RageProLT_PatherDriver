@@ -9,63 +9,25 @@
  * gldAttachDrawable is reversed from the reference (ctx, type, drawable, flags):
  * it derives a surface struct from Apple's CGS drawable descriptor and calls a
  * kext selector (set_surface) that binds the render target.  That descriptor
- * format is the remaining unknown -> we log what the framework passes and use a
- * placeholder target for now, to be refined once we see real drawables.
+ * format carries no window geometry, which comes from CGS (gld_cgs.c).
  */
 #include "gld.h"
 #include "../common/mach64_abi.h"   /* kMach64Sel_* selector indices */
 #include "../common/atiragepro_abi.h"   /* Path-B command/context region types */
-#include <stdio.h>
-#include <stdarg.h>
 #include <stdlib.h>
 #include <string.h>
-#include <unistd.h>   /* fsync (MACH64_GLD_FSYNC crash logging) */
-
-/* ---- diagnostic log -------------------------------------------------
- * Open the log ONCE and keep the FILE* -- writes are stdio-buffered and flushed on the app's
- * exit().  The previous fopen("a")+vfprintf+fclose PER CALL cost ~1ms each on the Lombard's
- * IDE disk; at the ~300 log lines/frame a real app (atlantis) produces that alone capped it
- * at ~2fps (the rendering was never the bottleneck).  Set MACH64_GLD_NOLOG=1 to compile-free
- * disable logging entirely (skips even the vfprintf formatting) for pure perf runs. */
-void gld_log(const char *fmt, ...)
-{
-    static FILE *f = NULL;
-    static int  tried = 0, do_fsync = 0;
-    va_list ap;
-    if (!tried) {
-        tried = 1;
-        do_fsync = (getenv("MACH64_GLD_FSYNC") != 0);   /* force-to-disk each line (survives a panic) */
-        if (!getenv("MACH64_GLD_NOLOG")) {
-            /* Log to $HOME, NOT /tmp: Panther WIPES /private/tmp on (re)boot, so a kernel
-             * panic destroys the log that would diagnose it.  $HOME survives the reboot. */
-            const char *home = getenv("HOME");
-            char path[1024];
-            if (home && (int)strlen(home) < 1000) {
-                snprintf(path, sizeof(path), "%s/mach64gld.log", home);
-                f = fopen(path, "w");
-            }
-            if (!f) f = fopen("/tmp/mach64gld.log", "w");   /* fallback */
-            if (f) setvbuf(f, NULL, _IONBF, 0);   /* unbuffered: survive a crash/hang mid-frame */
-        }
-    }
-    if (!f) return;
-    va_start(ap, fmt);
-    vfprintf(f, fmt, ap);
-    va_end(ap);
-    fflush(f);                                    /* flush every line so the crash point is visible */
-    if (do_fsync) fsync(fileno(f));               /* push to disk so a KERNEL PANIC can't lose the tail */
-}
 
 /* ---- gldAttachDrawable: bind the app's drawable as the render target -
  * type: 0x50 window / 0x5a fullscreen / 0x36 (pbuffer?) -- same tokens as the
  * pixel-format parser.  drawable: Apple CGS descriptor; the reference reads
  * drawable[0/4/8] and calls a kext set_surface selector (ctx+0x04 connection).
- * TODO: reverse the CGS format -> real VRAM offset/pitch + our set_surface. */
+ * The drawable carries no geometry: the window bounds come from CGS (mach64_cgs_resolve_bounds, gld_cgs.c; docs/re-notes/windowed.md)
+ * and the surface offset/pitch from Apple's bound surface (Path B) or our own buffers (legacy path).  Known gap: with several GL windows
+ * open at once the CGS resolver picks the first window that has a surface. */
 int gldAttachDrawable(gld_context *ctx, int type, void *drawable, uint32_t flags)
 {
-    gld_log("gldAttachDrawable(ctx=%p type=0x%x drawable=%p flags=0x%x)\n",
-            (void*)ctx, type, drawable, flags);
     if (!ctx) return 0x271e;
+    { extern void mach64_dma_fence(void); mach64_dma_fence(); }   /* (re)binding a drawable replaces the surface/backing: let a queued present finish first */
     if ((type == 0x50 || type == 0x5a || type == 0x36) && !drawable)
         return 0x2715;
     /* detach: nothing to restore.  Present is now a back->front BLIT (no CRTC page-flip),
@@ -91,6 +53,7 @@ int gldAttachDrawable(gld_context *ctx, int type, void *drawable, uint32_t flags
         uint32_t width  = d[1];        /* windowed descriptor: [1]=width      */
         uint32_t height = d[2];        /*                      [2]=height     */
         uint32_t base_bytes  = 0x600000u;   /* fallback: off-screen scratch  */
+        int got_crtc = 0;                  /* 1 = Apple's get_surface_size returned the real scanout base/pitch */
         uint32_t pitch_bytes;
         uint32_t fb_pitch_px;
 
@@ -111,16 +74,13 @@ int gldAttachDrawable(gld_context *ctx, int type, void *drawable, uint32_t flags
              * the live desktop + a fullscreen-present-vs-WindowServer panic).  The DIRECT id match
              * (exact d[1]/d[2] -> a real CGS window+surface) can't false-positive on a fullscreen app's
              * garbage ids, so it's safe ungated; the enum FALLBACK stays gated on dbuf (allow_enum). */
-            gld_log("  [pathb] attach dbuf=%u d[1]=0x%x d[2]=0x%x -- resolving CGS bounds...\n",
-                    pv0->dbuf, d[1], d[2]);
-            if (mach64_cgs_resolve_bounds(d[1], d[2], pv0->dbuf, &wx, &wy, &ww, &wh)
-                && ww > 0 && wh > 0 && ww <= 2048 && wh <= 2048) {
+            int rok = mach64_cgs_resolve_bounds(d[1], d[2], pv0->dbuf, &wx, &wy, &ww, &wh);
+            pv0->off_display = (!rok && mach64_cgs_off_display()) ? 1u : 0u;
+            if (rok && ww > 0 && wh > 0 && ww <= 2048 && wh <= 2048) {
                 width = (uint32_t)ww; height = (uint32_t)wh;
-                pv0->win_mode = 1;
+                pv0->win_mode = 1; pv0->cgs_win = d[1]; pv0->cgs_surf = d[2]; pv0->vis_sig = 0; pv0->vis_tick = 0; pv0->vis_hidden = 0;
                 pv0->win_x = (uint32_t)wx; pv0->win_y = (uint32_t)wy;
                 pv0->fb_w  = (uint32_t)ww; pv0->fb_h  = (uint32_t)wh;
-                gld_log("  [pathb] CGS bounds -> surface %dx%d at (%d,%d) [authoritative]\n",
-                        ww, wh, wx, wy);
             }
         }
 
@@ -138,8 +98,14 @@ int gldAttachDrawable(gld_context *ctx, int type, void *drawable, uint32_t flags
             uint32_t crtc = 0, base = 0, pitch = 0, hi = 0;
             IOConnectMethodScalarIScalarO(ctx->connect, kMach64Sel_get_surface_size,
                                           0, 4, &crtc, &base, &pitch, &hi);
-            gld_log("  framebuffer CRTC_OFF_PITCH=0x%x -> base=0x%x pitch=%upx v_disp=%u\n",
-                    crtc, base, pitch, hi);
+            /* Once a surface is bound to this GL context (any re-attach: a resize, a second aglUpdateContext), Apple's selector 5 is
+             * get_surface_size and answers (w, h, w, h) -- not the CRTC.  Read as a CRTC that gave base = h (0xf0 for a 240-high window), moved
+             * the render target into the visible scanout and left Apple's backing (what surface_flush presents) unrendered: a window of
+             * uninitialised VRAM.  A real CRTC_OFF_PITCH packs the pitch in bits 31:22 and can never equal its own pitch in pixels. */
+            if (crtc != 0 && crtc == pitch && base == hi) {
+                crtc = base = pitch = hi = 0;
+            }
+            got_crtc = (pitch != 0);
             if (pitch) { base_bytes = base; width = pitch;
                          if (hi >= 16 && hi <= 4096) height = hi; }
             else if (!MACH64_PRIV(ctx)->win_mode) {
@@ -151,38 +117,12 @@ int gldAttachDrawable(gld_context *ctx, int type, void *drawable, uint32_t flags
                  * resolve tells them apart. */
                 int dw = 0, dh = 0;
                 if (mach64_display_size(&dw, &dh)) {
-                    if (getenv("MACH64_FS_SHRINK")) {
-                        /* SHRINK: render into a smaller backing (frees VRAM for a texheap) and
-                         * set_scale it up to the native display on present (see setup_target).
-                         * Render/backing dims = shrunk; fs_disp_* = native present DEST. */
-                        uint32_t sw = 800, sh = 600;
-                        const char *e = getenv("MACH64_FS_W"); if (e) sw = (uint32_t)atoi(e);
-                        e = getenv("MACH64_FS_H");             if (e) sh = (uint32_t)atoi(e);
-                        MACH64_PRIV(ctx)->fs_disp_w = (uint32_t)dw;
-                        MACH64_PRIV(ctx)->fs_disp_h = (uint32_t)dh;
-                        MACH64_PRIV(ctx)->fs_shrink_w = sw;
-                        MACH64_PRIV(ctx)->fs_shrink_h = sh;
-                        width = sw; height = sh;
-                        gld_log("  [pathb] fullscreen SHRINK: render %ux%u -> scale to native %ux%u\n",
-                                width, height, dw, dh);
-                    } else {
-                        width = (uint32_t)dw; height = (uint32_t)dh;
-                        gld_log("  [pathb] fullscreen (no window) -> display size %ux%u\n", width, height);
-                    }
+                    width = (uint32_t)dw; height = (uint32_t)dh;
                 }
             }
         }
-        pitch_bytes = width * 4;
+        pitch_bytes = width * M64_CBPP(MACH64_PRIV(ctx));
         fb_pitch_px = width;
-
-        gld_log("  drawable[0..2] = 0x%x 0x%x 0x%x  -> surface %ux%u target base=0x%x\n",
-                d[0], d[1], d[2], width, height, base_bytes);
-        /* WINDOWED-MODE PROBE: dump the raw drawable descriptor so we can reverse the window
-         * geometry (offset/pitch/bounds) for windowed support.  A windowed context attaches as
-         * type 0x50 with a distinctively-sized test window, so we can spot its width/height/x/y
-         * in these words.  16 words = 64 bytes; Apple's CGS surface descriptor is larger. */
-        gld_log("  descdump[0..15] = %08x %08x %08x %08x %08x %08x %08x %08x %08x %08x %08x %08x %08x %08x %08x %08x\n",
-                d[0],d[1],d[2],d[3],d[4],d[5],d[6],d[7],d[8],d[9],d[10],d[11],d[12],d[13],d[14],d[15]);
 
         /* Populate the ctx surface fields GLEngine reads to consider the drawable
          * renderable -- WITHOUT these it culls all geometry (no dispatch).
@@ -224,20 +164,16 @@ int gldAttachDrawable(gld_context *ctx, int type, void *drawable, uint32_t flags
             uint32_t a7p = *(uint32_t *)(c + 0x14);
             *(uint32_t *)(c + 0x2c) &= ~0x20u;      /* caps 0x20 clear (DB dispatch gate) */
             *(uint32_t *)(c + 0x1e4) = 1;
-            if (a7p > 0x10000 && a7p < 0x40000000) {
+            if (a7p > 0x10000 && a7p <= M64_UADDR_MAX) {
                 uint32_t w0 = *(uint32_t *)(uintptr_t)a7p;
                 *(uint32_t *)(uintptr_t)a7p = w0 | 2u;
-                gld_log("  [DB-gate] a7=0x%x word0 0x%x -> 0x%x, ctx+0x2c=0x%x ctx+0x1e4=1\n",
-                        a7p, w0, w0 | 2u, *(uint32_t *)(c + 0x2c));
-            } else {
-                gld_log("  [DB-gate] a7=0x%x NOT a pointer -- flag NOT set\n", a7p);
             }
         }
 
         mach64_set_render_target(ctx, base_bytes, fb_pitch_px);
 
         {   mach64_priv *pv = MACH64_PRIV(ctx);
-            uint32_t surf  = fb_pitch_px * 4u * height;   /* bytes per colour surface */
+            uint32_t surf  = fb_pitch_px * M64_CBPP(pv) * height;   /* bytes per colour surface */
             uint32_t z_off = 0x400000u;   /* single-buffered: Z past the front buffer */
 
             /* Double-buffered (dbuf armed by the DB pixel format in gldCreateContext):
@@ -262,8 +198,6 @@ int gldAttachDrawable(gld_context *ctx, int type, void *drawable, uint32_t flags
                  * texture is skipped (missing, but STABLE) rather than corrupting live VRAM. */
                 mach64_set_texheap(z_off + zsize, 0x770000u);
                 mach64_set_render_target(ctx, back, fb_pitch_px);   /* draw to back */
-                gld_log("  [dbuf] front=0x%x back=0x%x z=0x%x %ux%u pitch=%upx -> render->back\n",
-                        base_bytes, back, z_off, width, height, fb_pitch_px);
             }
 
             /* DEPTH: bind the 16-bit Z buffer (single-buf: 0x400000 past the front;
@@ -272,26 +206,18 @@ int gldAttachDrawable(gld_context *ctx, int type, void *drawable, uint32_t flags
              * synced per-draw in mach64_flush / render_tri_strip -- not forced here. */
             mach64_set_zbuffer(ctx, z_off, fb_pitch_px);
 
-            /* WINDOWED coexistence probe: env MACH64_WIN_RECT="x,y,w,h" (screen pixels).  Keep
-             * the front/back/pitch from the dbuf block (screen-sized), but override the RENDER
-             * dims to the window w x h and mark win_mode.  render_ctl then renders w x h into the
-             * back buffer's top-left and BLITs it to the live front at (x,y) -- no CRTC page-flip,
-             * so the desktop stays visible and the WindowServer keeps compositing.  That is the
-             * engine-coexistence test: our bus-master blit + geometry DMA run concurrently with
-             * the live WS.  (Geometry is bounded by the w x h viewport the app sets.) */
+            /* Windowed mode: keep the front/back/pitch from the dbuf block (screen-sized), but override
+             * the RENDER dims to the window w x h and mark win_mode.  render_ctl then renders w x h into
+             * the back buffer's top-left and BLITs it to the live front at (x,y) -- no CRTC page-flip,
+             * so the desktop stays visible and the WindowServer keeps compositing.  (Geometry is
+             * bounded by the w x h viewport the app sets.) */
             {   int wx = 0, wy = 0, ww = 0, wh = 0, got = 0;
                 /* Reuse the bounds already resolved ONCE up front (pv->win_mode/fb_w/fb_h): the CGS
                  * resolver drifts the reported position per call (windowed.md), so re-resolving here
-                 * would disagree with the surface we already shaped.  env MACH64_WIN_RECT stays the
-                 * manual fallback for when the early CGS resolve found nothing. */
+                 * would disagree with the surface we already shaped. */
                 if (pv->win_mode) {
                     wx = (int)pv->win_x; wy = (int)pv->win_y;
                     ww = (int)pv->fb_w;  wh = (int)pv->fb_h; got = 1;
-                }
-                if (!got) {
-                    const char *wr = getenv("MACH64_WIN_RECT");
-                    if (pv->dbuf && wr && sscanf(wr, "%d,%d,%d,%d", &wx, &wy, &ww, &wh) == 4)
-                        got = 1;
                 }
                 /* Activate windowed blit only for a real SUB-screen / offset window (a fullscreen
                  * drawable -- full-width at the origin -- keeps the CRTC page-flip path). */
@@ -308,7 +234,7 @@ int gldAttachDrawable(gld_context *ctx, int type, void *drawable, uint32_t flags
                         mach64_winbuf_free(pv->win_buf_off, pv->win_buf_size);
                         pv->win_buf_off = 0; pv->win_buf_size = 0;
                     }
-                    {   uint32_t bsz = fb_pitch_px * 4u * (uint32_t)wh;   /* back: wh rows @ screen pitch */
+                    {   uint32_t bsz = fb_pitch_px * M64_CBPP(pv) * (uint32_t)wh;   /* back: wh rows @ screen pitch */
                         uint32_t zsz = fb_pitch_px * 2u * (uint32_t)wh;   /* Z: 16-bit */
                         uint32_t buf = mach64_winbuf_alloc(bsz + zsz);
                         if (buf) {
@@ -316,24 +242,28 @@ int gldAttachDrawable(gld_context *ctx, int type, void *drawable, uint32_t flags
                             pv->back_off = pv->render_off = buf;
                             mach64_set_render_target(ctx, buf, fb_pitch_px);
                             mach64_set_zbuffer(ctx, buf + bsz, fb_pitch_px);
-                            gld_log("  [win] per-ctx back=0x%x z=0x%x (%u KB)\n",
-                                    buf, buf + bsz, (bsz + zsz) >> 10);
                         }  /* else keep the shared screen back from the dbuf block */
+                    }
+                    /* Our own back->front blit needs REAL front geometry (base/pitch from Apple's get_surface_size, which reads the
+                     * live CRTC) and the SAME pixel depth as the render buffer.  When the selector returned nothing (pitch 0: the
+                     * MDD rig, where our stub, not Apple's framebuffer, scans out) the front above is a guess, and a 15/16 bpp
+                     * desktop cannot take a 32 bpp blit.  Then Apple's own surface machinery (surface_flush: clipped, converting)
+                     * is the present, and our blit would only scribble in off-screen VRAM. */
+                    {   uint32_t dbpp = (uint32_t)mach64_display_bytes_per_pixel();
+                        pv->win_no_blit = (!got_crtc || (dbpp && dbpp != M64_CBPP(pv))) ? 1u : 0u;
                     }
                     pv->win_mode = 1; pv->win_x = (uint32_t)wx; pv->win_y = (uint32_t)wy;
                     pv->fb_w = (uint32_t)ww; pv->fb_h = (uint32_t)wh;
                     *(uint32_t *)(c + 0x1f0) = (uint32_t)ww;
                     *(uint32_t *)(c + 0x1f4) = (uint32_t)wh;
-                    gld_log("  [win] WINDOWED %dx%d at (%d,%d): render->back, blit to LIVE front\n",
-                            ww, wh, wx, wy);
                 }
             }
         }
         MACH64_PRIV(ctx)->frame_new = 1;   /* clear Z (+ back) before the first frame */
 #ifdef GLD_APPLE_PROBE
-        /* Path B Phase 2: the drawable descriptor's word[0] is the CGS surface ID (e.g. 0x8013).
-         * Test whether Apple's kext resolves it + binds -- the pivotal port question.  Uses the
-         * window bounds if windowed, else the fullscreen dims.  No region mapping (safe). */
+        /* Path B: the drawable descriptor's word[0] is the CGS surface ID (e.g. 0x8013); register it
+         * with Apple's kext and bind it.  Uses the window bounds if windowed, else the fullscreen dims. */
+        if (!MACH64_PRIV(ctx)->off_display)
         {   mach64_priv *pv2 = MACH64_PRIV(ctx);
             uint32_t sx = pv2->win_mode ? pv2->win_x : 0;
             uint32_t sy = pv2->win_mode ? pv2->win_y : 0;
@@ -344,129 +274,66 @@ int gldAttachDrawable(gld_context *ctx, int type, void *drawable, uint32_t flags
              * (windowed path stores idx unchanged at surf+0x98, accepts the CGS-sized handle);
              * make_surface now also set_shapes with the window dims to allocate the backing that
              * set_surface's bind requires. */
-            pv2->apple_surf_cn = mach64_apple_make_surface(d[0], 0x24u, sw, sh);
+            pv2->apple_surf_cn = mach64_apple_make_surface(d[0], 0x24u, sx, sy, sw, sh);
             /* NOTE: IOConnectAddClient (connectClient) PANICS here -- it does release/retain via
              * virtual calls on ctx+0x88 (the IOATIRProShared object), which is NULL on our bare
              * connections.  The share group needs an IOATIRProShared created first (reverse the
              * setup OFFLINE before trying again).  Reverted -- do NOT re-add without that. */
             mach64_apple_bind_surface(pv2->apple_cn, d[0], sx, sy, sw, sh);
 
-            /* CGS-SURFACE PROBE (MACH64_SURF_PROBE): per RE, surfaces live in a global per-accelerator
-             * registry (accel[0x5c]) keyed by surf[0x98].  If the WindowServer already registered an
-             * IOAccelSurface for THIS drawable's CGS surface, set_surface(that id) finds it and ctx[0x10c]
-             * comes back NON-private (surf[0x12c] != surf+0x9c = the shared/composited backing).  Try
-             * candidate ids from the drawable's CGS handles (d[0]=surf id, d[1]=win id, d[2]=surf id) and
-             * log which, if any, resolves a WS-composited surface -- that decides easy-bind vs CGS-SPI.
-             * Restore our own surface binding afterward.  ctx->connect aliases apple_cn (one connection). */
-            if (getenv("MACH64_SURF_PROBE")) {
-                uint32_t cands[7], nc = 0, k, dummy = 0;
-                cands[nc++] = d[2]; cands[nc++] = d[2] & 0x7fffu;
-                cands[nc++] = d[1]; cands[nc++] = d[1] & 0x7fffu;
-                cands[nc++] = (~d[2]) & 0x7fffu; cands[nc++] = d[0];
-                cands[nc++] = d[0] & 0x7fffu;   /* our own (sanity: should be private) */
-                for (k = 0; k < nc; k++) {
-                    uint32_t sp = 0, backing = 0;
-                    kern_return_t sr = IOConnectMethodScalarIStructureI(ctx->connect, 0 /*set_surface*/,
-                                          4, 0, cands[k], 0x24u, 0u, 0u, &dummy);
-                    IOConnectMethodScalarIScalarO(ctx->connect, 14 /*scale_surface peek*/, 1, 1, 0x10cu, &sp);
-                    if (sp > 0x10000u && sp < 0x40000000u)
-                        IOConnectMethodScalarIScalarO(ctx->connect, 14, 1, 1, 0x80000000u | (sp + 0x12cu), &backing);
-                    gld_log("  [surfprobe] set_surface(0x%x) kr=0x%x -> ctx[0x10c]=0x%x surf[0x12c]=0x%x %s\n",
-                            cands[k], (unsigned)sr, sp, backing,
-                            (sp && backing && backing != sp + 0x9cu) ? "*** NON-PRIVATE (WS/composited?) ***"
-                            : (sp ? "(private surf+0x9c)" : "(no surface)"));
-                }
-                IOConnectMethodScalarIStructureI(ctx->connect, 0, 4, 0, d[0] & 0x7fffu, 0x24u, 0u, 0u, &dummy);
-                gld_log("  [surfprobe] restored our surface (idx=0x%x)\n", d[0] & 0x7fffu);
-                /* ENUMERATE the global registry (accel[0x5c] head, surf[0x90]=next, circular): id-guessing
-                 * can miss the WS surface (registry key is ~idx, not the CGS id).  Walk it and dump every
-                 * surface's id(0x98)/backing(0x12c)/assoc(0x178) -- a NON-private backing = a WS/composited
-                 * surface we could bind by its real id.  Guarded peeks + bounded loop (no panic). */
-                {   uint32_t accel = 0, head = 0, s = 0, prev = 0; int i;
-                    IOConnectMethodScalarIScalarO(ctx->connect, 14, 1, 1, 0xb0u, &accel);   /* ctx[0xb0]=accel */
-                    if (accel > 0x10000u && accel < 0x40000000u)
-                        IOConnectMethodScalarIScalarO(ctx->connect, 14, 1, 1, 0x80000000u|(accel+0x5cu), &head);
-                    gld_log("  [surfprobe] REGISTRY accel=0x%x head=0x%x:\n", accel, head);
-                    s = head;
-                    for (i = 0; i < 24 && s > 0x10000u && s < 0x40000000u; i++) {
-                        uint32_t id = 0, bk = 0, as = 0, nx = 0;
-                        IOConnectMethodScalarIScalarO(ctx->connect, 14, 1, 1, 0x80000000u|(s+0x98u), &id);
-                        IOConnectMethodScalarIScalarO(ctx->connect, 14, 1, 1, 0x80000000u|(s+0x12cu), &bk);
-                        IOConnectMethodScalarIScalarO(ctx->connect, 14, 1, 1, 0x80000000u|(s+0x178u), &as);
-                        IOConnectMethodScalarIScalarO(ctx->connect, 14, 1, 1, 0x80000000u|(s+0x90u), &nx);
-                        gld_log("    [%d] surf=0x%x id(0x98)=0x%x backing(0x12c)=0x%x assoc(0x178)=0x%x next=0x%x %s\n",
-                                i, s, id, bk, as, nx,
-                                (bk && bk != s + 0x9cu) ? "*** NON-PRIVATE ***" : "(private)");
-                        prev = s; s = nx;
-                        if (s == head || s == prev) break;
-                    }
-                    /* SCANOUT base/dims for the stock-ICD-style positioned windowed blit DST: per RE,
-                     * get_surface_size stashes base+w/h into accel[0xb4..].  Peek them + call
-                     * get_surface_size directly -- this reveals the real desktop framebuffer base/pitch
-                     * to blit our rendered preview into (get_surface_size returned 0 for this sub-view). */
-                    {   uint32_t b4=0,b8=0,c0=0,c4=0,c8=0, gc=0,gb=0,gp=0,gh=0;
-                        if (accel > 0x10000u && accel < 0x40000000u) {
-                            IOConnectMethodScalarIScalarO(ctx->connect, 14,1,1, 0x80000000u|(accel+0xb4u), &b4);
-                            IOConnectMethodScalarIScalarO(ctx->connect, 14,1,1, 0x80000000u|(accel+0xb8u), &b8);
-                            IOConnectMethodScalarIScalarO(ctx->connect, 14,1,1, 0x80000000u|(accel+0xc0u), &c0);
-                            IOConnectMethodScalarIScalarO(ctx->connect, 14,1,1, 0x80000000u|(accel+0xc4u), &c4);
-                            IOConnectMethodScalarIScalarO(ctx->connect, 14,1,1, 0x80000000u|(accel+0xc8u), &c8);
-                        }
-                        IOConnectMethodScalarIScalarO(ctx->connect, kMach64Sel_get_surface_size, 0, 4, &gc,&gb,&gp,&gh);
-                        gld_log("  [surfprobe] accel[0xb4]=0x%x [0xb8]=0x%x [0xc0]=%u [0xc4]=%u [0xc8]=%u | "
-                                "get_surface_size crtc=0x%x base=0x%x pitch=%u h=%u\n",
-                                b4, b8, c0, c4, c8, gc, gb, gp, gh);
-                    }
-                }
-            }
-
             /* Path B: set_surface bound the surface (ctx+0x10c), so it is NOW safe to
              * map the command region (type 1 -> ctx->regs@0xb8, holds the
              * VendorCommandBufferHeader mach64_submit writes) and the context buffer
              * (type 2 -> ctx->fb@0xd0).  Mapping BEFORE the bind NULL-derefs in
              * clientMemoryForType.  Map once. */
-            if (pv2->apple_surf_cn && !ctx->regs) {
-                IOConnectMapMemory(ctx->connect, ATIRPRO_MEM_COMMAND, mach_task_self(),
-                                   (vm_address_t *)&ctx->regs, (IOByteCount *)&ctx->regs_size,
-                                   kIOMapAnywhere | kIOMapInhibitCache);
-                IOConnectMapMemory(ctx->connect, ATIRPRO_MEM_CONTEXT, mach_task_self(),
-                                   (vm_address_t *)&ctx->fb, (IOByteCount *)&ctx->fb_size,
-                                   kIOMapAnywhere | kIOMapInhibitCache);
-                gld_log("  [pathb] mapped cmd(type1)=%p sz=%u  ctxbuf(type2)=%p sz=%u\n",
-                        ctx->regs, ctx->regs_size, ctx->fb, ctx->fb_size);
-                /* Path B: prime the surface (alloc VRAM render buffer + clear dirty bit) and set
-                 * p->target_off/pitch = surf[0x12c][0x28] so clears/geometry render into it. */
+            if (pv2->apple_surf_cn && !ctx->regs) {   /* the command/context regions are mapped once per context */
+                {   /* IOConnectMapMemory wants a vm_address_t pointer and a vm_size_t pointer; the context stores uint32_t sizes */
+                    vm_address_t ma = 0; vm_size_t msz = 0;
+                    /* Cache mode: cache-inhibited (the kernel drains this buffer through its own mapping). */
+                    const int cmode = kIOMapAnywhere | kIOMapInhibitCache;
+                    if (!IOConnectMapMemory(ctx->connect, ATIRPRO_MEM_COMMAND, mach_task_self(), &ma, &msz,
+                                            cmode)) {
+                        ctx->regs = (void *)ma; ctx->regs_size = (uint32_t)msz; }
+                    ma = 0; msz = 0;
+                    if (!IOConnectMapMemory(ctx->connect, ATIRPRO_MEM_CONTEXT, mach_task_self(), &ma, &msz,
+                                            cmode)) {
+                        ctx->fb = (void *)ma; ctx->fb_size = (uint32_t)msz; }
+                }
+            }
+            /* Path B: prime the surface (alloc VRAM render buffer + clear dirty bit) and set p->target_off/pitch = surf[0x12c][0x28] so
+             * clears/geometry render into it.  On EVERY attach, not only the first: each attach registers and binds a NEW Apple surface
+             * (a resize, or the aglUpdateContext every GLUT app issues after creating its window), and the earlier code above has just
+             * pointed the render target at the driver's own window pool.  Left like that, rendering went to the first surface's backing
+             * (or the pool) while surface_flush presented the new surface's never-rendered backing: a static window of uninitialised VRAM. */
+            if (pv2->apple_surf_cn && ctx->regs) {
+                /* Clip the shape to what is actually visible BEFORE the prime present in setup_target: that present blits the whole backing to
+                 * the shape's rectangles, and with the full-window shape it painted once over whatever window sat in front (measured: a
+                 * Terminal window overlapping the Atlantis window got a 320x240 block of GL pixels that WindowServer never repainted). */
+                mach64_vis_update(ctx, 1);
                 mach64_pathb_setup_target(ctx);
             }
         }
 #endif
 
-        /* EXPERIMENT (root-cause validation): GLEngine leaves its drawable
-         * descriptor gli[0x789c] ALL-ZEROS for our HW surface (surface-binding
-         * contract incomplete), so glViewport clamps the viewport to
-         * desc[0xc]/desc[0x10] = 0 -> 0x0 viewport -> ALL geometry culled before
-         * any primitive dispatch.  The software renderer's descriptor is fully
-         * populated (desc = {4, 4e7fffff, 3, 0x800, 0x800, ...}).  Populate it
-         * ourselves to test whether that is the ONLY gate.  ctx+0x10 = the gli
+        /* GLEngine leaves its drawable descriptor gli[0x789c] ALL-ZEROS for our HW
+         * surface, so glViewport clamps the viewport to desc[0xc]/desc[0x10] = 0 ->
+         * 0x0 viewport -> ALL geometry culled before any primitive dispatch.  The
+         * software renderer's descriptor is fully populated (desc = {4, 4e7fffff, 3,
+         * 0x800, 0x800, ...}); populate it ourselves.  ctx+0x10 = the gli
          * context (a8 from gldCreateContext); desc = gli[0x789c]. */
         {   uint32_t p10 = *(uint32_t *)(c + 0x10);   /* points into gli (+0x3610) */
             uint32_t gli = 0, off;
             /* Find the gli base: the object whose [+0x7898] back-points to ctx. */
             for (off = 0; off <= 0x8000; off += 4) {
                 uint32_t g = p10 - off;
-                if (g < 0x10000 || g >= 0x40000000) break;
+                if (g < 0x10000 || g > M64_UADDR_MAX) break;
                 if (*(uint32_t *)(uintptr_t)(g + 0x7898) == (uint32_t)(uintptr_t)ctx) {
                     gli = g; break;
                 }
             }
-            gld_log("  [desc-exp] ctx+0x10=0x%x -> gli base=0x%x (off 0x%x)\n", p10, gli, off);
             if (gli) {
                 uint32_t descp = *(uint32_t *)(uintptr_t)(gli + 0x789c);
-                gld_log("  [desc-exp] gli[0x789c]=desc=0x%x  desc[0xc]=0x%x desc[0x10]=0x%x\n",
-                        descp,
-                        descp>0x10000?*(uint32_t*)(uintptr_t)(descp+0xc):0,
-                        descp>0x10000?*(uint32_t*)(uintptr_t)(descp+0x10):0);
-                if (descp > 0x10000 && descp < 0x40000000) {
+                if (descp > 0x10000 && descp <= M64_UADDR_MAX) {
                     uint32_t *dd = (uint32_t *)(uintptr_t)descp;
                     dd[0x00/4] = 0x00000004;
                     dd[0x04/4] = 0x4e7fffff;
@@ -487,8 +354,7 @@ int gldAttachDrawable(gld_context *ctx, int type, void *drawable, uint32_t flags
                     /* GL_MAX_TEXTURE_UNITS: read as a halfword from descriptor+0xac
                      * (traced: GLEngine 0xb8204 -> lhz r0,0xac(gli[0x789c])).  We
                      * support one texture unit; advertise 1 (was 0). */
-                    *(uint16_t *)(uintptr_t)(descp + 0xac) = 1;
-                    gld_log("  [desc-exp] populated descriptor (maxtex=1024, texunits=1)\n");
+                    *(uint16_t *)(uintptr_t)(descp + 0xac) = 2;
                 }
             }
         }
@@ -500,7 +366,6 @@ int gldAttachDrawable(gld_context *ctx, int type, void *drawable, uint32_t flags
 const char *gldGetString(gld_context *ctx, uint32_t name)
 {
     (void)ctx;
-    gld_log("gldGetString(name=0x%x)\n", name);
     switch (name) {
     case 0x1f00: return "RageProLT Project";              /* GL_VENDOR    */
     case 0x1f01: return "ATI Rage LT Pro (mach64)";       /* GL_RENDERER  */
@@ -516,7 +381,6 @@ const char *gldGetString(gld_context *ctx, uint32_t name)
  * values taken from the reference bundle (2, 4, 0xb, 0x1000). */
 int gldGetVersion(int *v0, int *v1, int *v2, int *v3)
 {
-    gld_log("gldGetVersion()\n");
     if (v0) *v0 = 2;
     if (v1) *v1 = 4;
     if (v2) *v2 = 0xb;
@@ -524,26 +388,24 @@ int gldGetVersion(int *v0, int *v1, int *v2, int *v3)
     return 1;
 }
 
-int gldGetError(gld_context *ctx) { (void)ctx; gld_log("gldGetError()\n"); return 0; }
+int gldGetError(gld_context *ctx) { (void)ctx; return 0; }
 
 int gldGetInteger(gld_context *ctx, uint32_t pname, int *params)
 {
     /* GLEngine never calls this for the texture caps (GL_MAX_TEXTURE_SIZE comes
      * from the drawable descriptor +0xb2, set in gldAttachDrawable). */
     (void)ctx;
-    gld_log("gldGetInteger(pname=0x%x)\n", pname);
     if (params) *params = 0;
     return 0;
 }
 
 int gldSetInteger(gld_context *ctx, uint32_t pname, int value)
-{ (void)ctx; gld_log("gldSetInteger(pname=0x%x val=%d)\n", pname, value); return 0; }
+{ (void)ctx; return 0; }
 
 /* gldInitDispatch: initial dispatch-table setup (pairs with gldUpdateDispatch).
  * Install our render slots so the table is usable from the start. */
 void gldInitDispatch(gld_context *ctx, void *table, void *outinfo)
 {
-    gld_log("gldInitDispatch(table=%p outinfo=%p)\n", table, outinfo);
     /* CONTRACT (ref gldInitDispatch 0x60a60): arg3(r5) is an OUTPUT struct that
      * GLEngine reads back for the drawable geometry.  The reference copies
      * ctx[0x94..0xa8] into outinfo[0..0x14]; we ignored it, leaving GLEngine a
@@ -558,8 +420,6 @@ void gldInitDispatch(gld_context *ctx, void *table, void *outinfo)
         o[3] = c[0xa0/4];
         o[4] = c[0xa4/4];
         o[5] = c[0xa8/4];
-        gld_log("  outinfo <= ctx[0x94..0xa8]: %08x %08x %08x %08x %08x %08x\n",
-                o[0],o[1],o[2],o[3],o[4],o[5]);
     }
     /* Reference gldInitDispatch installs the driver's control/flush slots that
      * GLEngine calls to render.  table[0x04] is THE flush entry.  Store the table
@@ -582,13 +442,11 @@ void gldInitDispatch(gld_context *ctx, void *table, void *outinfo)
 }
 
 /* gldFlushBuffer: swap/present the drawable.  Submits are synchronous today, so
- * fence.  TODO: real front/back flip once double-buffered surfaces are bound. */
+ * fence.  Presenting is NOT done here: GLEngine does not call gldFlushBuffer once per swap; the per-frame present runs at dispatch
+ * slot 0x60 (mach64_dispatch_render_ctl; Path B surface_flush or the legacy back->front blit).  This function only finishes the work. */
 int gldFlushBuffer(gld_context *ctx, void *drawable)
 {
-    uint8_t *c = (uint8_t *)ctx;
-    gld_log("gldFlushBuffer(ctx=%p drawable=%p) cbpp(ctx+0x5f)=%u target=0x%x pitch=0x%x\n",
-            (void*)ctx, drawable, (unsigned)c[0x5f],
-            *(uint32_t *)(c + 0x94), *(uint32_t *)(c + 0x98));
+    (void)drawable;
     /* FINISH FIRST, then present.  gldFinish flushes the triangle batch, submits the
      * command buffer and waits for idle -> the back buffer is fully rendered.  Only
      * then is it safe to blit back->front.  (Presenting first blits an un-rendered
@@ -606,7 +464,7 @@ int gldFlushBuffer(gld_context *ctx, void *drawable)
 
 /* ---- feature stubs: present so GLEngine's lookups are non-NULL; only called
  * if the app uses the feature.  Return 0 (NULL/success). --------------- */
-#define GLD_STUB(name) int name(void) { gld_log(#name "()\n"); return 0; }
+#define GLD_STUB(name) int name(void) { return 0; }
 GLD_STUB(gldCreateBuffer)          GLD_STUB(gldDestroyBuffer)
 GLD_STUB(gldCreateFence)           GLD_STUB(gldDestroyFence)
 GLD_STUB(gldCreatePipelineProgram) GLD_STUB(gldDestroyPipelineProgram)
@@ -626,26 +484,22 @@ GLD_STUB(gldGetQueryInfo)
 int gldCreateShared(void **out)
 {
     void *s;
-    if (!out) { gld_log("gldCreateShared(out=NULL)\n"); return 0x271e; }  /* ref: error on NULL out */
+    if (!out) { return 0x271e; }  /* ref: error on NULL out */
     *out = NULL;
     s = calloc(1, 0x2c);                                    /* 44-byte shared struct, zero-inited (ref) */
-    if (!s) { gld_log("gldCreateShared: calloc failed\n"); return 0x2720; }
+    if (!s) { return 0x2720; }
     *out = s;
-    gld_log("gldCreateShared() -> shared=%p\n", s);
     return 0;
 }
 int gldDestroyShared(void *shared)
 {
-    if (!shared) { gld_log("gldDestroyShared(NULL)\n"); return 0x2714; }  /* ref: error on NULL */
-    gld_log("gldDestroyShared(%p)\n", shared);
+    if (!shared) { return 0x2714; }  /* ref: error on NULL */
     free(shared);
     return 0;
 }
-/* ---- Texture path (INVESTIGATION) --------------------------------------
+/* ---- Texture path -------------------------------------------------------
  * Return a valid 0x40-byte texture-object (faithful to the reference
- * gldCreateTexture, ati128gld 0x6838) so GLEngine sets up texturing and emits
- * per-vertex texcoords we can locate; log every texture call + its args to map
- * how GLEngine delivers pixels.  Not a real upload yet. */
+ * gldCreateTexture, ati128gld 0x6838) so GLEngine sets up texturing. */
 void gldCreateTexture(void *ctx, void **out, void *shared)
 {
     unsigned char *t = (unsigned char *)calloc(1, 0x40);
@@ -657,28 +511,26 @@ void gldCreateTexture(void *ctx, void **out, void *shared)
         *(uint32_t *)(t + 0x20) = (uint32_t)(uintptr_t)(t + 0x18);
         t[0x38] = 0xff; t[0x39] = 0x23;
     }
-    gld_log("gldCreateTexture(out=%p shared=%p) -> texobj=%p\n", (void*)out, shared, (void*)t);
     if (out) *out = t;
 }
 int gldDeleteTexture(void *ctx, void *t)
-{ (void)ctx; gld_log("gldDeleteTexture(%p)\n", t); if (t) { mach64_texture_deleted(t); free(t); } return 0; }
+{ (void)ctx; if (t) { mach64_texture_deleted(t); free(t); } return 0; }
 int gldCreateTextureLevel(void *ctx, void *t, uint32_t a3, uint32_t lvl, uint32_t a5, uint32_t a6, uint32_t a7)
-{ (void)ctx; gld_log("gldCreateTextureLevel(t=%p a3=0x%x lvl=%u a5=0x%x a6=0x%x a7=0x%x)\n", t,a3,lvl,a5,a6,a7); return 0; }
+{ (void)ctx; return 0; }
 int gldDeleteTextureLevel(void *ctx, void *t, uint32_t lvl)
-{ (void)ctx; gld_log("gldDeleteTextureLevel(t=%p lvl=%u)\n", t, lvl); return 0; }
+{ (void)ctx; return 0; }
 int gldModifyTexture(void *ctx, void *t, uint32_t a3)
 {
     (void)ctx;
-    gld_log("gldModifyTexture(t=%p a3=0x%x)\n", t, a3);
     mach64_texture_bound(t);                /* this texture is now the current one */
     if (a3 & 0x80)                          /* image dirty: upload at next draw    */
         mach64_texture_dirtied(t);
     return 0;
 }
 int gldModifyTextureLevel(void *ctx, void *t, uint32_t a3, uint32_t lvl, uint32_t a5, uint32_t a6, uint32_t a7)
-{ (void)ctx; gld_log("gldModifyTextureLevel(t=%p a3=0x%x lvl=%u a5=0x%x a6=0x%x a7=0x%x)\n", t,a3,lvl,a5,a6,a7); return 0; }
+{ (void)ctx; return 0; }
 int gldGetTextureLevel(void *ctx, void *t, uint32_t a3, uint32_t a4, uint32_t a5, uint32_t a6, uint32_t a7)
-{ (void)ctx; gld_log("gldGetTextureLevel(t=%p a3=0x%x a4=0x%x a5=0x%x a6=0x%x a7=0x%x)\n", t,a3,a4,a5,a6,a7); return 0; }
+{ (void)ctx; return 0; }
 /* glGetTexLevelParameter for the driver.  a3=level, a5=pname (GL enum), a6=out (write the value here),
  * a7=the candidate dimension for a proxy level.
  *
@@ -699,7 +551,7 @@ int gldGetTextureLevelInfo(void *ctx, void *t, uint32_t a3, uint32_t a4, uint32_
     uint32_t state, w = 0, h = 0; uint16_t fmt = 0, flags = 0;
     (void)ctx; (void)a4; (void)a7;
     state = t ? *(const uint32_t *)((const unsigned char *)t + 0x30) : 0;
-    if (state >= 0x10000u && state < 0x40000000u) {
+    if (state >= 0x10000u && state <= M64_UADDR_MAX) {
         const unsigned char *s = (const unsigned char *)(uintptr_t)state;
         const unsigned char *r = s + 0x9c + ((uint32_t)s[0x5e] + a3) * 0x14;
         flags = *(const uint16_t *)s;                       /* proxy flag lives in bit 0x100 */
@@ -736,7 +588,7 @@ int gldGetTextureLevelInfo(void *ctx, void *t, uint32_t a3, uint32_t a4, uint32_
     return 0;
 }
 int gldIsTextureResident(void *ctx, void *t)
-{ (void)ctx; gld_log("gldIsTextureResident(%p)\n", t); return 1; }
+{ (void)ctx; return 1; }
 GLD_STUB(gldCreateVertexArray)     GLD_STUB(gldModifyVertexArray)
 GLD_STUB(gldFlushVertexArray)      GLD_STUB(gldDestroyVertexArray)
 GLD_STUB(gldDestroyMemoryPluginData) GLD_STUB(gldGetMemoryPluginData)

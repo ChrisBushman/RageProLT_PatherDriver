@@ -24,12 +24,20 @@
  * driver (mesa_mach64_state.c); TEX_SIZE_PITCH and TEX_0_OFF encodings and the
  * S/T convention are best-effort and flagged for hardware validation.
  */
-#include <stdlib.h>   /* getenv (GLD_TEXBLEND_PROBE gate) */
+#include <stdlib.h>
 #include <pthread.h>  /* g_tex_lock: the VRAM texture heap is process-shared across contexts */
 #include <IOKit/IOKitLib.h>   /* IOConnectMethodStructureIStructureO (Path-B selector upload) */
 #include "gld.h"
 #include "../common/mach64_regs.h"
 #include "../common/atiragepro_abi.h"   /* kATIRPro_new_texture (repurposed = VRAM upload) */
+#include "../common/mach64_abi.h"        /* Path A user client: kMach64Sel_get_config, MACH64_MEM_* (DMA staging memory) */
+#include <libkern/OSByteOrder.h>
+#include <mach/mach.h>
+#include <sys/sysctl.h>
+#include <sys/file.h>
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 /* The texture heap (g_slots / g_heap_next / g_free / g_pending below) is a single
  * process-wide VRAM allocator shared by every GL context.  An app driving multiple
@@ -72,8 +80,21 @@ typedef struct {
     int      nlevels;
     uint32_t clamp_s, clamp_t;
     uint32_t bilinear_mag, bilinear_min;   /* GL_LINEAR mag / linear-within-level min filter */
+    uint32_t min_filter;                   /* GL_TEXTURE_MIN_FILTER enum */
+    uint32_t mipmapped;                    /* MIN filter is one of the four *_MIPMAP_* modes and >1 level is loaded */
+    uint32_t lvl_off[12], lvl_w[12], lvl_h[12];   /* per level L (0 = base): VRAM offset and size */
+    uint32_t hwfmt, bpt;                   /* hardware texel datatype (6 ARGB8888, 4 RGB565, 3 ARGB1555, 15 ARGB4444) and bytes per texel */
+    uint32_t tick;                         /* last-use stamp (LRU eviction) */
+    uint32_t h1, h2, hlen;                 /* content hash of the source image(s) at the last upload: an unchanged re-upload is skipped */
+    uint32_t gen;                          /* mach64_batch_gen when last bound: still referenced by the pending (unsubmitted) batch if == current */
+    void    *texobj;                       /* GLEngine texobj, for re-upload after eviction */
 } mach64_tex_slot;
 static mach64_tex_slot g_slots[MACH64_TEX_SLOTS];
+extern uint32_t mach64_batch_gen;
+static int             g_evict_used = 0;               /* set when an eviction victim is referenced by the pending batch */
+static uint32_t        g_tick = 0;                     /* LRU clock (one step per bind) */
+static uint32_t        g_protect[2] = { 0, 0 };        /* keys of the textures the current draw needs: never evicted */
+static uint32_t        g_nevict = 0;                   /* evictions so far (statistics / tests) */
 static uint32_t        g_heap_next = MACH64_TEX_HEAP_BASE;
 /* Heap window is runtime-relocatable: double-buffered mode needs the VRAM the
  * texture heap normally occupies for the back buffer, so it moves the heap into
@@ -83,11 +104,12 @@ static uint32_t        g_heap_end  = MACH64_TEX_HEAP_END;
 
 void mach64_set_texheap(uint32_t base, uint32_t end)
 {
+    /* The top 2KB of the 8MB aperture is the chip's register window: a texture there is a register write.  Clamp. */
+    if (end > MACH64_VRAM_USABLE_END) end = MACH64_VRAM_USABLE_END;
+    if (base > end) base = end;
     TEX_LOCK();
     g_heap_base = base; g_heap_end = end; g_heap_next = base;
     TEX_UNLOCK();
-    gld_log("mach64_set_texheap: heap = [0x%x, 0x%x) (%u KB)\n",
-            base, end, (end - base) >> 10);
 }
 
 typedef struct { uint32_t off, size; } mach64_free_blk;
@@ -133,7 +155,6 @@ static void heap_free(uint32_t off, uint32_t size)
     if (g_nfree < MACH64_TEX_SLOTS) {
         g_free[g_nfree].off = off; g_free[g_nfree].size = size; g_nfree++;
     } else {
-        gld_log("mach64 tex: free list full, 0x%x (%u B) leaked\n", off, size);
     }
 }
 
@@ -169,7 +190,6 @@ void mach64_winpool_init(uint32_t base, uint32_t end)
     TEX_LOCK();
     if (!g_winpool_base && end > base) {   /* first windowed attach wins; later attaches reuse it */
         g_winpool_base = base; g_winpool_end = end; g_winpool_next = base;
-        gld_log("mach64_winpool: [0x%x, 0x%x) (%u KB)\n", base, end, (end - base) >> 10);
     }
     TEX_UNLOCK();
 }
@@ -217,10 +237,25 @@ static mach64_tex_slot *slot_alloc_locked(uint32_t key, uint32_t w, uint32_t h, 
     } else {
         int i;
         for (i = 0; i < MACH64_TEX_SLOTS; i++) if (!g_slots[i].key) { s = &g_slots[i]; break; }
-        if (!s) { gld_log("mach64 tex: slot table full\n"); return 0; }
+        if (!s) return 0;
     }
     off = heap_alloc(sz);
-    if (!off) { gld_log("mach64 tex: heap full\n"); if (s->key != key) s->key = 0; return 0; }
+    /* Heap full: evict least-recently-used resident textures (never this slot, never the textures the current draw is about to bind) until the request fits.
+     * An evicted slot keeps its metadata (key, texobj) with rsize 0; bind_texture re-uploads it from GLEngine's own copy when it is bound again. */
+    while (!off) {
+        mach64_tex_slot *v = 0; int i;
+        for (i = 0; i < MACH64_TEX_SLOTS; i++) {
+            mach64_tex_slot *c = &g_slots[i];
+            if (!c->key || c == s || !c->rsize) continue;
+            if (c->key == g_protect[0] || c->key == g_protect[1]) continue;
+            if (!v || c->tick < v->tick) v = c;
+        }
+        if (!v) break;
+        if (v->gen == mach64_batch_gen) g_evict_used = 1;
+        heap_free(v->off, v->rsize); v->off = 0; v->rsize = 0; g_nevict++;
+        off = heap_alloc(sz);
+    }
+    if (!off) { if (s->key != key) s->key = 0; return 0; }
     s->key = key; s->off = off; s->w = w; s->h = h; s->rsize = sz;
     return s;
 }
@@ -284,6 +319,15 @@ static uint32_t tex_texel_argb(const unsigned char *src, uint32_t i, uint16_t fm
         unsigned R  = (r5 << 3) | (r5 >> 2), G = (g6 << 2) | (g6 >> 4), B = (b5 << 3) | (b5 >> 2);
         return 0xff000000u | (R << 16) | (G << 8) | B;
     }
+    if (type == 0x8033u) {                       /* GL_UNSIGNED_SHORT_4_4_4_4: R15..12 G B A3..0 */
+        unsigned v = ((unsigned)src[i*2] << 8) | src[i*2 + 1];
+        return (((v & 0xfu) * 17u) << 24) | ((((v >> 12) & 0xfu) * 17u) << 16) | ((((v >> 8) & 0xfu) * 17u) << 8) | (((v >> 4) & 0xfu) * 17u);
+    }
+    if (type == 0x8034u) {                       /* GL_UNSIGNED_SHORT_5_5_5_1: R15..11 G B A0 */
+        unsigned v = ((unsigned)src[i*2] << 8) | src[i*2 + 1];
+        unsigned r5 = (v >> 11) & 0x1fu, g5 = (v >> 6) & 0x1fu, b5 = (v >> 1) & 0x1fu;
+        return ((v & 1u) ? 0xff000000u : 0u) | (((r5 << 3) | (r5 >> 2)) << 16) | (((g5 << 3) | (g5 >> 2)) << 8) | ((b5 << 3) | (b5 >> 2));
+    }
     switch (fmt) {
     case 0x1908u: { const unsigned char *px = src + i*4;   /* GL_RGBA */
         return ((uint32_t)px[3]<<24)|((uint32_t)px[0]<<16)|((uint32_t)px[1]<<8)|px[2]; }
@@ -300,17 +344,52 @@ static uint32_t tex_texel_argb(const unsigned char *src, uint32_t i, uint16_t fm
     }
 }
 
+/* Texel `i` as a hardware 16-bit texel of datatype `hwfmt` (4 RGB565, 15 ARGB4444, 3 ARGB1555).  Packed 16-bit sources whose layout already matches (or only
+ * needs a field shuffle) are converted exactly; anything else goes through ARGB8888 and is truncated. */
+static uint32_t tex_texel_hw16(const unsigned char *src, uint32_t i, uint16_t fmt, uint16_t type, uint32_t hwfmt)
+{
+    unsigned v = 0;
+    if (hwfmt == 11u || hwfmt == 12u) return (unsigned)src[i*2] | ((unsigned)src[i*2 + 1] << 8);   /* GL_APPLE_ycbcr_422: VRAM bytes = source bytes */
+    if (type == 0x8363u && hwfmt == 4u)  { v = ((unsigned)src[i*2] << 8) | src[i*2 + 1]; return v; }                                   /* 5_6_5 -> RGB565: identical */
+    if (type == 0x8033u && hwfmt == 15u) { v = ((unsigned)src[i*2] << 8) | src[i*2 + 1];                                              /* RGBA4444 -> ARGB4444 */
+        return ((v & 0xfu) << 12) | (((v >> 12) & 0xfu) << 8) | (((v >> 8) & 0xfu) << 4) | ((v >> 4) & 0xfu); }
+    if (type == 0x8034u && hwfmt == 3u)  { v = ((unsigned)src[i*2] << 8) | src[i*2 + 1];                                              /* RGB5_A1 -> ARGB1555 */
+        return ((v & 1u) << 15) | (((v >> 11) & 0x1fu) << 10) | (((v >> 6) & 0x1fu) << 5) | ((v >> 1) & 0x1fu); }
+    {   uint32_t a = tex_texel_argb(src, i, fmt, type), A = a >> 24, R = (a >> 16) & 0xffu, G = (a >> 8) & 0xffu, B = a & 0xffu;
+        if (hwfmt == 4u)  return ((R >> 3) << 11) | ((G >> 2) << 5) | (B >> 3);
+        if (hwfmt == 15u) return ((A >> 4) << 12) | ((R >> 4) << 8) | ((G >> 4) << 4) | (B >> 4);
+        return ((A >> 7) << 15) | ((R >> 3) << 10) | ((G >> 3) << 5) | (B >> 3);                                                     /* ARGB1555 */
+    }
+}
+
 /* PATH B texel upload: the host-data blit (HOST_DATA0 FIFO feed) can't be expressed by Apple's PIO
  * {reg,val} submit and WEDGES the engine (see the guard note in mach64_bind_texture).  Instead, hand
  * the ARGB texels to the PATCHED new_texture selector (GL sel 10), which the kext turns into a plain
  * VRAM memcpy: struct in = { u32 dst_off; u32 argb[] } -> lfb[dst_off..] = argb.  Chunked to keep the
  * IOKit struct input a sane size.  REQUIRES the upload-patched kext (ATIRagePro.patched2). */
+/* CORRECTION (Nov 21, colortest on the MDD): the swap is an EXCHANGE OF THE TWO 16-BIT HALVES of each 32-bit word (0xAARRGGBB is sampled as 0xGGBBAARR), NOT a
+ * full byte reversal: reversal only looked right for the symmetric test value 0xffff0000.  Pure red/green/blue RGBA and RGBA4444 textures proved it.
+ * OBSERVED (Nov 20, headless setup): the patched kext's upload stores each ARGB word we pass into VRAM swapped relative to what the
+ * engine samples (red 0xffff0000 read back as 0x0000ffff).  In that setup the VRAM view handed to the Apple kernel driver comes from RageStubFB,
+ * which returns the plain little-endian aperture (BAR0 +0, 8MB).  Why this was not needed with Apple's own framebuffer driver is NOT established
+ * (hypothesis: a byte-swapped VRAM view); the swap is therefore applied only when RageStubFB is present, so the Apple-FB path is unchanged. */
+static int tex_need_bswap(void)
+{
+    static int v = -1;
+    if (v < 0) {
+        io_service_t sv = IOServiceGetMatchingService(kIOMasterPortDefault, IOServiceMatching("RageStubFB"));
+        v = (sv != 0); if (sv) IOObjectRelease(sv);
+    }
+    return v;
+}
+
 static void mach64_upload_texels_pathb(gld_context *ctx, uint32_t dst_off,
                                        const unsigned char *src, uint32_t first, uint32_t count,
-                                       uint16_t fmt, uint16_t type)
+                                       uint16_t fmt, uint16_t type, uint32_t bpt, uint32_t hwfmt)
 {
     io_connect_t gc = ctx->connect;
     uint32_t i = first, end = first + count;
+    int swap = tex_need_bswap();
 #define TEX_CHUNK 2000u                     /* texels/call -> struct <= 8 + 8000 bytes */
     while (i < end) {
         uint32_t n = end - i; if (n > TEX_CHUNK) n = TEX_CHUNK;
@@ -318,26 +397,204 @@ static void mach64_upload_texels_pathb(gld_context *ctx, uint32_t dst_off,
         uint32_t out[2] = {0,0}; IOByteCount osz = sizeof out;
         uint32_t k;
         buf[0] = kATIRPro_TEXOP_UPLOAD;
-        buf[1] = dst_off + (i - first) * 4u;
-        for (k = 0; k < n; k++, i++) buf[2+k] = tex_texel_argb(src, i, fmt, type);
+        buf[1] = dst_off + (i - first) * bpt;
+        if (bpt == 2u) {   /* two 16-bit texels per word: the hardware sees little-endian u16s, texel 0 in the low half (same word-level swap as ARGB8888) */
+            uint32_t nw = (n + 1u) / 2u, base = i;
+            for (k = 0; k < nw; k++) {
+                uint32_t t0 = tex_texel_hw16(src, base + 2u*k, fmt, type, hwfmt);
+                uint32_t t1 = (2u*k + 1u < n) ? tex_texel_hw16(src, base + 2u*k + 1u, fmt, type, hwfmt) : 0u;
+                uint32_t a = t0 | (t1 << 16);
+                buf[2+k] = swap ? ((a << 16) | (a >> 16)) : a;
+            }
+            i += n;
+            IOConnectMethodStructureIStructureO(gc, kATIRPro_new_texture, (uint32_t)(8u + nw*4u), &osz, buf, out);
+            continue;
+        }
+        if (bpt == 1u) {   /* Y8: four luminance texels per word, texel 0 in the low byte */
+            uint32_t nw = (n + 3u) / 4u, base = i, j;
+            for (k = 0; k < nw; k++) {
+                uint32_t a = 0;
+                for (j = 0; j < 4u && 4u*k + j < n; j++) a |= (uint32_t)src[base + 4u*k + j] << (8u*j);
+                buf[2+k] = swap ? ((a << 16) | (a >> 16)) : a;
+            }
+            i += n;
+            IOConnectMethodStructureIStructureO(gc, kATIRPro_new_texture, (uint32_t)(8u + nw*4u), &osz, buf, out);
+            continue;
+        }
+        for (k = 0; k < n; k++, i++) {
+            uint32_t a = tex_texel_argb(src, i, fmt, type);
+            buf[2+k] = swap ? ((a << 16) | (a >> 16)) : a;
+        }
         IOConnectMethodStructureIStructureO(gc, kATIRPro_new_texture,
                                             (uint32_t)(8u + n*4u), &osz, buf, out);
     }
 #undef TEX_CHUNK
 }
 
+
+/* ---- Bus-mastered texture upload (DEFAULT ON; MACH64_DMA_UPLOAD=0 disables; see docs/re-notes/dma-upload-design.md) ------------------------------
+ * The kext-memcpy upload costs the CPU about 5.6 ms per 112 KB; filling an uncached staging buffer costs about 0.5 ms and the Rage Pro's *system* bus-master
+ * transfer (Programmer's Guide 8.10.3) then copies it to VRAM without the draw engine or register FIFO (measured: 45 MB/s, safe next to concurrent 2D fills).
+ *   staging + descriptor table : the Path A kext's physically contiguous, uncached command buffer (128 KB) and ring, opened as a SECOND connection
+ *   kick / completion          : direct register access through that connection's BAR map (BM_SYSTEM_TABLE 0x1bc; done when the table pointer reaches the table end and
+ *                                BM_COMMAND shows end-of-list).  Not via Apple's drain: the plugin's drain is one flush per frame (its position in the frame is fixed by the batch/clear ordering), and Apple's kext consumes only the FIRST drain of a frame (measured, dma-upload-design.md section 7), so a mid-frame kick through a drain would be lost; a direct register write does not depend on it.
+ *   exclusion                  : flock() around fill -> kick -> completion (the staging buffer and table are global to the kext, so processes must not overlap)
+ * Version 1 is synchronous: it returns after the transfer completes, yielding the CPU while it waits.  Any problem (Path A missing, address outside RAM, BUS_CNTL not already
+ * bus-master enabled, timeout) disables the path for the process and the caller falls back to the kext memcpy upload. */
+#define M64_DMA_STAGE   0x20000u
+#define M64_DMA_MINBYTES 4096u            /* smaller uploads are cheaper through the kext call */
+#define M64_DMA_BM_SYSTEM_TABLE 0x01bcu
+#define M64_DMA_BM_COMMAND      0x0188u
+#define M64_DMA_BUS_CNTL        0x04a0u
+#define M64_DMA_EOL (1u << 31)
+static struct {
+    int state;                            /* 0 untried, 1 ready, -1 unavailable */
+    io_connect_t conn;
+    volatile uint8_t *cmd, *ring, *regs;  /* staging, descriptor table, BAR0 register window (BAR + 0x7ff800) */
+    uint32_t cmdbus, ringbus, prev_end;
+    int lockfd;
+    size_t cmdsz, ringsz;                 /* sizes of the Path A staging/ring maps (the single-thread engine needs the 384 KB / 64 KB kext) */
+} g_dma;
+/* One process-wide, re-entrant cross-process lock for every bus-master user (texture DMA, the kernel-handler flush, the single-thread engine): the engine holds it while a batch is in
+ * flight, and a texture upload in the same process must still be able to run then (the system bus master is safe next to the GUI one). */
+static int g_eng_lockfd = -2, g_eng_lockdepth = 0;
+void mach64_eng_lock(void)
+{
+    if (g_eng_lockfd == -2) { g_eng_lockfd = open("/var/tmp/mach64_dma.lock", O_CREAT | O_RDWR, 0666); if (g_eng_lockfd >= 0) fchmod(g_eng_lockfd, 0666); }
+    if (g_eng_lockdepth++ == 0 && g_eng_lockfd >= 0) flock(g_eng_lockfd, LOCK_EX);
+}
+void mach64_eng_unlock(void) { if (g_eng_lockdepth > 0 && --g_eng_lockdepth == 0 && g_eng_lockfd >= 0) flock(g_eng_lockfd, LOCK_UN); }
+/* Path A handles for the single-thread engine (gld_engine.c); opens Path A like the texture path does. */
+static int dma_ready_pathA(void);
+int mach64_pathA(io_connect_t *conn, volatile uint8_t **regs, volatile uint8_t **cmd, volatile uint8_t **ring, uint32_t *cmdbus, uint32_t *ringbus, size_t *cmdsz, size_t *ringsz)
+{
+    if (!dma_ready_pathA()) return 0;
+    *conn = g_dma.conn; *regs = g_dma.regs; *cmd = g_dma.cmd; *ring = g_dma.ring; *cmdbus = g_dma.cmdbus; *ringbus = g_dma.ringbus; *cmdsz = g_dma.cmdsz; *ringsz = g_dma.ringsz;
+    return 1;
+}
+static unsigned dma_rd(uint32_t reg) { return OSReadLittleInt32((void *)g_dma.regs, reg); }
+static void dma_wr(uint32_t reg, uint32_t v) { OSWriteLittleInt32((void *)g_dma.regs, reg, v); }
+static void dma_mb(void) { __asm__ volatile("sync; eieio" ::: "memory"); }
+static int dma_map(io_connect_t c, unsigned type, vm_address_t *a, vm_size_t *sz)
+{
+    *a = 0; *sz = 0;
+    return IOConnectMapMemory(c, type, mach_task_self(), a, sz, kIOMapAnywhere | kIOMapInhibitCache) == KERN_SUCCESS && *a;
+}
+static void dma_disable(void) { g_dma.state = -1; }
+static int dma_ready(void);
+static int dma_ready_pathA(void) { return dma_ready(); }
+static int dma_ready(void)
+{
+    if (g_dma.state) return g_dma.state > 0;
+    g_dma.state = -1;
+    {   io_service_t sv = IOServiceGetMatchingService(kIOMasterPortDefault, IOServiceMatching("Mach64Accelerator"));
+        vm_address_t a; vm_size_t sz; uint32_t cmdbus = 0, ringbus = 0, cfg = 0; unsigned physmem = 0; size_t pl = sizeof physmem;
+        if (!sv) return 0;
+        if (IOServiceOpen(sv, mach_task_self(), MACH64_GL_CONNECT_TYPE, &g_dma.conn)) { IOObjectRelease(sv); return 0; }
+        IOObjectRelease(sv);
+        if (!dma_map(g_dma.conn, MACH64_MEM_SURFACE, &a, &sz) || sz < 0x800000u) return 0;
+        g_dma.regs = (volatile uint8_t *)a + MACH64_REG_WINDOW;
+        if (!dma_map(g_dma.conn, MACH64_MEM_CMDBUF, &a, &sz) || sz < M64_DMA_STAGE) return 0;
+        g_dma.cmd = (volatile uint8_t *)a; g_dma.cmdsz = sz;
+        if (!dma_map(g_dma.conn, MACH64_MEM_RING, &a, &sz) || sz < 0x4000u) return 0;
+        g_dma.ring = (volatile uint8_t *)a; g_dma.ringsz = sz;
+        if (IOConnectMethodScalarIScalarO(g_dma.conn, kMach64Sel_get_config, 0, 3, &cmdbus, &ringbus, &cfg)) return 0;
+        /* the bus addresses must be real RAM: a wrong one makes the chip DMA over arbitrary memory (an earlier test panicked on ~0xd0320000) */
+        if (sysctlbyname("hw.physmem", &physmem, &pl, 0, 0) || !physmem) return 0;
+        if (cmdbus < 0x1000u || (uint64_t)cmdbus + M64_DMA_STAGE > physmem || ringbus < 0x1000u || (uint64_t)ringbus + 0x4000u > physmem || (ringbus & 0xfu) || (cmdbus & 0xfffu)) {
+            return 0; }
+        g_dma.cmdbus = cmdbus; g_dma.ringbus = ringbus; g_dma.prev_end = 0;
+        g_dma.lockfd = open("/var/tmp/mach64_dma.lock", O_CREAT | O_RDWR, 0666);
+        if (g_dma.lockfd >= 0) fchmod(g_dma.lockfd, 0666);   /* a root-created lock (umask 022) must stay usable by every user, else DMA upload silently falls back to the engine path */
+        if (g_dma.lockfd < 0) return 0;
+        g_dma.state = 1;
+    }
+    return 1;
+}
+/* Convert texels [first, first+n) of `src` into the staging buffer (little-endian words: what lands in VRAM is byte-for-byte what the engine reads; the DMA path does not go
+ * through any aperture byte swap). */
+static void dma_fill(const unsigned char *src, uint32_t first, uint32_t n, uint16_t fmt, uint16_t type, uint32_t bpt, uint32_t hwfmt)
+{
+    uint32_t k, nw = (n * bpt + 3u) / 4u;
+    /* Fast paths for the common formats (the generic per-texel converters dominate the CPU cost once the copy itself is offloaded). */
+    if (bpt == 4u && type == 0x1401u && (fmt == 0x1908u || fmt == 0x1907u)) {
+        const unsigned char *p = src + (size_t)first * (fmt == 0x1908u ? 4u : 3u);
+        if (fmt == 0x1908u) for (k = 0; k < n; k++, p += 4) OSWriteLittleInt32((void *)g_dma.cmd, k * 4u, ((uint32_t)p[3] << 24) | ((uint32_t)p[0] << 16) | ((uint32_t)p[1] << 8) | p[2]);   /* RGBA -> ARGB */
+        else                   for (k = 0; k < n; k++, p += 3) OSWriteLittleInt32((void *)g_dma.cmd, k * 4u, 0xff000000u | ((uint32_t)p[0] << 16) | ((uint32_t)p[1] << 8) | p[2]);         /* RGB */
+        return;
+    }
+    if (bpt == 2u && type == 0x8363u && hwfmt == 4u) {                       /* 5_6_5 big-endian u16 -> RGB565 little-endian u16, two texels per word */
+        const unsigned char *p = src + (size_t)first * 2u;
+        for (k = 0; k < nw; k++, p += 4) {
+            uint32_t t0 = ((uint32_t)p[0] << 8) | p[1], t1 = (2u * k + 1u < n) ? (((uint32_t)p[2] << 8) | p[3]) : 0u;
+            OSWriteLittleInt32((void *)g_dma.cmd, k * 4u, t0 | (t1 << 16));
+        }
+        return;
+    }
+    for (k = 0; k < nw; k++) {
+        uint32_t a = 0;
+        if (bpt == 4u) a = tex_texel_argb(src, first + k, fmt, type);
+        else if (bpt == 2u) {
+            uint32_t i0 = first + 2u * k;
+            a = tex_texel_hw16(src, i0, fmt, type, hwfmt) | ((2u * k + 1u < n) ? (tex_texel_hw16(src, i0 + 1u, fmt, type, hwfmt) << 16) : 0u);
+        } else { uint32_t j; for (j = 0; j < 4u && 4u * k + j < n; j++) a |= (uint32_t)src[first + 4u * k + j] << (8u * j); }
+        OSWriteLittleInt32((void *)g_dma.cmd, k * 4u, a);
+    }
+}
+/* One transfer of up to 128 KB: texels [first, first+n) -> VRAM byte offset dst.  Returns 1 on success. */
+static int dma_xfer(uint32_t dst, const unsigned char *src, uint32_t first, uint32_t n, uint16_t fmt, uint16_t type, uint32_t bpt, uint32_t hwfmt)
+{
+    uint32_t bytes = (n * bpt + 3u) & ~3u, nd = (bytes + 4095u) / 4096u, i, tbl, end, spins;
+    int ok = 0;
+    if (!mach64_vram_span_ok(dst, bytes) || (dst & 3u)) return 0;
+    mach64_eng_lock();
+    { uint32_t bus = dma_rd(M64_DMA_BUS_CNTL);    /* bus mastering must already be on: we do not touch BUS_CNTL (shared with Apple's kext) */
+      if ((bus & (1u << 6)) || !(bus & (1u << 27))) { mach64_eng_unlock(); dma_disable(); return 0; } }
+    dma_fill(src, first, n, fmt, type, bpt, hwfmt);
+    tbl = g_dma.ringbus; if (tbl + nd * 16u == g_dma.prev_end) tbl += 0x2000u;       /* a table end different from the last one, so "pointer at end" cannot be stale */
+    end = tbl + nd * 16u;
+    for (i = 0; i < nd; i++) {
+        uint32_t cnt = (i == nd - 1u) ? bytes - (nd - 1u) * 4096u : 4096u;
+        OSWriteLittleInt32((void *)g_dma.ring, (tbl - g_dma.ringbus) + i * 16u + 0, dst + i * 4096u);
+        OSWriteLittleInt32((void *)g_dma.ring, (tbl - g_dma.ringbus) + i * 16u + 4, g_dma.cmdbus + i * 4096u);
+        OSWriteLittleInt32((void *)g_dma.ring, (tbl - g_dma.ringbus) + i * 16u + 8, cnt | ((i == nd - 1u) ? M64_DMA_EOL : 0u));
+        OSWriteLittleInt32((void *)g_dma.ring, (tbl - g_dma.ringbus) + i * 16u + 12, 0);
+    }
+    dma_mb();
+    dma_wr(M64_DMA_BM_SYSTEM_TABLE, tbl);                                      /* SYSTEM_TRIGGER 0: system memory -> frame buffer, starts now */
+    for (spins = 0; spins < 200000u; spins++) {
+        if (dma_rd(M64_DMA_BM_SYSTEM_TABLE) == end && dma_rd(M64_DMA_BM_COMMAND) == 0x80000000u) { ok = 1; break; }
+        if (spins > 50u) usleep(20);                                           /* yield the CPU instead of spinning on PCI reads */
+    }
+    if (ok) g_dma.prev_end = end;
+    mach64_eng_unlock();
+    if (!ok) dma_disable();
+    return ok;
+}
+/* Upload one whole image through DMA, in <=128 KB transfers.  Returns 1 when the whole image is in VRAM, 0 to let the caller use the kext path. */
+static int dma_upload_image(uint32_t dst_off, uint32_t n, const unsigned char *src, uint16_t fmt, uint16_t type, uint32_t bpt, uint32_t hwfmt)
+{
+    uint32_t per = M64_DMA_STAGE / bpt, first = 0;
+    if (n * bpt < M64_DMA_MINBYTES || (bpt != 1u && bpt != 2u && bpt != 4u) || !dma_ready()) return 0;
+    while (first < n) {
+        uint32_t c = (n - first < per) ? (n - first) : per;
+        if (!dma_xfer(dst_off + first * bpt, src, first, c, fmt, type, bpt, hwfmt)) return 0;   /* the caller re-uploads the whole image through the kext (idempotent) */
+        first += c;
+    }
+    return 1;
+}
 /* One host-data DMA blit of `count` ARGB8888 texels (converted from src[first..])
  * into VRAM at byte offset `dst_off`, laid out `bw` wide x `bh` tall with row
  * pitch `pitch_units`*8 pixels.  count must be <= MACH64_BLIT_MAX. */
 static void mach64_blit_texels(gld_context *ctx, uint32_t dst_off, uint32_t pitch_units,
                                uint32_t bw, uint32_t bh, const unsigned char *src,
-                               uint32_t first, uint32_t count, uint16_t fmt, uint16_t type)
+                               uint32_t first, uint32_t count, uint16_t fmt, uint16_t type, uint32_t bpt, uint32_t hwfmt)
 {
     mach64_priv *p = MACH64_PRIV(ctx);
     m64_cmdbuf cb;
     uint32_t i;
     if (p->apple_surf_cn) {                 /* PATH B: host-data blit wedges -> use the kext selector */
-        mach64_upload_texels_pathb(ctx, dst_off, src, first, count, fmt, type);
+        mach64_upload_texels_pathb(ctx, dst_off, src, first, count, fmt, type, bpt, hwfmt);
         return;
     }
     m64_cb_init(&cb, p->scratch, sizeof(p->scratch) / sizeof(p->scratch[0]));
@@ -359,7 +616,7 @@ static void mach64_blit_texels(gld_context *ctx, uint32_t dst_off, uint32_t pitc
         while (k < 16 && i < first + count) {
             uint32_t argb;
             /* GLEngine hands texels in the app's base format, tightly packed (fmt @ level rec+0x0c,
-             * the pixel TYPE @ +0x0e, observed via GLD_TEXFMT_PROBE).  Convert to native ARGB8888.
+             * the pixel TYPE @ +0x0e).  Convert to native ARGB8888.
              * 1-byte formats (LUMINANCE/ALPHA/INTENSITY) and 2-byte (LUMINANCE_ALPHA) expand to
              * grey/alpha.  Packed types are keyed on `type` (fmt stays the base RGB code). */
             if (type == 0x8363u) {   /* GL_UNSIGNED_SHORT_5_6_5: packed RGB in one native (big-endian) u16 */
@@ -404,28 +661,23 @@ static void mach64_blit_texels(gld_context *ctx, uint32_t dst_off, uint32_t pitc
  * too wide to chunk by rows. */
 static int mach64_upload_image(gld_context *ctx, uint32_t dst_off,
                                uint32_t w, uint32_t h, const unsigned char *src,
-                               uint16_t fmt, uint16_t type)
+                               uint16_t fmt, uint16_t type, uint32_t bpt, uint32_t hwfmt)
 {
     uint32_t n = w * h;
     if (w > MACH64_BLIT_MAX) return 0;
-#ifdef GLD_TEXFMT_PROBE
-    gld_log("  texel src fmt=0x%x bytes[0..15]: %02x %02x %02x %02x  %02x %02x %02x %02x  "
-            "%02x %02x %02x %02x  %02x %02x %02x %02x\n", fmt,
-            src[0],src[1],src[2],src[3], src[4],src[5],src[6],src[7],
-            src[8],src[9],src[10],src[11], src[12],src[13],src[14],src[15]);
-#endif
+    if (MACH64_PRIV(ctx)->apple_surf_cn && dma_upload_image(dst_off, n, src, fmt, type, bpt, hwfmt)) return 1;   /* bus-mastered path */
     if (w >= 8) {
         uint32_t rows_per = MACH64_BLIT_MAX / w, y0;
         for (y0 = 0; y0 < h; y0 += rows_per) {
             uint32_t rows = (h - y0 < rows_per) ? (h - y0) : rows_per;
-            mach64_blit_texels(ctx, dst_off + y0 * w * 4u, w / 8, w, rows,
-                               src, y0 * w, rows * w, fmt, type);
+            mach64_blit_texels(ctx, dst_off + y0 * w * bpt, w / 8, w, rows,
+                               src, y0 * w, rows * w, fmt, type, bpt, hwfmt);
         }
     } else {
         uint32_t start;
         for (start = 0; start < n; start += MACH64_BLIT_MAX) {
             uint32_t cnt = (n - start < MACH64_BLIT_MAX) ? (n - start) : MACH64_BLIT_MAX;
-            mach64_blit_texels(ctx, dst_off + start * 4u, 1, cnt, 1, src, start, cnt, fmt, type);
+            mach64_blit_texels(ctx, dst_off + start * bpt, 1, cnt, 1, src, start, cnt, fmt, type, bpt, hwfmt);
         }
     }
     return 1;
@@ -440,20 +692,40 @@ static int mach64_upload_image(gld_context *ctx, uint32_t dst_off,
  * offset-aligned with the engine's VRAM offset space (a wide CPU write there
  * panics the box).  A 2D host-data blit writes through DST_OFF_PITCH in the
  * ENGINE's own offset space -- exactly where TEX_n_OFF then reads. */
+/* Cheap 64-bit content hash of a source image (two independent 32-bit lanes): the game re-uploads ~10 unchanged 256x256 texture pages per frame, each ~10 ms
+ * through the kext; hashing the source costs under a millisecond. */
+static void tex_hash(const unsigned char *p, uint32_t n, uint32_t *h1, uint32_t *h2)
+{
+    uint32_t a = 0x811c9dc5u, b = 0x9e3779b9u, i = 0, nw = n / 4u;
+    if (((uintptr_t)p & 3u) == 0) {
+        const uint32_t *w = (const uint32_t *)p;
+        for (i = 0; i < nw; i++) { uint32_t x = w[i]; a = (a ^ x) * 0x01000193u; b = ((b << 5) | (b >> 27)) + x; }
+        i = nw * 4u;
+    }
+    for (; i < n; i++) { a = (a ^ p[i]) * 0x01000193u; b = ((b << 5) | (b >> 27)) + p[i]; }
+    *h1 = a; *h2 = b;
+}
+static uint32_t tex_src_bytes(uint32_t w, uint32_t h, uint16_t fmt, uint16_t type)
+{
+    uint32_t bpp;
+    if (type == 0x8363u || type == 0x8033u || type == 0x8034u) bpp = 2;
+    else switch (fmt) { case 0x1908u: bpp = 4; break; case 0x1909u: case 0x1906u: case 0x8049u: bpp = 1; break; case 0x190Au: case 0x85B9u: bpp = 2; break; default: bpp = 3; }
+    return w * h * bpp;
+}
 static int mach64_upload(gld_context *ctx, void *texobj)
 {
     mach64_priv *p = MACH64_PRIV(ctx);
     const unsigned char *t = (const unsigned char *)texobj;
-    mach64_flush_batch(ctx);   /* order: pending triangles before texture VRAM changes */
     struct { uint32_t w, h, src, fmt, type, bytes; } lvl[12];
-    uint32_t state, base_lod, total, cur;
+    uint32_t state, base_lod, total, cur, hwfmt, bpt;
     const unsigned char *s;
     mach64_tex_slot *slot;
-    int nlevels = 0, L;
+    int nlevels = 0, L, pre_used = 0;
+    uint32_t tex_new_h1 = 0, tex_new_h2 = 0, tex_new_hl = 0;   /* hash of the image being uploaded (stored in the slot on success) */
 
     if (!t) return 0;
     state = *(const uint32_t *)(t + 0x30);
-    if (state < 0x10000 || state >= 0x40000000) return 0;
+    if (state < 0x10000 || state > M64_UADDR_MAX) return 0;
     s = (const unsigned char *)(uintptr_t)state;
     base_lod = s[0x5e];
 
@@ -463,30 +735,67 @@ static int mach64_upload(gld_context *ctx, void *texobj)
         const unsigned char *r = s + 0x9c + (base_lod + (uint32_t)L) * 0x14;
         uint32_t lw = *(const uint16_t *)(r + 0x00), lh = *(const uint16_t *)(r + 0x02);
         uint32_t lsrc = *(const uint32_t *)(r + 0x10);
-        if (!lw || !lh || lsrc < 0x10000 || lsrc >= 0x40000000) break;
-#ifdef GLD_TEXFMT_PROBE
-        if (L == 0)   /* dump the whole 20-byte level record to locate the pixel-TYPE field (5_6_5) */
-            gld_log("  texrec L0: %02x %02x %02x %02x  %02x %02x %02x %02x  %02x %02x %02x %02x  "
-                    "%02x %02x %02x %02x  %02x %02x %02x %02x\n",
-                    r[0],r[1],r[2],r[3], r[4],r[5],r[6],r[7], r[8],r[9],r[10],r[11],
-                    r[12],r[13],r[14],r[15], r[16],r[17],r[18],r[19]);
-#endif
-        if (lw > MACH64_BLIT_MAX) { if (L == 0) { gld_log("mach64 tex: %ux%u too wide\n", lw, lh); return 0; } break; }
+        if (!lw || !lh || lsrc < 0x10000 || lsrc > M64_UADDR_MAX) break;
+        if (lw > MACH64_BLIT_MAX) { if (L == 0) return 0; break; }
         lvl[nlevels].w = lw; lvl[nlevels].h = lh; lvl[nlevels].src = lsrc;
         lvl[nlevels].fmt  = *(const uint16_t *)(r + 0x0c);
         lvl[nlevels].type = *(const uint16_t *)(r + 0x0e);   /* pixel type (0x1401 UBYTE / 0x8363 5_6_5) */
-        lvl[nlevels].bytes = tex_align(lw * lh * 4u);
+        lvl[nlevels].bytes = 0;
         nlevels++;
     }
     if (!nlevels) return 0;
+    /* Unchanged re-upload of a resident texture: nothing to do. */
+    {   uint32_t h1 = 0, h2 = 0, hl = 0, k; mach64_tex_slot *ex;
+        {
+            for (k = 0; k < (uint32_t)nlevels; k++) {
+                uint32_t nb = tex_src_bytes(lvl[k].w, lvl[k].h, (uint16_t)lvl[k].fmt, (uint16_t)lvl[k].type), a1, a2;
+                tex_hash((const unsigned char *)(uintptr_t)lvl[k].src, nb, &a1, &a2); h1 = (h1 * 31u) ^ a1; h2 = (h2 * 31u) ^ a2; hl += nb;
+            }
+            TEX_LOCK(); ex = slot_find(tex_key(texobj));
+            if (ex && ex->rsize && ex->hlen == hl && ex->h1 == h1 && ex->h2 == h2 && ex->w == lvl[0].w && ex->h == lvl[0].h && ex->nlevels == nlevels) {
+                ex->texobj = texobj; ex->tick = ++g_tick; TEX_UNLOCK();
+                return 1;
+            }
+            TEX_UNLOCK();
+            tex_new_h1 = h1; tex_new_h2 = h2; tex_new_hl = hl;
+        }
+    }
 
-    total = 0;
-    for (L = 0; L < nlevels; L++) total += lvl[L].bytes;
-
-    slot = slot_alloc(tex_key(texobj), lvl[0].w, lvl[0].h, total);
+    /* Texel format.  Packed 16-bit sources (5_6_5, 4_4_4_4, 5_5_5_1) are stored natively as RGB565 / ARGB4444 / ARGB1555 (half the VRAM, exact); everything
+     * else is ARGB8888 -- and if an ARGB8888 texture does not fit the heap it is retried as 16-bit (RGB565 without alpha, ARGB4444 with), the way a compact texture format
+     * would be chosen.  Only the Path B (kext memcpy) upload can pack 16-bit texels. */
+    {   uint32_t t0 = lvl[0].type, f0 = lvl[0].fmt;
+        int alpha0 = (f0 == 0x1908u || f0 == 0x1906u || f0 == 0x190Au || f0 == 0x8049u);
+        int attempt;
+        hwfmt = 6u; bpt = 4u; slot = 0;
+        { mach64_tex_slot *pre; TEX_LOCK(); pre = slot_find(tex_key(texobj)); pre_used = (pre && pre->rsize && pre->gen == mach64_batch_gen); TEX_UNLOCK(); }
+        if (p->apple_surf_cn && lvl[0].w >= 2) {
+            if (t0 == 0x8363u) { hwfmt = 4u; bpt = 2u; }
+            else if (t0 == 0x8033u) { hwfmt = 15u; bpt = 2u; }
+            else if (t0 == 0x8034u) { hwfmt = 3u; bpt = 2u; }
+            else if (f0 == 0x85B9u && (t0 == 0x85BAu || t0 == 0x85BBu)) { hwfmt = (t0 == 0x85BAu) ? 12u : 11u; bpt = 2u; }   /* GL_APPLE_ycbcr_422: memory [Cb Y0 Cr Y1] (8_8_APPLE) = hardware datatype 12 (measured: it takes Y from the 2nd byte); _REV [Y0 Cb Y1 Cr] = 11 */
+            else if (f0 == 0x1909u && t0 == 0x1401u && lvl[0].w >= 4) { hwfmt = 8u; bpt = 1u; }   /* GL_LUMINANCE -> Y8 (1 byte/texel) */
+            else { hwfmt = alpha0 ? 15u : 4u; bpt = 2u; }   /* default: 16-bit (565 / 4444) -- the 1.5 MB heap otherwise thrashes (Sonic R: 6800 evictions/20 s as ARGB8888) */
+        }
+        for (attempt = 0; attempt < 2; attempt++) {
+            total = 0;
+            for (L = 0; L < nlevels; L++) { lvl[L].bytes = tex_align(lvl[L].w * lvl[L].h * bpt); total += lvl[L].bytes; }
+            g_evict_used = 0;
+            slot = slot_alloc(tex_key(texobj), lvl[0].w, lvl[0].h, total);
+            if (slot || bpt == 2u || !p->apple_surf_cn || lvl[0].w < 2) break;
+            hwfmt = alpha0 ? 15u : 4u; bpt = 2u;                 /* heap full as ARGB8888: retry compact */
+        }
+    }
+    /* Order: pending triangles must run before a texture region they read is rewritten.  Draining the batch on EVERY upload made one drain (= one type-1
+     * present/copy opportunity) per texture change -- Sonic R's 6 background tiles landed as 6 partial frames.  Flush only if this upload re-uses a region the
+     * pending batch bound (re-upload of a bound slot, or an eviction victim bound in this batch); a fresh region cannot be read by queued triangles. */
+    if (pre_used || g_evict_used) mach64_flush_batch(ctx);
+    { extern void mach64_dma_fence(void); mach64_dma_fence(); }   /* a real upload drives the engine/aperture: let an async geometry job finish first */
+    p->dirty |= MACH64_DIRTY_STATE;   /* the upload's 2D blit clobbers engine state; the next triangle re-emits it */
     if (!slot) return 0;
-    {   uint16_t f0 = (uint16_t)lvl[0].fmt;      /* alpha-bearing: RGBA / ALPHA / LUM_ALPHA / INTENSITY */
-        slot->has_alpha = (f0 == 0x1908u || f0 == 0x1906u || f0 == 0x190Au || f0 == 0x8049u);
+    slot->hwfmt = hwfmt; slot->bpt = bpt; slot->texobj = texobj; slot->tick = ++g_tick;
+    {   uint16_t f0 = (uint16_t)lvl[0].fmt;      /* alpha-bearing: RGBA / ALPHA / LUM_ALPHA / INTENSITY (RGB565 has none, whatever the source) */
+        slot->has_alpha = (f0 == 0x1908u || f0 == 0x1906u || f0 == 0x190Au || f0 == 0x8049u) && hwfmt != 4u;
     }
     slot->nlevels   = nlevels;
     /* GL_TEXTURE_WRAP_S/T live in the state-obj at +0x10 as (WRAP_S<<16)|WRAP_T,
@@ -497,13 +806,15 @@ static int mach64_upload(gld_context *ctx, void *texobj)
         uint16_t magf = *(const uint16_t *)(s + 0x18);   /* GL_TEXTURE_MAG_FILTER (u16) */
         slot->clamp_s = ((wrap >> 16) != 0x2901u);
         slot->clamp_t = ((wrap & 0xffffu) != 0x2901u);
-        /* GL filter enums (state-object offsets found via GLD_TEXFILTER_PROBE): 0x2600 NEAREST,
+        /* GL filter enums (state-object offsets: 0x2600 NEAREST,
          * 0x2601 LINEAR, 0x2700..0x2703 the mipmap variants (odd low bit = LINEAR within a level).
          * mag GL_LINEAR -> hardware bilinear (SCALE_3D_CNTL BILINEAR_TEX_EN bit25, HW-verified).
          * NOTE: the Rage LT Pro cannot bilinear-filter ALPHA-BLENDED textures (a HW limitation --
          * grates/fences/smoke stay pixelated); setting the bit is harmless there (HW falls back). */
         slot->bilinear_mag = (magf == 0x2601u);
         slot->bilinear_min = ((minf & 1u) != 0u);   /* 0x2601/0x2701/0x2703 -> linear min */
+        slot->min_filter   = minf;
+        slot->mipmapped    = (nlevels > 1 && minf >= 0x2700u && minf <= 0x2703u);
     }
 
     /* Upload each level; index its offset by its maxLog2 (= its TEX_n_OFF reg). */
@@ -513,15 +824,14 @@ static int mach64_upload(gld_context *ctx, void *texobj)
         uint32_t r  = ilog2u(mx);
         mach64_upload_image(ctx, cur, lvl[L].w, lvl[L].h,
                             (const unsigned char *)(uintptr_t)lvl[L].src,
-                            (uint16_t)lvl[L].fmt, (uint16_t)lvl[L].type);
+                            (uint16_t)lvl[L].fmt, (uint16_t)lvl[L].type, bpt, hwfmt);
         if (r < 12) slot->mip_off[r] = cur;
+        slot->lvl_off[L] = cur; slot->lvl_w[L] = lvl[L].w; slot->lvl_h[L] = lvl[L].h;
         cur += lvl[L].bytes;
     }
 
     p->dirty |= MACH64_DIRTY_STATE;      /* new texels -> re-emit tex state       */
-    gld_log("mach64 texture upload: %ux%u fmt=0x%x -> VRAM 0x%x (key 0x%x) %d level%s\n",
-            lvl[0].w, lvl[0].h, lvl[0].fmt, slot->off, slot->key,
-            nlevels, nlevels > 1 ? "s (mip)" : "");
+    slot->h1 = tex_new_h1; slot->h2 = tex_new_h2; slot->hlen = tex_new_hl;
     return 1;
 }
 
@@ -529,6 +839,8 @@ static int mach64_upload(gld_context *ctx, void *texobj)
  * when enabled, 0 when disabled; recovered via tools/mach64_texstate gli-diff). */
 #define GLI_TEX2D_ENABLE   0x6748
 #define GLI_TEX2D_BIT      0x00000008u
+#define GLI_UNIT_STRIDE    0x7cu       /* per texture unit: enable word, env-mode word */
+#define GLI_BOUND_STRIDE   0x14u       /* per texture unit: bound texobj pointer       */
 
 /* GL_TEXTURE_ENV_MODE lives in the very next gli word, at +0x674c, stored as the
  * raw GL enum in the HIGH 16 bits (recovered via a 3-way gli diff
@@ -597,12 +909,12 @@ static uint32_t mach64_blend_dst(uint32_t glf)
  * Kept from the reference: SRC=SRC_ALPHA, DST=INV_SRC_ALPHA, clear TEX_MAP_AEN, and
  * DP_FOG_CLR = GL_FOG_COLOR.  Mutually exclusive with GL_BLEND (both own the alpha
  * channel), so blend wins.
- * GL_FOG enable = gli+0x6380 bit 8 (GLD_FOGSCAN: the ONLY word that changed on
+ * GL_FOG enable = gli+0x6380 bit 8 (the ONLY word that changed on
  * glEnable(GL_FOG) was 0x6380: 0x855c0000 -> 0x855c0100).  NOT 0x6354 (dither), NOT
  * bit24.  The per-vertex fog factor (+0x4c) reads 0.0 when fog is OFF, so the pipe MUST
  * be gated on this enable -- an always-on pipe would fog everything (factor 0 = full fog). */
 #define GLI_FOG_ENABLE   0x6380u          /* GL_FOG enable word                   */
-#define GLI_FOG_EN_BIT   0x00000100u      /* bit 8 (recovered via GLD_FOGSCAN)    */
+#define GLI_FOG_EN_BIT   0x00000100u      /* bit 8 (recovered)    */
 #define GLI_FOG_COLOR    0x6358u          /* GL_FOG_COLOR RGBA floats (verified)  */
 
 /* These two are "current draw" globals: set in mach64_bind_texture at the START of each primitive
@@ -610,11 +922,13 @@ static uint32_t mach64_blend_dst(uint32_t glf)
  * On the serialized GL thread a draw is atomic, so each draw refreshes them before use -- safe under
  * multiple contexts without per-context storage (unlike the pixel-store gc, which a later pixel op
  * reads and so had to be made per-context). */
+uint32_t mach64_tex_vofs[2] = { 0x80u, 0u };   /* see gld.h */
+int mach64_spec_mode = 0;
 int mach64_fog_on = 0;                    /* consumed by mach64_read_vertex       */
 int mach64_flat_on = 0;                   /* glShadeModel(GL_FLAT): emit_tri flattens colour */
 
 /* Clamp a 0..1 float colour channel to a 0..255 byte. */
-static uint32_t chan_u8(float f){ int c=(int)(f*255.0f+0.5f); return c<0?0u:(c>255?255u:(uint32_t)c); }
+static uint32_t chan_u8(float f){ return m64_f2u8(f); }
 
 /* Is GL_FOG active for the current draw?  Requires a known enable offset, the
  * enable bit set, and GL_BLEND OFF (blend takes precedence over fog). */
@@ -623,6 +937,29 @@ static int mach64_fog_active(gld_context *ctx)
     if (!GLI_FOG_ENABLE) return 0;                                   /* dormant   */
     if (mach64_gli_u32(ctx, GLI_BLEND_ENABLE) & GLI_BLEND_EN_BIT) return 0;
     return (mach64_gli_u32(ctx, GLI_FOG_ENABLE) & GLI_FOG_EN_BIT) != 0;
+}
+
+/* GL_TEXTURE_LOD_BIAS (glTexEnvf(GL_TEXTURE_FILTER_CONTROL_EXT, GL_TEXTURE_LOD_BIAS_EXT, x), texture unit 0): a float at gli+0x6774.
+ * Recovered with tools/mach64_lodscan.c (offscreen software context, gli located in-process and diffed).  Hardware: TEX_CNTL[3:0] = n, 0..15,
+ * threshold stride 1 + n/16 (Win98 ATI3DCIF 0x138b0 / SDK "LOD biasing"): the chip switches to the next smaller map LATER, i.e. sharper, which is
+ * a NEGATIVE GL bias of -log2(stride) in [-0.954, 0].  A positive GL bias (blurrier) has no hardware field: bind falls back to the software
+ * selector for it (whole levels, both signs).  The caller clamps/rounds. */
+#define GLI_LOD_BIAS 0x6774u
+static float mach64_lod_bias(gld_context *ctx)
+{
+    uint32_t bits = mach64_gli_u32(ctx, GLI_LOD_BIAS); float f;
+    __builtin_memcpy(&f, &bits, 4);
+    if (!(f == f) || f > 16.0f || f < -16.0f) return 0.0f;           /* NaN / absurd: ignore */
+    return f;
+}
+static uint32_t mach64_lod_bias_nibble(float b)
+{
+    static const float lg[16] = { 0.0000f, 0.0875f, 0.1699f, 0.2479f, 0.3219f, 0.3923f, 0.4594f, 0.5236f,
+                                  0.5850f, 0.6439f, 0.7004f, 0.7549f, 0.8074f, 0.8580f, 0.9069f, 0.9542f };   /* log2(1 + n/16) */
+    float x = -b, best = 1e9f, d; uint32_t n, bn = 0;
+    if (x <= 0.0f) return 0;
+    for (n = 0; n < 16; n++) { d = x - lg[n]; if (d < 0) d = -d; if (d < best) { best = d; bn = n; } }
+    return bn;
 }
 
 /* Overlay the fog fields onto a SCALE_3D_CNTL value and latch DP_FOG_CLR from the
@@ -643,7 +980,7 @@ static uint32_t mach64_apply_fog(gld_context *ctx, m64_state *st, uint32_t sc)
 }
 
 /* GL_COLOR_LOGIC_OP (glLogicOp).  gli+0x63a4 packs [31:16] = glLogicOp GL enum
- * (0x1500..0x150f) and bit0 = GL_COLOR_LOGIC_OP enable (recovered via GLD_FOGSCAN
+ * (0x1500..0x150f) and bit0 = GL_COLOR_LOGIC_OP enable (recovered
  * state-delta: 0x15030000 -> 0x15060001 on enable+XOR, -> 0x15070001 on GL_OR).
  * The op is a datapath ROP applied via DP_MIX (0x6d4): FRGD_MIX [20:16] + BKGD_MIX
  * [4:0], each a 5-bit code, set to the SAME value = the ROP of source (fragment)
@@ -686,7 +1023,7 @@ static int mach64_logicop(gld_context *ctx, uint32_t *dp_mix_out)
     return 1;
 }
 
-/* GL_ALPHA_TEST state (recovered via tools/mach64_alphatest -DGLD_ATSCAN):
+/* GL_ALPHA_TEST state (recovered via tools/mach64_alphatest):
  *   gli+0x62e0 = glAlphaFunc REF (float 0..1)
  *   gli+0x62e4 = (GL compare enum << 16) | (bit8 = GL_ALPHA_TEST enabled) */
 #define GLI_ALPHA_FUNC   0x62e4
@@ -716,6 +1053,15 @@ static uint32_t mach64_alpha_tst(gld_context *ctx, int use_texel_alpha)
     return (7u << 4) | (4u << 8);   /* ALPHA_TEST_ALWAYS, disabled */
 }
 
+/* TEX_CNTL composite bits for the secondary map (DRI reference mach64UpdateTextureUnit, unit 1): COMPOSITE (8), SECONDARY_STW (31), COMP_ALPHA (13) when the map has alpha,
+ * filter bits 11 (min) / 12 (mag), per-map clamp 24 (S) / 25 (T); bit 9 (combine = modulate) is already part of the base value. */
+static uint32_t mt_cntl(const mach64_tex_slot *b2)
+{
+    return (1u << 8) | (1u << 31) | (b2->has_alpha ? (1u << 13) : 0u)
+         | (b2->bilinear_min ? (1u << 11) : 0u) | (b2->bilinear_mag ? (1u << 12) : 0u)
+         | (b2->clamp_s ? (1u << 24) : 0u) | (b2->clamp_t ? (1u << 25) : 0u);
+}
+
 /* Called from the draw path.  Uploads any pending image (so the texture is ready
  * in VRAM regardless of enable state), then -- only if the app has GL_TEXTURE_2D
  * enabled -- programs the texture registers into p->hw and enables textured state
@@ -724,9 +1070,16 @@ int mach64_bind_texture(gld_context *ctx)
 {
     mach64_priv *p = MACH64_PRIV(ctx);
     m64_state *st = &p->hw;
-    mach64_tex_slot *bound;
+    mach64_tex_slot *bound, *bound2;
+    /* The textures this draw will use must survive any eviction triggered by an upload below. */
+    {   int u; for (u = 0; u < 2; u++) {
+            uint32_t en = mach64_gli_u32(ctx, GLI_TEX2D_ENABLE + (uint32_t)u * GLI_UNIT_STRIDE), bt = mach64_gli_u32(ctx, GLI_BOUND_TEXOBJ + (uint32_t)u * GLI_BOUND_STRIDE);
+            g_protect[u] = ((en & GLI_TEX2D_BIT) && bt > 0x10000 && bt <= M64_UADDR_MAX) ? *(const uint32_t *)(uintptr_t)(bt + 0x30) : 0;
+        } }
+    int punit;
     uint32_t wl, hl, tex_on, env, light_fcn, new_scale_3d, blend, lop_mix = 0;
-    int changed, lop_on;
+    int changed, lop_on, hw_mip, mt;
+    uint32_t lod_n;
     /* Upload any image-dirtied textures (their state objects are populated by
      * draw time); each lands in its own VRAM slot.  Pop the queue under the lock,
      * then upload OUTSIDE it -- mach64_upload -> slot_alloc takes the lock itself,
@@ -735,6 +1088,7 @@ int mach64_bind_texture(gld_context *ctx)
      * (mach64_blit_texels), NOT the host-data blit -- so texturing is fully enabled. */
     for (;;) {
         void *pend = 0;
+        if (!*(volatile int *)&g_npending) break;     /* nothing queued (the common case): skip the lock round trip, 2 mutex ops per primitive otherwise */
         TEX_LOCK();
         if (g_npending) pend = g_pending[--g_npending];
         TEX_UNLOCK();
@@ -742,52 +1096,8 @@ int mach64_bind_texture(gld_context *ctx)
         mach64_upload(ctx, pend);
     }
 
-#ifdef GLD_FOGSCAN
-    /* Recover the GL_FOG-enable gli offset (0x6354 was disproven = dither).  Snapshot
-     * the whole pipeline-state region silently on the first draw, then print ONLY the
-     * words that changed on later draws.  tools/mach64_fogscan draws a fog-OFF frame
-     * then a fog-ON frame changing nothing else, so the delta pinpoints the enable
-     * word (a 0x01000000-style flag) alongside the fog colour at +0x6358. */
-    {   static uint32_t fs_snap[(0x6780u - 0x6200u) / 4];
-        static int fs_inited = 0;
-        uint32_t o; int any = 0;
-        for (o = 0x6200u; o < 0x6780u; o += 4) {
-            uint32_t val = mach64_gli_u32(ctx, o), idx = (o - 0x6200u) / 4;
-            if (fs_inited && val != fs_snap[idx]) {
-                if (!any) { gld_log("FOGSCAN delta:\n"); any = 1; }
-                gld_log("  gli+0x%04x: 0x%08x -> 0x%08x\n", o, fs_snap[idx], val);
-            }
-            fs_snap[idx] = val;
-        }
-        fs_inited = 1;
-    }
-#endif
-
-#ifdef GLD_SCISSCAN
-    /* Recover the GL_SCISSOR_TEST enable + box gli offsets.  Same snapshot-then-diff
-     * mechanism as FOGSCAN but over a WIDE window (scissor could sit outside the raster
-     * cluster).  tools/mach64_scissortest draws a scissor-OFF frame (baseline) then a
-     * scissor-ON frame with a DISTINCTIVE box glScissor(101,203,305,407) changing nothing
-     * else -- so the delta is the enable flag plus the box words.  The box is integer, so
-     * look for 101/203/305/407 (0x65/0xcb/0x131/0x197) or right=406/top=610 in the dump. */
-    {   static uint32_t sc_snap[(0x7000u - 0x5000u) / 4];
-        static int sc_inited = 0;
-        uint32_t o; int any = 0;
-        for (o = 0x5000u; o < 0x7000u; o += 4) {
-            uint32_t val = mach64_gli_u32(ctx, o), idx = (o - 0x5000u) / 4;
-            if (sc_inited && val != sc_snap[idx]) {
-                if (!any) { gld_log("SCISSCAN delta:\n"); any = 1; }
-                gld_log("  gli+0x%04x: 0x%08x -> 0x%08x  (%u -> %u)\n",
-                        o, sc_snap[idx], val, sc_snap[idx], val);
-            }
-            sc_snap[idx] = val;
-        }
-        sc_inited = 1;
-    }
-#endif
-
     /* GL_COLOR_MASK (glColorMask): gli+0x63b4 holds 4 bytes R,G,B,A (each 0/1,
-     * recovered via GLD_CMSCAN).  Map to DP_WRITE_MASK for the 32bpp ARGB8888 target
+     * recovered by gli diffing).  Map to DP_WRITE_MASK for the 32bpp ARGB8888 target
      * (A[31:24] R[23:16] G[15:8] B[7:0]) -- a cleared channel drops those bits so the
      * pipe leaves them untouched in the framebuffer. */
     {   uint32_t cm = mach64_gli_u32(ctx, 0x63b4);
@@ -798,7 +1108,7 @@ int mach64_bind_texture(gld_context *ctx)
         if (st->dp_write_mask != wm) { st->dp_write_mask = wm; p->dirty |= MACH64_DIRTY_STATE; }
     }
 
-    /* glShadeModel (gli+0x6708 bit0: 1 = GL_SMOOTH, 0 = GL_FLAT -- recovered via GLD_SCISSCAN
+    /* glShadeModel (gli+0x6708 bit0: 1 = GL_SMOOTH, 0 = GL_FLAT -- recovered
      * 2026-08-26).  Rather than the mach64 SETUP_CNTL FLAT_SHADE field (bit value uncertain in
      * the spec and didn't take), do flat shading in the driver: emit_tri replicates the
      * provoking (GL default = LAST) vertex's colour onto all three vertices when mach64_flat_on,
@@ -820,7 +1130,7 @@ int mach64_bind_texture(gld_context *ctx)
         if (st->dp_mix != dm) { st->dp_mix = dm; p->dirty |= MACH64_DIRTY_STATE; }
     }
 
-    /* GL_POLYGON_STIPPLE (offsets recovered via GLD_FOGSCAN 2026-08-26): enable =
+    /* GL_POLYGON_STIPPLE (offsets recovered 2026-08-26): enable =
      * gli+0x66ec bit24; the 32x32 pattern is at gli+0x665c, one 32-bit row per word.
      * The mach64 pattern is only 8x8 (PAT_REG0/1), so extract the top-left 8x8 tile --
      * exact for 8x8-periodic stipples (halftone/screen-door), approximate for arbitrary
@@ -859,22 +1169,44 @@ int mach64_bind_texture(gld_context *ctx)
      * the fog factor into the vertex alpha, and forces a state re-emit while fogging
      * so DP_FOG_CLR (which aliases the 2D DP_FRGD_CLR a clear/fill may have trampled)
      * is re-latched every fog draw.  A logic op owns the pipe -> no fog. */
+    /* GL_SEPARATE_SPECULAR_COLOR (glLightModeli COLOR_CONTROL): gli+0x6380 bit 0 (recovered with tools/mach64_mtexscan; the same word's bit 8 is fog).  GLEngine then
+     * delivers the secondary colour as floats R,G,B at gli-vertex +0x40/+0x44/+0x48 (the layout the Radeon driver copies).  Decided below once we know if texturing is on. */
+    mach64_spec_mode = (!lop_on && (mach64_gli_u32(ctx, GLI_FOG_ENABLE) & 1u)) ? 2 : 0;
     mach64_fog_on = lop_on ? 0 : mach64_fog_active(ctx);
     if (mach64_fog_on) p->dirty |= MACH64_DIRTY_STATE;
     else               st->dp_fog_clr = 0;   /* leave DP_FRGD_CLR to the 2D engine */
 
-    /* Follow the app's glEnable/glDisable(GL_TEXTURE_2D). */
-    tex_on = (mach64_gli_u32(ctx, GLI_TEX2D_ENABLE) & GLI_TEX2D_BIT) != 0;
-
-    /* Select the CURRENTLY-BOUND texture: GLEngine stores its texobj at
-     * gli+0x15748; our slot is keyed by texobj[0x30] (the state object). */
-    {   uint32_t bt = mach64_gli_u32(ctx, GLI_BOUND_TEXOBJ);
-        uint32_t key = (bt > 0x10000 && bt < 0x40000000)
-                     ? *(const uint32_t *)(uintptr_t)(bt + 0x30) : 0;
-        TEX_LOCK();                        /* consistent read vs a concurrent uploader */
-        bound = slot_find(key);
-        TEX_UNLOCK();                      /* `bound` is this thread's own bound texture */
+    /* Texture units.  GLEngine keeps unit u's enable word at gli+0x6748+u*0x7c (bit 3), its env mode at +0x674c+u*0x7c and its bound texobj at
+     * gli+0x15748+u*0x14 (all recovered with tools/mach64_mtexscan: the software context's gli, diffed while unit 1 was enabled / bound).
+     * Both units enabled with textures bound -> ONE-pass compositing (primary = unit 0, secondary = unit 1); only unit 1 enabled -> it simply
+     * becomes the primary map (its coordinates are read from the unit-1 vertex fields). */
+    mach64_tex_vofs[0] = 0x80u; mach64_tex_vofs[1] = 0u;
+    {   mach64_tex_slot *ub[2]; int u;
+        for (u = 0; u < 2; u++) {
+            uint32_t en = mach64_gli_u32(ctx, GLI_TEX2D_ENABLE + (uint32_t)u * GLI_UNIT_STRIDE);
+            uint32_t bt = mach64_gli_u32(ctx, GLI_BOUND_TEXOBJ + (uint32_t)u * GLI_BOUND_STRIDE);
+            ub[u] = 0;
+            if ((en & GLI_TEX2D_BIT) && bt > 0x10000 && bt <= M64_UADDR_MAX) {
+                uint32_t key = *(const uint32_t *)(uintptr_t)(bt + 0x30);
+                {   static mach64_tex_slot *last_sl[2];                       /* per-unit cache: the slot table is a static array, a slot's identity is its key, so a hit needs no lock and no search */
+                    if (last_sl[u] && last_sl[u]->key == key) ub[u] = last_sl[u];
+                    else { TEX_LOCK(); ub[u] = slot_find(key); TEX_UNLOCK(); last_sl[u] = ub[u]; }   /* `bound` is this thread's own bound texture */
+                }
+                if (ub[u] && !ub[u]->rsize && ub[u]->texobj) {           /* evicted: bring it back from GLEngine's copy */
+                    mach64_upload(ctx, ub[u]->texobj);
+                    TEX_LOCK(); ub[u] = slot_find(key); TEX_UNLOCK();
+                }
+                if (ub[u] && !ub[u]->rsize) ub[u] = 0;                   /* could not be made resident: draw untextured */
+                if (ub[u]) { ub[u]->tick = ++g_tick; ub[u]->gen = mach64_batch_gen; }
+            }
+        }
+        bound = 0; bound2 = 0; punit = 0;
+        if (ub[0]) { bound = ub[0]; bound2 = ub[1]; }
+        else if (ub[1]) { bound = ub[1]; punit = 1; }
+        if (bound2) mach64_tex_vofs[1] = 0x90u;
+        mach64_tex_vofs[0] = 0x80u + (uint32_t)punit * 0x10u;
     }
+    tex_on = bound != 0;
 
     if (!bound || !tex_on) {               /* no bound texture, or texturing off */
         /* Untextured gouraud: honour glEnable(GL_BLEND) on the shade pipe.  The
@@ -913,7 +1245,7 @@ int mach64_bind_texture(gld_context *ctx)
      * exactly GL_DECAL's result for an RGB internal format.  For an RGBA texture
      * TEX_MAP_AEN (bit 30) is set so the real texel alpha feeds the pipeline, and
      * ALPHA_DECAL then blends Ctex over the fragment colour by At. */
-    env = mach64_gli_u32(ctx, GLI_TEX_ENV_MODE) >> 16;
+    env = mach64_gli_u32(ctx, GLI_TEX_ENV_MODE + (uint32_t)punit * GLI_UNIT_STRIDE) >> 16;
     switch (env) {
         case GL_ENV_REPLACE:  light_fcn = 0u << 22; break;   /* REPLACE     */
         case GL_ENV_MODULATE: light_fcn = 1u << 22; break;   /* MODULATE    */
@@ -922,6 +1254,7 @@ int mach64_bind_texture(gld_context *ctx)
          * GL_ADD (0x0104), GL_COMBINE (0x8570) are NOT hardware-doable (the DRI reference
          * software-rasterises them via Mesa, which we can't through Apple's GLEngine).  Best
          * hardware approximation is MODULATE.  (See docs/re-notes/texture-blend-audit.md.) */
+        case 0x8570:          light_fcn = 0u << 22; break;   /* GL_COMBINE (Sonic R GL_ADD_SIGNED overbright): vertex colour ~0.5 grey => Cp+Ct-0.5 ~= Ct => REPLACE (MODULATE halves the brightness) */
         default:              light_fcn = 1u << 22; break;
     }
 
@@ -943,40 +1276,51 @@ int mach64_bind_texture(gld_context *ctx)
 
     new_scale_3d = 0x1u | (1u << 1) | (1u << 3) | (1u << 4)
                  | (2u << 6) | blend | light_fcn
-                 | (1u << 24)                               /* MIP_MAP_DISABLE: ALWAYS -- see note below */
+                 | (1u << 24)                               /* MIP_MAP_DISABLE unless hw_mip clears it */
                  | (bound->has_alpha ? (1u << 30) : 0u)     /* TEX_MAP_AEN */
                  | (bound->bilinear_mag ? 0x02000000u : 0u); /* BILINEAR_TEX_EN: GL_LINEAR mag filter */
-    /* NO HARDWARE MIPMAPPING (2026-08-27): the mach64/LT Pro has no usable HW mip chain.  The DRI
-     * reference (mach64_tex.c) says so outright -- "for mach64 we're only concerned with the base level
-     * since that's the only texture we upload" -- and never enables multi-level LOD.  Our earlier attempt
-     * (upload all levels, clear MIP_MAP_DISABLE, per-level TEX_r_OFF) rendered mipmapped textures BLACK,
-     * and pointing the single base register at our multi-level layout HARD-HUNG the machine (tools/
-     * mach64_texmip).  So we do exactly what the reference does: always MIP_MAP_DISABLE and use only the
-     * base level -- the identical, proven HW path that non-mipmapped textures already use.  Minified
-     * textures therefore alias (no LOD) rather than mip, which is the hardware's real capability. */
-    /* TEX_BLEND_FCN [27:26] (BILINEAR_TEX_EN above is the mag filter; this is the min/mip filter):
-     * NEAREST=0, LINEAR=(2<<26)=0x08000000, TRILINEAR=(3<<26)=0x0c000000 (multitex, N/A single-TMU).
-     * Authoritative values from xf86-video-mach64 atiregs.h (MACH64_TEX_BLEND_FCN_LINEAR = 2<<26).
-     * NOTE: the tools/mach64_texmin probe used 0x04000000 (=1<<26), which is the WRONG encoding for this
-     * 2-bit field -- so those runs exercised an invalid TEX_BLEND_FCN value, which likely contributed to
-     * the black/hang on top of the missing mip chain.  Value corrected below.
-     *
-     * HW-tested (tools/mach64_texmin) that this is a MIP-LEVEL BLEND control, NOT an intra-level min
-     * filter: setting LINEAR makes the HW fetch+blend a second (smaller) mip level.  On a SINGLE-LEVEL
-     * texture at a minifying LOD that level does not exist, so the fetch hits a bogus address -> the
-     * textured output goes BLACK (small texture) or the bus HANGS (large texture -- 128x128 wedged the
-     * machine).  At a magnifying/near LOD it is simply inert.
-     *
-     * The correct home is a real mip chain (nlevels>1), where the levels exist -- BUT mipmapped
-     * rendering is itself currently broken (renders black even with this bit OFF; see tools/mach64_texmip
-     * and the TEX_n_OFF emit in common/mach64_emit.c, which writes one register per level whereas the DRI
-     * reference writes only the base TEX_[maxLog2]_OFF).  So until mipmapping is fixed, keep this fully
-     * probe-gated (GLD_TEXBLEND_PROBE, default OFF) -- nothing unvalidated ships. */
-    if (bound->bilinear_min) {
-        static int probe = -1;
-        if (probe < 0) probe = getenv("GLD_TEXBLEND_PROBE") ? 1 : 0;
-        if (probe) new_scale_3d |= 0x08000000u;            /* TEX_BLEND_FCN_LINEAR (2<<26) */
+    /* MIP_MAP_DISABLE starts set; the hw_mip path below clears it for a complete mip chain, and
+     * TEX_BLEND_FCN [27:26] (the min/mip filter; BILINEAR_TEX_EN above is the mag filter) is chosen there too. */
+    if (bound->bilinear_min && !(bound->mipmapped)) {
+        /* GL_LINEAR min filter on a single-level texture: TEX_BLEND_FCN field 2 (2x2 within the map), which the Win98 driver uses for
+         * every non-mip texture; field 2 needs BILINEAR_TEX_EN too.  Hardware-verified at 32x32 and 128x128. */
+        new_scale_3d |= 0x08000000u | 0x02000000u;
     }
+
+    /* Hardware mipmapping.  Recipe recovered from the Windows 98 ATI3DCIF.DLL
+     * (docs/re-notes/win98-mipmap.md): MIP_MAP_DISABLE (SCALE_3D_CNTL bit 24) CLEAR; every TEX_r_OFF, r = 0..maxLog2, holds the offset of
+     * the level whose larger dimension is 2^r (the chain must be complete down to 1x1); TEX_SIZE_PITCH describes the BASE map;
+     * TEX_BLEND_FCN (bits 27:26) = 0 point, 1 mip-linear (blend between maps), 2 2x2 within a map, 3 tri-linear, where 2 and 3 also
+     * need BILINEAR_TEX_EN; and SETUP_CNTL.LOG_MAX_INC_ADJ (bit 6) set, as the Win98 driver's context defaults do.  Hardware-verified on the
+     * MDD rig: levels picked per pixel, all four filter fields, no hang.  Requires a COMPLETE chain (1x1 included); anything
+     * else falls back to the software selector below. */
+    hw_mip = 0;
+    if (bound->mipmapped) {
+        uint32_t maxl = ilog2u(bound->lvl_w[0] > bound->lvl_h[0] ? bound->lvl_w[0] : bound->lvl_h[0]);
+        if ((uint32_t)bound->nlevels == maxl + 1u && maxl <= 10u && mach64_lod_bias(ctx) < 0.5f) {   /* blurrier bias (>= 0.5): software selector, hardware has no such field */
+            uint32_t minf = bound->min_filter, field = (minf == 0x2701u) ? 2u : (minf == 0x2702u) ? 1u : (minf == 0x2703u) ? 3u : 0u;
+            hw_mip = 1;
+            new_scale_3d &= ~((1u << 24) | 0x0c000000u);
+            new_scale_3d |= field << 26;
+            if (field >= 2u) new_scale_3d |= 0x02000000u;
+        }
+    }
+
+    /* Two-texture compositing.  Unit 0 runs through TEX_LIGHT_FCN as usual; the secondary map is then combined by the composite stage
+     * (TEX_CNTL[8] COMPOSITE, [9] 1 = MODULATE the primary result by the secondary texel).  The hardware cannot REPLACE/DECAL/ADD in the
+     * composite stage (the DRI reference falls back to software for those), so every unit-1 env mode other than MODULATE is approximated by
+     * MODULATE, the same policy as the single-unit path.  The Mesa reference also sets TEX_BLEND_FCN = trilinear and TEX_CACHE_SPLIT (SCALE_3D_CNTL
+     * bit 9, split the texture cache between the two maps) on the primary whenever two maps are active; mipmaps are not combined with
+     * compositing here (base level only, software level selection still applies to the primary).  Measured composite MODULATE precision: the
+     * secondary texel acts as ((B>>4)+1)/16 (4-bit factor; B=0 stays 0, B=255 exact), so mid greys come out ~+15/255 brighter than the exact product. */
+    mt = bound2 != 0;
+    if (mt) {
+        hw_mip = 0;
+        new_scale_3d &= ~((1u << 24) | 0x0c000000u);
+        new_scale_3d |= (1u << 24) | (1u << 9);                           /* MIP_MAP_DISABLE, TEX_CACHE_SPLIT */
+        new_scale_3d |= 0x0c000000u;                                      /* TEX_BLEND_FCN = trilinear: REQUIRED for compositing -- with point/linear the engine wedges on the first draw (hardware-verified, Nov 20) */
+    }
+    lod_n = hw_mip ? mach64_lod_bias_nibble(mach64_lod_bias(ctx)) : 0u;
 
     /* GL_FOG on textured geometry: fog wins the alpha channel (clears TEX_MAP_AEN,
      * "can't use texture alpha when fogging") and blends the textured fragment
@@ -989,7 +1333,10 @@ int mach64_bind_texture(gld_context *ctx)
     {   /* GL_ALPHA_TEST on textured geometry: the texel alpha (needs TEX_MAP_AEN,
          * set for an RGBA texture) is compared to the reference. */
         uint32_t atc = mach64_alpha_tst(ctx, 1);
-        changed = (!st->textured || st->tex_0_off != bound->off
+        if (mach64_spec_mode) { atc |= 1u << 31; mach64_spec_mode = 1; }     /* SPECULAR_LIGHT_EN: add the interpolated specular rgb to textured pixels */
+        changed = (!st->textured || st->tex_mip != hw_mip || st->tex_0_off != bound->off || (st->tex_cntl & 0xfu) != lod_n
+                                  || st->tex_fmt != bound->hwfmt || (mt && st->tex2_fmt != bound2->hwfmt)
+                                  || st->multitex != mt || (mt && (st->tex2_off != bound2->off || bound2->w != p->tex2_w || bound2->h != p->tex2_h || st->tex2_cntl_bits != mt_cntl(bound2)))
                                   || st->tex_scale_3d != new_scale_3d
                                   || st->alpha_tst_cntl != atc);
         st->alpha_tst_cntl = atc;
@@ -997,8 +1344,12 @@ int mach64_bind_texture(gld_context *ctx)
     if (changed) p->dirty |= MACH64_DIRTY_STATE;
 
     p->tex_off = bound->off;
+    st->multitex = mt; p->tex2_w = mt ? bound2->w : 0; p->tex2_h = mt ? bound2->h : 0;
+    st->tex_fmt = bound->hwfmt; st->tex2_fmt = mt ? bound2->hwfmt : 0u;
     p->tex_w   = bound->w;
     p->tex_h   = bound->h;
+    p->tex_slot = bound;                 /* mach64_tex_select_lod may rebind a smaller level per triangle */
+    p->tex_lvl  = 0;
     wl = ilog2u(p->tex_w);
     hl = ilog2u(p->tex_h);
 
@@ -1022,6 +1373,7 @@ int mach64_bind_texture(gld_context *ctx)
      * edge wrap (a 1px opposite-edge line) -- that IS GL_REPEAT's edge behaviour;
      * apps wanting clean edges use GL_CLAMP. */
     st->tex_cntl       = (1u << 9) | (1u << 23) | (1u << 30)
+                       | (mt ? mt_cntl(bound2) : 0u)
                        | (bound->clamp_s ? (1u << 17) : 0u)
                        | (bound->clamp_t ? (1u << 18) : 0u);
 
@@ -1034,16 +1386,73 @@ int mach64_bind_texture(gld_context *ctx)
      * MODULATE gives the old 0x0141009b. */
     st->tex_scale_3d   = new_scale_3d;
 
-    /* Always the single base-level offset path (tex_mip = 0): the mach64 has no usable HW mip chain
-     * (see the MIP_MAP_DISABLE note above), so even a texture that uploaded multiple levels is drawn
-     * from its base level only -- the same proven path as a non-mipmapped texture. */
-    st->tex_mip     = 0;
+    st->tex_mip     = hw_mip;
+    st->tex_cntl    = (st->tex_cntl & ~0xfu) | lod_n;
+    if (mt) {   /* unit-1 map: offset, log2 sizes in TEX_SIZE_PITCH[31:16] (width [19:16], max [23:20], height [27:24]) */
+        uint32_t w2l = ilog2u(bound2->w), h2l = ilog2u(bound2->h);
+        st->tex2_off = bound2->off; st->tex2_cntl_bits = mt_cntl(bound2);
+        st->tex2_size_pitch = (w2l << 16) | ((w2l > h2l ? w2l : h2l) << 20) | (h2l << 24);
+    } else { st->tex2_off = 0; st->tex2_size_pitch = 0; st->tex2_cntl_bits = 0; }
     st->tex_maxlog2 = (int)(wl > hl ? wl : hl);
+    if (hw_mip) {
+        int r;
+        for (r = 0; r < 12; r++) st->tex_mip_off[r] = bound->mip_off[r <= st->tex_maxlog2 ? r : st->tex_maxlog2];   /* never leave a register pointing at stale memory */
+        p->tex_slot = 0;                                 /* the hardware picks the level: no software LOD */
+        if (!(st->setup_cntl & 0x40u)) { st->setup_cntl |= 0x40u; p->dirty |= MACH64_DIRTY_STATE; }
+    } else if (st->setup_cntl & 0x40u) { st->setup_cntl &= ~0x40u; p->dirty |= MACH64_DIRTY_STATE; }
 
+    if (mt && !(st->setup_cntl & 0x40u)) { st->setup_cntl |= 0x40u; p->dirty |= MACH64_DIRTY_STATE; }   /* LOG_MAX_INC_ADJ, as for the hardware mip path and Win98's context default */
     st->textured = 1;
-    if (changed)
-        gld_log("mach64 tex: env=0x%x light_fcn=%u alpha=%u blend=0x%x off=0x%x %ux%u sp=0x%x\n",
-                env, light_fcn >> 22, bound->has_alpha, blend, p->tex_off,
-                p->tex_w, p->tex_h, st->tex_size_pitch);
     return 1;
+}
+
+/* Per-triangle mip level and min/mag filter (software LOD, used when the hardware mip chain is not used, see hw_mip in
+ * mach64_bind_texture).  The hardware always samples ONE image: the "base" registers.  For a minified triangle we point those
+ * registers at a smaller, already-uploaded level (offset + size), which is the same proven single-level path.  Normalised texcoords
+ * are unchanged (the hardware scales them by the base size).
+ *
+ *   lod = 0.5*log2(texel_area / pixel_area), texel_area = uv_area * W0 * H0 at level 0 (affine estimate from the vertices).
+ *   lod <= 0 : magnified -> level 0, bilinear iff GL_LINEAR mag.
+ *   lod  > 0 : minified  -> for a mipmapped MIN filter the nearest level round(lod) clamped to the chain (no trilinear: blending two
+ *              levels needs TEX_BLEND_FCN, which wedges the engine), bilinear iff the MIN filter is a LINEAR-within-level variant;
+ *              for a non-mipmapped MIN filter level 0, bilinear iff GL_LINEAR.
+ * Only the registers that changed are re-emitted (state goes into the same command stream, in order, before the next triangle). */
+void mach64_tex_select_lod(gld_context *ctx, float pix_area, float uv_area)
+{
+    mach64_priv *p = MACH64_PRIV(ctx);
+    const mach64_tex_slot *sl = (const mach64_tex_slot *)p->tex_slot;
+    m64_state *st = &p->hw;
+    int lvl = 0, bil;
+    uint32_t nsc, wl, hl;
+    if (!sl || !st->textured || sl->nlevels < 1) return;
+    if (pix_area < 0.0f) pix_area = -pix_area;
+    if (uv_area  < 0.0f) uv_area  = -uv_area;
+    bil = sl->bilinear_mag != 0;
+    if (pix_area > 1e-3f && uv_area > 1e-12f) {
+        float texels = uv_area * (float)sl->lvl_w[0] * (float)sl->lvl_h[0];             /* ratio = texels / pix_area (texels per pixel, area): compared by multiplying, no fdivs */
+        if (texels > pix_area) {                                                         /* minified: lod = 0.5*log2(ratio) */
+            float lod = 0.0f, lim = pix_area;
+            while (texels >= 4.0f * lim && lod < 12.0f) { lim *= 4.0f; lod += 1.0f; }   /* whole levels */
+            if (texels >= 2.0f * lim) { lod += 1.0f; }                                   /* round: 0.5*log2(2..4) is >= 0.5 */
+            if (sl->mipmapped) { lvl = (int)lod; if (lvl >= sl->nlevels) lvl = sl->nlevels - 1; }
+            bil = sl->bilinear_min != 0;
+        }
+    }
+    if (sl->mipmapped) {   /* GL_TEXTURE_LOD_BIAS, in whole levels (both signs; the hardware path only has sharper-than-neutral) */
+        float lb = mach64_lod_bias(ctx);
+        int ib = (int)(lb + (lb >= 0.0f ? 0.5f : -0.5f));
+        lvl += ib; if (lvl < 0) lvl = 0; if (lvl >= sl->nlevels) lvl = sl->nlevels - 1;
+    }
+    nsc = (st->tex_scale_3d & ~0x02000000u) | (bil ? 0x02000000u : 0u);
+    if (lvl == p->tex_lvl && nsc == st->tex_scale_3d) return;
+    {   uint32_t w = sl->lvl_w[lvl], h = sl->lvl_h[lvl], off = sl->lvl_off[lvl];
+        if (!w || !h || !off) return;                       /* level never uploaded: stay on the current one */
+        p->tex_lvl = lvl; p->tex_off = off; p->tex_w = (int)w; p->tex_h = (int)h;
+        wl = ilog2u(w); hl = ilog2u(h);
+        st->tex_0_off      = off;
+        st->tex_size_pitch = (wl << 0) | ((wl > hl ? wl : hl) << 4) | (hl << 8);
+        st->tex_maxlog2    = (int)(wl > hl ? wl : hl);
+        st->tex_scale_3d   = nsc;
+        p->dirty |= MACH64_DIRTY_STATE;
+    }
 }

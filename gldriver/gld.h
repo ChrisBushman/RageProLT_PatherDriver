@@ -12,9 +12,49 @@
 #ifndef GLD_H
 #define GLD_H
 
+#include <stdlib.h>
 #include <stdint.h>
 #include <IOKit/IOKitLib.h>   /* io_connect_t + IOConnectMethod* (user side) */
 #include "../common/mach64_emit.h"
+
+/* Single-thread engine (gld_engine.c): while it holds Apple's accelerator mutex across calls, NO call may reach Apple's kext (it would take the same mutex and deadlock), so every
+ * IOKit call the driver makes goes through the guard, which drains the engine and releases the mutex first when needed.  Calls on the Path A connection are exempt. */
+/* (int)(f * 2^sh) truncating toward zero, integer-only and bit-identical to the FPU cast (fctiwz saturation: overflow/NaN -> INT_MAX / INT_MIN like the hardware).  sh is a compile-time
+ * constant.  Measured on the MDD: 9.7 ns vs 27 ns for (int)(f*4.0f) (the FPU path's store->load round trip). */
+static inline __attribute__((always_inline)) int m64_f2i(float f, int sh)
+{
+    union { float f; uint32_t u; } x; int e; uint32_t m, r; x.f = f;
+    e = (int)((x.u >> 23) & 255u) - 127 + sh;
+    if (e < 0) return 0;
+    if (e >= 31) return ((x.u & 0x7fffffffu) > 0x7f800000u || (int32_t)x.u < 0) ? (int)0x80000000u : 0x7fffffff;
+    m = (x.u & 0x7fffffu) | 0x800000u;
+    r = e >= 23 ? m << (e - 23) : m >> (23 - e);
+    return (int32_t)x.u < 0 ? -(int)r : (int)r;
+}
+/* float [0,1] -> byte 0..255, integer-only on the float's bits (== floor(f*255+0.5) clamped, evaluated exactly).  The FPU version (fmul, fadd, fctiwz, store, load) is ~3x slower on a G4. */
+static inline __attribute__((always_inline)) uint32_t m64_f2u8(float f)
+{
+    union { float f; uint32_t u; } x; uint32_t e, m, v;
+    x.f = f;
+    if ((int32_t)x.u <= 0) return 0u;                                   /* negative, -0, 0 */
+    e = x.u >> 23;
+    if (e >= 127u) return (e == 255u && (x.u & 0x7fffffu)) ? 0u : 255u; /* >= 1.0 (NaN -> 0 as the old cast did) */
+    if (e < 118u) return 0u;                                            /* < 2^-9 */
+    m = (x.u & 0x7fffffu) | 0x800000u; v = m * 255u;                    /* 255f = v * 2^-(150-e) */
+    if (e == 118u) return v >> 31;
+    return ((v >> 1) + (1u << (148u - e))) >> (149u - e);
+}
+extern void mach64_eng_guard(io_connect_t c);
+#ifndef GLD_NO_ENG_GUARD
+#define IOConnectMethodScalarIScalarO(c, ...)     (mach64_eng_guard(c), IOConnectMethodScalarIScalarO(c, __VA_ARGS__))
+#define IOConnectMethodScalarIStructureI(c, ...)  (mach64_eng_guard(c), IOConnectMethodScalarIStructureI(c, __VA_ARGS__))
+#define IOConnectMethodStructureIStructureO(c, ...) (mach64_eng_guard(c), IOConnectMethodStructureIStructureO(c, __VA_ARGS__))
+#define IOConnectMethodScalarIStructureO(c, ...)  (mach64_eng_guard(c), IOConnectMethodScalarIStructureO(c, __VA_ARGS__))
+#define IOConnectMapMemory(c, ...)                (mach64_eng_guard(c), IOConnectMapMemory(c, __VA_ARGS__))
+#define IOConnectUnmapMemory(c, ...)              (mach64_eng_guard(c), IOConnectUnmapMemory(c, __VA_ARGS__))
+#define IOServiceOpen(s, ...)                     (mach64_eng_guard(MACH_PORT_NULL), IOServiceOpen(s, __VA_ARGS__))
+#define IOServiceClose(c)                         (mach64_eng_guard(c), IOServiceClose(c))
+#endif
 
 /* ---- Renderer capability struct filled by gldGetRendererInfo ---------
  * Offsets recovered from ATIRage128GLDriver`gldGetRendererInfo.  The
@@ -102,6 +142,7 @@ typedef struct {
     uint32_t   z_off;              /* depth buffer byte offset (0 = none)  */
     uint32_t   z_pitch;            /* depth buffer pitch (16-bit Z pixels)  */
     uint32_t   frame_new;          /* 1 => clear Z before next frame's geom */
+    uint32_t   z_clear_pending;    /* 1 => this frame's Z clear is still owed; done on the first draw that has Z_EN (the frame's first draws often run with depth off) */
     unsigned char *gc;             /* GLEngine's gc for THIS context (dispatch table - 0x78a8):
                                     * holds GL_PACK / GL_UNPACK pixel-store + raster state.  Per-context
                                     * (set in gldUpdateDispatch) so pixel ops read the running context's
@@ -113,12 +154,16 @@ typedef struct {
     uint32_t   render_off;         /* page-flip: the currently-HIDDEN buffer we render into */
     uint32_t   fb_w, fb_h;         /* surface dimensions (swap blit extent) */
     uint32_t   fb_pitch;           /* surface pitch in 32-bit pixels        */
-    /* ---- WINDOWED coexistence probe (env MACH64_WIN_RECT="x,y,w,h") ------
-     * win_mode=1 => render the w x h scene into the top-left of the back buffer and BLIT it to
-     * the LIVE front buffer at (win_x,win_y) on present (no CRTC page-flip), so the desktop
-     * stays visible and the WindowServer keeps compositing -- the test for engine coexistence. */
+    /* ---- windowed mode: win_mode=1 => render the w x h scene into the top-left of the back buffer
+     * and BLIT it to the LIVE front buffer at (win_x,win_y) on present (no CRTC page-flip), so the
+     * desktop stays visible and the WindowServer keeps compositing. */
     uint32_t   win_mode;           /* 1 => windowed blit present into the live desktop */
+    uint32_t   win_no_blit;        /* 1 => our own back->front blit is NOT used: the front geometry is unknown or its pixel depth differs from the render buffer; Apple's surface_flush presents */
     uint32_t   win_x, win_y;       /* window content origin in screen pixels (top-left) */
+    uint32_t   cgs_win, cgs_surf;  /* CGS window/surface ids of the attached drawable (descriptor d[1]/d[2]) */
+    uint32_t   off_display;        /* 1 = the drawable's window is on ANOTHER display (not the Rage): this context must not touch Apple's surfaces or the Rage scanout */
+    uint32_t   vis_hidden;         /* 1 = completely covered by windows in front: skip the present */
+    uint32_t   vis_sig, vis_tick;  /* occlusion tracking: signature of the last visible-rect list applied, present counter */
     uint32_t   win_buf_off;        /* per-context windowed back+Z buffer (0 = none/shared); freed on
                                     * detach.  Lets multiple windowed contexts render independently. */
     uint32_t   win_buf_size;       /* size of that pool allocation, for the free */
@@ -128,16 +173,6 @@ typedef struct {
     uint32_t   present_unsafe;     /* 1 = bound surface is display-associated (surf[0x178]!=0xffff) ->
                                     * its present DST aliases the live scanout -> would race IONDRV ->
                                     * skip prime + present (setup_target/render_ctl) to avoid a panic */
-    /* ---- fullscreen shrink-surface (MACH64_FS_SHRINK): render into a SMALLER backing so VRAM frees
-     * for a texheap, then set_scale presents it scaled up to the native scanout.  fs_disp_* hold the
-     * NATIVE display size (present DEST); width/height (render dims) are set to the shrunk size. 0 =
-     * shrink inactive (native-res flat path). */
-    uint32_t   fs_disp_w, fs_disp_h;   /* native display (present DEST); 0 = shrink inactive */
-    uint32_t   fs_shrink_w, fs_shrink_h; /* shrunk render/backing dims (present SRC)          */
-    uint32_t   preview_lock;           /* 1 => single-buffered windowed (preview): present via
-                                        * surface_write_lock/unlock (QE composites), NOT surface_flush */
-    uint32_t   scanout_off, scanout_pitch; /* desktop framebuffer base(bytes)/pitch(px) from accel[0x130]
-                                        * (CRTC_OFF_PITCH the kext cached) -- DST for the windowed blit */
     uint32_t   render_skip;            /* 1 => bound surface backing is INVALID (rt=0, e.g. a full-screen
                                         * 1024x768 surface that didn't fit 8MB VRAM) -> SKIP all geometry/
                                         * clears/present so we never render into live/colliding VRAM (panic).
@@ -150,6 +185,9 @@ typedef struct {
     void      *tex_obj;            /* bound/uploaded texobj (t[0x30]=state) */
     uint32_t   tex_off;            /* texel VRAM byte offset (0 = none up)  */
     uint32_t   tex_w, tex_h;       /* texel dimensions                     */
+    uint32_t   tex2_w, tex2_h;     /* secondary (unit-1) texel dimensions when m64_state.multitex */
+    const void *tex_slot;          /* bound texture's slot (gld_texture.c), for per-triangle LOD */
+    int        tex_lvl;            /* mip level currently bound as the base (0 = full size)     */
     uint32_t   tex_active;         /* 1 => emit textured state this draw    */
     uint32_t   scratch[1024];      /* host-order command-buffer staging    */
     /* ---- triangle batching: accumulate many triangles' register writes into one
@@ -160,7 +198,22 @@ typedef struct {
     uint32_t   batchbuf[32768];    /* host-order batch staging (128KB, matches the kext
                                     * fCmdBuf so a big batch DMA-kicks once via descriptor
                                     * chaining instead of ~80 sub-4KB kicks/frame) */
+    uint32_t   batchbuf2[32768];   /* second batch buffer: while the DMA worker runs one, the game fills the other  */
+    uint32_t   batchbuf3[32768], batchbuf4[32768];   /* ring of 4 batch buffers: the game keeps filling one while the DMA worker drains the others */
+    int        batch_sel;          /* which of the four batch buffers p->batch is built in */
+    uint32_t   cbpp;               /* colour-buffer bytes per pixel: 2 (RGB565) or 4 (ARGB8888, default 0 = 4) */
 } mach64_priv;
+
+/* Colour-target pixel size.  16-bpp contexts render to RGB565 (dithered by the 3D engine); everything below the 3D pipe (fills, blits, CPU pixel paths, VRAM span checks)
+ * keys off these.  The depth buffer is always 16-bit and is NOT affected. */
+#define M64_CBPP(p)     (((p)->cbpp == 2u) ? 2u : 4u)
+#define M64_PIXW(p)     (((p)->cbpp == 2u) ? 0x60040464u : 0x60060666u)   /* DP_PIX_WIDTH: RGB565 | ARGB8888 */
+static inline uint32_t m64_pack_cpix(const mach64_priv *p, uint32_t argb)
+{
+    if (p->cbpp != 2u) return argb;
+    return (((argb >> 16) & 0xffu) >> 3 << 11) | (((argb >> 8) & 0xffu) >> 2 << 5) | ((argb & 0xffu) >> 3);
+}
+void mach64_set_cbpp(gld_context *ctx, uint32_t bytes_per_pixel);
 
 static __inline__ mach64_priv *MACH64_PRIV(gld_context *c)
 { return (mach64_priv *)c->backend; }
@@ -185,24 +238,43 @@ void mach64_blit_surface(gld_context *ctx, uint32_t src_off, uint32_t dst_off,
                          uint32_t sx, uint32_t sy, uint32_t dx, uint32_t dy,
                          uint32_t w, uint32_t h, uint32_t pitch_px);
 void mach64_set_texheap(uint32_t base, uint32_t end);
+/* Kernel-memory peek through the patched ATIRagePro's selector (flag 0x80000000 | kernel address).  The kext dereferences the address
+ * UNCHECKED, so a stale/garbage pointer is a kernel panic: every peek goes through here, which refuses addresses outside the range
+ * where kalloc'd driver objects live (0x10000 .. M64_KADDR_MAX) or not 4-byte aligned.
+ * Returns the selector's result, or -1 (and *out = 0) when refused. */
+/* Kernel pointers are VIRTUAL: xnu-517 (Panther) osfmk/mach/ppc/vm_param.h has VM_MIN_KERNEL_ADDRESS 0x1000 .. VM_MAX_KERNEL_ADDRESS
+ * 0xDFFFFFFF regardless of RAM size (the G4 has 2GB; objects seen so far 0x2bfa000..0x3260fa00). */
+#define M64_KADDR_MAX 0xDFFFFFFFu
+/* User-space pointers the plugin dereferences directly (GLEngine's gli/texture objects, app texel buffers).  xnu-517 (Panther)
+ * osfmk/mach/ppc/vm_param.h: VM_MAX_ADDRESS 0xFFFFFFFF, USER_STACK_END 0xffff0000.  Sanity bound only (a bad user pointer is an app
+ * crash, not a kernel panic); the old 1GB cap silently dropped any texture whose data sat above it (stack buffers, big mmaps). */
+#define M64_UADDR_MAX 0xFFFEFFFFu
+int m64_peek(io_connect_t conn, int selector, uint32_t kaddr, uint32_t *out);
 /* Windowed per-context back+Z VRAM pool (gld_texture.c): lazily init the region once, then
  * alloc/free window-sized buffers so multiple windowed contexts render independently. */
 void     mach64_winpool_init(uint32_t base, uint32_t end);
 uint32_t mach64_winbuf_alloc(uint32_t bytes);   /* 0 = pool exhausted */
 void     mach64_winbuf_free(uint32_t off, uint32_t bytes);
 void mach64_present(gld_context *ctx);   /* double-buffer back->front swap */
+int  mach64_vis_update(gld_context *ctx, int force);   /* clip the surface shape to the window's visible region; 1 = shape changed */
 void mach64_pathb_present(gld_context *ctx);   /* Path B: present via Apple's surface_flush */
 void mach64_pathb_setup_target(gld_context *ctx); /* Path B: prime surface + set render target off */
 uint32_t mach64_vram_alloc(gld_context *ctx, uint32_t size, uint32_t *record_out); /* Path B: Apple VRAM allocator */
 void mach64_vram_free(gld_context *ctx, uint32_t record);
-uint32_t mach64_agp_alloc(gld_context *ctx, uint32_t size,                          /* Path B: AGP/GART alloc (v7 kext op=3) */
-                          uint32_t *token_out, uint32_t *kva_out, uint32_t *handle_out);
-void mach64_agp_upload(gld_context *ctx, uint32_t handle,                           /* Path B: AGP texel upload (v7 kext op=5) */
-                       const uint32_t *argb, uint32_t count);
 void mach64_flip(gld_context *ctx, uint32_t off);   /* page-flip CRTC scanout to `off` */
 void mach64_wait_flip(gld_context *ctx);            /* block until the pending flip retired */
 void mach64_sync_depth_from_gli(gld_context *ctx);
-uint32_t mach64_gli_u32(gld_context *ctx, uint32_t off);   /* read a gli field */
+/* Read a gli field (0 if the gli can't be located).  The fast path (cached gli for this context, still valid) is inline: bind_texture / state sync read ~100 fields per primitive and the
+ * out-of-line call + re-validation per field was ~3% of the main thread in the race profile. */
+extern gld_context *g_gli_ctx; extern uint32_t g_gli_p10, g_gli_g;
+uint32_t mach64_gli_u32_slow(gld_context *ctx, uint32_t off);
+static inline __attribute__((always_inline)) uint32_t mach64_gli_u32(gld_context *ctx, uint32_t off)
+{
+    uint32_t g = g_gli_g;
+    if (g_gli_ctx == ctx && g_gli_p10 == *(const uint32_t *)((const char *)ctx + 0x10) && g && *(const uint32_t *)(uintptr_t)(g + 0x7898) == (uint32_t)(uintptr_t)ctx)
+        return *(const uint32_t *)(uintptr_t)(g + off);
+    return mach64_gli_u32_slow(ctx, off);
+}
 void mach64_set_scissor(gld_context *ctx, int x, int y, int w, int h);
 
 /* ---- texture upload/bind (gld_texture.c) ----------------------------
@@ -217,6 +289,7 @@ void mach64_texture_dirtied(void *texobj);   /* gldModifyTexture a3&0x80: queue 
 void mach64_texture_bound(void *texobj);     /* gldModifyTexture: mark current texture */
 void mach64_texture_deleted(void *texobj);   /* gldDeleteTexture: free its VRAM slot   */
 int  mach64_bind_texture(gld_context *ctx);
+void mach64_tex_select_lod(gld_context *ctx, float pix_area, float uv_area);   /* per-triangle mip level + min/mag filter */
 
 /* ---- geometry translation + submission (gld_render.c) --------------- */
 void mach64_pack_vertex(m64_vertex *out, float x, float y, float z,
@@ -238,21 +311,23 @@ void mach64_read_vertex(const void *v, m64_vertex *out, float fb_h); /* gli->hw 
  * factor (gli-vertex +0x4c) instead of the colour alpha (+0x3c) -- the setup engine
  * interpolates it and the fog pipe blends the fragment against DP_FOG_CLR by it. */
 extern int mach64_fog_on;
+extern int mach64_spec_mode;   /* GL_SEPARATE_SPECULAR_COLOR: 0 off, 1 hardware (textured: ALPHA_TST_CNTL SPECULAR_LIGHT_EN + SPEC_ARGB rgb), 2 folded into the vertex colour (untextured) */
+extern uint32_t mach64_tex_vofs[2];   /* gli-vertex byte offset of S/w,T/w for the primary / secondary texture unit (secondary 0 = single texture); set per draw by mach64_bind_texture */
 extern int mach64_flat_on;   /* glShadeModel(GL_FLAT): replicate the provoking vertex colour */
-#ifdef GLD_PERF
-extern unsigned long g_perf_dispatch_us;   /* gld_prims.c accumulates emit_tri time here */
-unsigned long perf_now_us(void);
-#endif
 /* Resolve a windowed drawable's CGS window id (descriptor d[1]) + surface id (d[2]) -> on-screen
  * content bounds via CGS (gld_cgs.c).  Returns 1 + fills x/y/w/h (screen px), 0 if unresolved. */
 int mach64_cgs_resolve_bounds(uint32_t window_id, uint32_t surface_id, int allow_enum,
                               int *x, int *y, int *w, int *h);
-int mach64_display_size(int *w, int *h);   /* main-display pixel size (fullscreen surface shaping) */
+int mach64_display_bytes_per_pixel(void);   /* bytes per pixel of the Rage's display (2 for 15/16 bpp, 4 for 32); 0 if unknown */
+int mach64_display_size(int *w, int *h);   /* pixel size of the display this driver scans out (the Rage's; main display if it cannot be identified) -- fullscreen surface shaping */
 
 #ifdef GLD_APPLE_PROBE
 unsigned int mach64_apple_glctx_open(void);   /* open Apple's type-1 GL client, return connection */
-unsigned int mach64_apple_make_surface(uint32_t surface_id, uint32_t mode,
-                                       uint32_t w, uint32_t h); /* type-0 + set_id_mode + set_shape */
+int mach64_cgs_off_display(void);   /* last mach64_cgs_resolve_bounds: window found, but on a display this driver does not scan out */
+int mach64_cgs_visible_rects(uint32_t window_id, uint32_t surface_id, int lx, int ly, int w, int h, short (*out)[4], int maxr);
+void mach64_apple_reshape(unsigned int cn, const short (*r)[4], int n, int x, int y, int w, int h);
+unsigned int mach64_apple_make_surface(uint32_t surface_id, uint32_t mode, uint32_t x, uint32_t y,
+                                       uint32_t w, uint32_t h); /* type-0 + set_id_mode + set_shape (shape placed at the display-local x,y) */
 void mach64_apple_bind_surface(unsigned int cn, uint32_t surface_id,
                                uint32_t x, uint32_t y, uint32_t w, uint32_t h);
 #endif
@@ -286,7 +361,7 @@ int  mach64_ctl14(gld_context *, uint32_t, uint32_t, uint32_t, uint32_t, uint32_
 int gldUpdateDispatch(gld_context *ctx, void *table, uint32_t flags);
 
 /* ---- core entry points the framework requires (gld_entry.c) ---------
- * Recovered signatures / GL conventions; refined empirically via gld_log. */
+ * Recovered signatures / GL conventions. */
 int  gldAttachDrawable(gld_context *ctx, int type, void *drawable, uint32_t flags);
 const char *gldGetString(gld_context *ctx, uint32_t name);
 int  gldGetError(gld_context *ctx);
@@ -295,10 +370,6 @@ int  gldGetInteger(gld_context *ctx, uint32_t pname, int *params);
 int  gldSetInteger(gld_context *ctx, uint32_t pname, int value);
 void gldInitDispatch(gld_context *ctx, void *table, void *outinfo);
 int  gldFlushBuffer(gld_context *ctx, void *drawable);
-
-/* diagnostic log -> /tmp/mach64gld.log, so we can watch how OpenGL.framework
- * drives the bundle when it is loaded into a real GL app. */
-void gld_log(const char *fmt, ...);
 
 /* ---- The gld* entry points (subset; full list in ABI.md) ------------ */
 void *gldInitializeLibrary(void *iface, void *a2, void *a3, void *a4, void *a5);

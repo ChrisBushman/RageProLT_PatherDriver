@@ -30,21 +30,9 @@ bool Mach64Accelerator::start(IOService *provider)
     fPCI->setMemoryEnable(true);
     fPCI->setBusMasterEnable(true);
 
-    /* Diagnostic: log every BAR's phys addr + size so we can identify the
-     * 4KB MMIO register block vs the 8MB framebuffer empirically. */
-    for (int bar = 0; bar < 6; bar++) {
-        IODeviceMemory *m =
-            fPCI->getDeviceMemoryWithRegister(kIOPCIConfigBaseAddress0 + bar * 4);
-        if (m)
-            IOLog("Mach64Accelerator: BAR%d phys=0x%08lx len=0x%lx\n", bar,
-                  (unsigned long)m->getPhysicalAddress(),
-                  (unsigned long)m->getLength());
-        else
-            IOLog("Mach64Accelerator: BAR%d (none)\n", bar);
-    }
-
-    /* BAR layout (TODO verify on hardware via the device's assigned-addresses):
-     *   BAR0 = linear framebuffer aperture, BAR2 = MMIO register aperture. */
+    /* BAR layout (HW-verified on the Rage LT Pro 1002:4c49 in the MDD G4, Nov 2026, after BIOS init):
+     *   BAR0 = linear framebuffer aperture (8 MB VRAM, register block at +0x7FF800),
+     *   BAR1 = 256-byte I/O register window (needs setIOEnable), BAR2 = 4 KB MMIO register aperture. */
     fFB   = fPCI->getDeviceMemoryWithRegister(kIOPCIConfigBaseAddress0);
     fRegs = fPCI->getDeviceMemoryWithRegister(kIOPCIConfigBaseAddress2);
     if (!fRegs || !fFB) {
@@ -67,10 +55,13 @@ bool Mach64Accelerator::start(IOService *provider)
     /* 128KB (was 64KB): with descriptor chaining a whole batch is submitted in one kick, so a
      * bigger buffer = fewer kicks/frame.  Physically contiguous (dmaOpts) so chained
      * descriptors can address the whole span. */
-    fCmdBuf = IOBufferMemoryDescriptor::withOptions(dmaOpts, 0x20000, PAGE_SIZE);
+    /* 384 KB (was 128 KB): [0, 128K) texture-upload staging, [128K, 256K) and [256K, 384K) the two engine batch buffers of the single-thread kick/poll mode */
+    fCmdBuf = IOBufferMemoryDescriptor::withOptions(dmaOpts, 0x60000, PAGE_SIZE);
     /* ring MUST be 16KB-aligned: BM_GUI_TABLE|CIRCULAR_BUF_SIZE_16KB treats it
      * as a 16KB circular buffer and masks the base to 16KB. */
-    fRing   = IOBufferMemoryDescriptor::withOptions(dmaOpts, 0x4000, 0x4000);
+    /* 64 KB: [0, 0x2400) the texture-upload tables; the two engine batch tables are 16 KB-PHYSICALLY-aligned 16 KB blocks picked by the driver above that (the descriptor-ring
+     * alignment request is NOT honoured physically: measured ring bus 0x00a29000, 0x0cf63000), so there has to be room for the worst-case alignment slack. */
+    fRing   = IOBufferMemoryDescriptor::withOptions(dmaOpts, 0x10000, 0x4000);
     if (!fControl || !fCmdBuf || !fRing) return false;
 
     /* prepare() wires the pages so getPhysicalSegment returns REAL physical
@@ -80,8 +71,6 @@ bool Mach64Accelerator::start(IOService *provider)
     IOByteCount seg;
     fCmdBufBus = fCmdBuf->getPhysicalSegment(0, &seg);
     fRingBus   = fRing->getPhysicalSegment(0, &seg);
-    IOLog("Mach64Accelerator: cmdbuf bus=0x%08lx ring bus=0x%08lx (physmem=0x%lx)\n",
-          (unsigned long)fCmdBufBus, (unsigned long)fRingBus, (unsigned long)0x20000000);
 
     /* Kernel-side DMA submission maps (see the proven mach64_gouraud path):
      *  - registers live in the last 2KB of BAR0 (NOT BAR2, which master-aborts);
@@ -102,7 +91,7 @@ bool Mach64Accelerator::start(IOService *provider)
     fFlipPending    = 0;
     fFlipScanline   = 0;
     fOrigCrtc       = 0;   /* captured at the first page flip, restored in stop() */
-    fCmdBufSize     = 0x20000;   /* must match the fCmdBuf allocation above */
+    fCmdBufSize     = 0x20000;   /* the legacy in-kernel submit path (rotateCommandBuffer) still treats the FIRST 128 KB as its buffer */
 
     fStamp   = 0;
     /* Real values come from reading CONFIG_CHIP_ID / memory config; the plugin
@@ -118,12 +107,9 @@ bool Mach64Accelerator::start(IOService *provider)
     {
         UInt32 hd = regRead(MACH64_HW_DEBUG);
         UInt32 nw = hd & ~(MACH64_HW_DEBUG_AUTO_FF_DIS | MACH64_HW_DEBUG_AUTO_BLKWRT_DIS);
-        IOLog("Mach64Accelerator: HW_DEBUG 0x%08lx -> 0x%08lx (enable auto fast-fill/block-write)\n",
-              (unsigned long)hd, (unsigned long)nw);
         if (nw != hd) regWrite(MACH64_HW_DEBUG, nw);
     }
 
-    IOLog("Mach64Accelerator: started on %s\n", fPCI->getName());
     registerService();
     return true;
 }
@@ -260,7 +246,8 @@ IOReturn Mach64Accelerator::submitCommandBuffer(UInt32 byteCount)
 IOMemoryDescriptor *Mach64Accelerator::allocSurface(Mach64GLUserClient *c)
 {
     (void)c;
-    /* TODO: carve a color/depth surface out of VRAM.  Placeholder: whole FB. */
+    /* Type-1 region for the legacy path = the VRAM aperture (the plugin allocates surfaces itself: Path B uses Apple's allocator, the
+     * legacy path its own heap).  Per-client carving is not needed by either. */
     return fFB;
 }
 
@@ -294,7 +281,7 @@ UInt32 Mach64Accelerator::rotateCommandBuffer(Mach64GLUserClient *c, UInt32 size
     UInt32 stamp = ++fStamp;
     IOReturn r = submitCommandBuffer(size);
     /* Synchronous today: the quiesce model owns the engine only between save and
-     * restore, so the DMA has already retired here.  TODO for CPU/GPU overlap:
+     * restore, so the DMA has already retired here.  Possible optimisation (CPU/GPU overlap, not needed for correctness):
      * split fCmdBuf into two halves, alternate per stamp, and retire stamps by
      * polling BM_GUI_TABLE instead of blocking in submitCommandBuffer(). */
     if (r == kIOReturnSuccess)

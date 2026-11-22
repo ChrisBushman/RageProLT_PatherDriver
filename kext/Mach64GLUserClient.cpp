@@ -8,6 +8,11 @@
 #include "Mach64GLUserClient.h"
 #include "Mach64Accelerator.h"
 #include <IOKit/IOLib.h>
+#include <IOKit/IORegistryEntry.h>
+#include <kern/thread_call.h>
+#include <kern/clock.h>
+#include <libkern/OSAtomic.h>
+#include <kern/lock.h>      /* mutex_lock / mutex_unlock (Apple's accelerator mutex is a Mach mutex_t) */
 
 #define super IOUserClient
 OSDefineMetaClassAndStructors(Mach64GLUserClient, IOUserClient)
@@ -21,6 +26,7 @@ bool Mach64GLUserClient::start(IOService *provider)
     if (!super::start(provider)) return false;
     fProvider = OSDynamicCast(Mach64Accelerator, provider);
     if (!fProvider) return false;
+    fAccel = 0; fMutex = 0; fHeld = 0; fCall = 0;
 
     /* The 17-selector table (indices/counts verified from the Rage128 kext). */
     IOExternalMethod tbl[kMach64Sel_COUNT] = {
@@ -41,6 +47,8 @@ bool Mach64GLUserClient::start(IOService *provider)
         /* scale_surface */   M(finish,            kIOUCScalarIStructI, 3, 0), //14
         M(new_vertex_buffer,  kIOUCScalarIScalarO, 1, 1),               //15
         M(delete_vertex_buffer,kIOUCScalarIStructI,1, 0),               //16
+        M(accel_hold,         kIOUCScalarIScalarO, 1, 0),               //17: take Apple's accelerator mutex and keep it
+        M(accel_release,      kIOUCScalarIScalarO, 0, 0),               //18: release it
     };
     for (int i = 0; i < kMach64Sel_COUNT; i++) fMethods[i] = tbl[i];
     return true;
@@ -135,7 +143,78 @@ IOReturn Mach64GLUserClient::get_status(UInt32 *s)            { *s = fProvider->
 IOReturn Mach64GLUserClient::set_surface(UInt32 a,UInt32 b,UInt32 c,UInt32 d){ return fProvider->setSurface(this,a,b,c,d); }
 IOReturn Mach64GLUserClient::wait_flip(void){ return fProvider->waitFlip(); }
 IOReturn Mach64GLUserClient::delete_vertex_buffer(UInt32 id)  { return fProvider->freeCommandBuffer(this,id); }
-IOReturn Mach64GLUserClient::clientClose(void)               { terminate(); return kIOReturnSuccess; }
+/* ---- Apple's accelerator mutex, held across calls (single-thread kick/poll mode; see docs/re-notes/single-thread-engine.md) ----
+ * Apple's kext serialises every engine user (GL drains, WindowServer 2D drains, our patched selectors) with the Mach mutex at accel[0x544].  A GUI-bus-master batch must
+ * not overlap another client's register writes, so the driver takes it with accel_hold before kicking a batch and gives it back with accel_release once the batch has drained.
+ * This is the same thread's lock/unlock across two calls.  A DIFFERENT thread must not unlock while another thread waits (mutex_unlock_wakeup panics unless the unlocking
+ * activation owns the lock): the RELEASE kernel keeps the owning activation in the lock word's upper 30 bits (flag bits: 1 = interlock, 2 = waiters), so clientClose
+ * (a dying client's thread) first makes itself the owner, then unlocks normally. */
+static void m64_adopt_and_unlock(void *m)
+{
+    UInt32 me, w, nw, *lw = (UInt32 *)m;
+    __asm__ volatile("mfsprg %0,1" : "=r"(me));                      /* the current activation */
+    do {
+        __asm__ volatile("lwarx %0,0,%1" : "=r"(w) : "r"(lw) : "memory");
+        if (w & 1) continue;                                          /* interlock busy: retry */
+        nw = (me & ~3u) | (w & 2u);
+        __asm__ volatile("stwcx. %2,0,%1\n\tmfcr %0" : "=r"(w) : "r"(lw), "r"(nw) : "cr0", "memory");
+        if (w & 0x20000000u) break;                                   /* cr0.eq set: store succeeded */
+    } while (1);
+    mutex_unlock((mutex_t *)m);
+}
+
+/* IOATIRProAccelerator is not in the registry (ATIRagePro owns it privately), so the driver reads its mutex pointer from Apple's own GL context (ctx[0xb0] -> accel[0x544], through
+ * Apple's patched peek selector) and passes the kernel address in.  We only accept the address that was first given (a different one would mean a different accelerator). */
+/* WATCHDOG.  A client that dies (or stalls) while holding the mutex would wedge the machine: Apple's own teardown of that client's GL context needs the same mutex, so the dying
+ * process never finishes exiting and our clientClose never runs (observed: kill -9 of a holder = process stuck in 'E', every other 2D/GL user blocked).  So every hold arms a
+ * timer; if it is still held when it fires, a kernel thread releases it (adopting the lock word first, so a waiting WindowServer is woken correctly). */
+#define M64_HOLD_LIMIT_MS 2000
+static void m64_wd_tramp(thread_call_param_t p0, thread_call_param_t p1) { ((Mach64GLUserClient *)p0)->watchdog(); }
+void Mach64GLUserClient::watchdog(void)
+{
+    if (OSCompareAndSwap(1, 0, &fHeld)) {
+        IOLog("Mach64GLUserClient %p: accelerator mutex held for more than %d ms -- releasing it from the watchdog\n", this, M64_HOLD_LIMIT_MS);
+        m64_adopt_and_unlock(fMutex);
+    }
+    release();                                   /* the reference taken when the timer was armed */
+}
+static UInt32 sApplMutex = 0;
+IOReturn Mach64GLUserClient::accel_hold(UInt32 mutexAddr)
+{
+    if (fHeld) return kIOReturnBusy;
+    if (mutexAddr < 0x10000u || mutexAddr > 0xdfffffffu || (mutexAddr & 3u)) return kIOReturnBadArgument;
+    if (sApplMutex && sApplMutex != mutexAddr) return kIOReturnBadArgument;
+    sApplMutex = mutexAddr;
+    fMutex = (void *)mutexAddr;
+    if (!fCall) { fCall = thread_call_allocate(m64_wd_tramp, (thread_call_param_t)this); if (!fCall) return kIOReturnNoMemory; }
+    mutex_lock((mutex_t *)fMutex);
+    fHeld = 1;
+    {   AbsoluteTime dl; clock_interval_to_deadline(M64_HOLD_LIMIT_MS, 1000u * 1000u, &dl);
+        retain();                                /* the callback releases this; accel_release/free drop it again when the cancel wins */
+        if (thread_call_enter_delayed((thread_call_t)fCall, dl)) release(); }   /* already pending (should not be): keep one reference */
+    return kIOReturnSuccess;
+}
+
+IOReturn Mach64GLUserClient::accel_release(void)
+{
+    if (!OSCompareAndSwap(1, 0, &fHeld)) return kIOReturnNotReady;     /* not held, or the watchdog already took it away */
+    if (fCall && thread_call_cancel((thread_call_t)fCall)) release();  /* the callback will not run: drop its reference */
+    mutex_unlock((mutex_t *)fMutex);
+    return kIOReturnSuccess;
+}
+
+void Mach64GLUserClient::free(void)
+{
+    if (OSCompareAndSwap(1, 0, &fHeld)) { IOLog("Mach64GLUserClient: client went away holding the accelerator mutex; releasing it\n"); m64_adopt_and_unlock(fMutex); }
+    if (fCall) { thread_call_cancel((thread_call_t)fCall); thread_call_free((thread_call_t)fCall); fCall = 0; }
+    super::free();
+}
+
+IOReturn Mach64GLUserClient::clientClose(void)
+{
+    if (OSCompareAndSwap(1, 0, &fHeld)) { IOLog("Mach64GLUserClient: client closed holding the accelerator mutex; releasing it\n"); m64_adopt_and_unlock(fMutex); }
+    terminate(); return kIOReturnSuccess;
+}
 bool Mach64GLUserClient::initWithTask(task_t t, void *sid, UInt32 type)
 {
     if (type != MACH64_GL_CONNECT_TYPE) return false;   // only GL type (1)

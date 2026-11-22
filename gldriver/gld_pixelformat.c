@@ -16,6 +16,7 @@
  * accepts the one matching the app's request (color 32 / depth 16) -> npix > 0.
  */
 #include "gld.h"
+#include "../common/cgl_attribs.h"
 #include <stdlib.h>
 #include <string.h>
 
@@ -61,18 +62,11 @@ static const uint32_t gld_node_templates[GLD_NNODES][GLD_NODE_WORDS] = {
 int gldChoosePixelFormat(void **pf_out, const int *attribs)
 {
     uint32_t *node[GLD_NNODES];
-    int i, want_db = 0;
+    int i, nn = GLD_NNODES, want_db;
 
-    gld_log("gldChoosePixelFormat(attribs=%p):", (void*)attribs);
-    /* Scan the CGL attribute tokens.  kCGLPFADoubleBuffer (=5) is a boolean
-     * attribute (no value word follows), so a plain scan is adequate for the
-     * common attribute sets (RGBA/DoubleBuffer/DepthSize/Accelerated/FullScreen).
-     * TODO: a value-aware parser if an app passes a value word that equals 5. */
-    { int k; for (k=0; attribs && k<48 && attribs[k]; k++) {
-        gld_log(" %d", attribs[k]);
-        if (attribs[k] == 5) want_db = 1;   /* kCGLPFADoubleBuffer */
-    } }
-    gld_log(" [end]%s\n", want_db ? "  DOUBLEBUFFER" : "");
+    /* Scan the CGL attribute list value-aware (common/cgl_attribs.h, host-tested): value words (DepthSize's 16, a zero
+     * StencilSize, ...) are skipped, so they neither end the scan early nor get mistaken for kCGLPFADoubleBuffer (=5). */
+    want_db = cgl_attribs_double_buffer(attribs, 48, 0);
     if (!pf_out) return 0x271e;
     *pf_out = 0;
 
@@ -82,7 +76,7 @@ int gldChoosePixelFormat(void **pf_out, const int *attribs)
      * tripped malloc's "pointer not malloced" guard.  We do NOT free these
      * ourselves (the framework owns them after return -> gldDestroyPixelFormat
      * is a no-op).  0x40 bytes each (>= the 0x34 the framework reads/copies). */
-    for (i = 0; i < GLD_NNODES; i++) {
+    for (i = 0; i < nn; i++) {
         node[i] = (uint32_t *)calloc(1, 0x40);
         if (!node[i]) return 0x2720;
         memcpy(node[i], gld_node_templates[i], GLD_NODE_WORDS * 4);
@@ -105,13 +99,11 @@ int gldChoosePixelFormat(void **pf_out, const int *attribs)
 #endif
         }
     }
-    for (i = 0; i < GLD_NNODES - 1; i++)
+    for (i = 0; i < nn - 1; i++)
         node[i][0] = (uint32_t)node[i + 1];   /* PPC32: pointer fits in a word */
-    node[GLD_NNODES - 1][0] = 0;               /* our tail (framework appends here) */
+    node[nn - 1][0] = 0;               /* our tail (framework appends here) */
 
     *pf_out = node[0];
-    gld_log("  -> ACCEPT: emitted %d captured config nodes (separate allocs), head=%p\n",
-            GLD_NNODES, (void *)node[0]);
     return 0;
 }
 
