@@ -1115,7 +1115,7 @@ int mach64_ctl08(void *rb_ctx, int x, int y, int w, int h,
     uint32_t height = gc ? *(uint32_t *)((unsigned char *)gc + 0x1f4) : 0;   /* drawable height (gldAttachDrawable) */
     uint32_t toff  = p ? p->target_off   : 0;
     uint32_t tpitch= p ? p->target_pitch : 0;    /* pixels */
-    if (!p || !gc->regs || !height) return 0;
+    if (!p || !height) return 0;
 
     /* DEPTH readback: GL_DEPTH_COMPONENT from our 16-bit Z buffer (p->z_off/z_pitch, Z16 stored LE).
      * GLEngine already rejected this if no depth buffer is bound, but guard anyway. */
@@ -1129,11 +1129,13 @@ int mach64_ctl08(void *rb_ctx, int x, int y, int w, int h,
             default: return 0;
         }
         if (!zoff || !zpitch) return 0;      /* no depth buffer */
+        if (!mach64_vram_span_ok(zoff, (uint64_t)zpitch * 2u * height)) return 0;
         mach64_flush_batch(gc);
-        {   const volatile unsigned char *vram = (const volatile unsigned char *)gc->regs;
+        {   const volatile unsigned char *vram = mach64_vram_cpu_begin();
             unsigned char *base = (unsigned char *)pixels;
             uint32_t zpitch_b = zpitch * 2u;
             int p_align, p_rowlen, p_skippix, p_skiprows, p_swap, l, row_stride, row, col;
+            if (!vram) return 0;
             mach64_pack_state(gc, &p_align, &p_rowlen, &p_skippix, &p_skiprows, &p_swap);
             l = p_rowlen > 0 ? p_rowlen : w;
             row_stride = (elem >= p_align) ? (l * elem)
@@ -1143,10 +1145,14 @@ int mach64_ctl08(void *rb_ctx, int x, int y, int w, int h,
                 int fbrow = (int)height - 1 - (y + row);
                 unsigned char *o;
                 if (fbrow < 0) fbrow = 0;
+                if (fbrow >= (int)height) fbrow = (int)height - 1;
                 o = base + row * row_stride;
                 for (col = 0; col < w; col++) {
-                    const volatile unsigned char *s =
-                        vram + zoff + (uint32_t)fbrow * zpitch_b + (uint32_t)(x + col) * 2u;
+                    int fx = x + col;                   /* clamp like the row: stay inside the checked span */
+                    const volatile unsigned char *s;
+                    if (fx < 0) fx = 0;
+                    if (fx >= (int)zpitch) fx = (int)zpitch - 1;
+                    s = vram + zoff + (uint32_t)fbrow * zpitch_b + (uint32_t)fx * 2u;
                     unsigned z16 = (unsigned)s[0] | ((unsigned)s[1] << 8);   /* Z16 little-endian */
                     if (type == 0x1403u) {              /* GL_UNSIGNED_SHORT */
                         uint16_t v = (uint16_t)z16;
@@ -1166,6 +1172,7 @@ int mach64_ctl08(void *rb_ctx, int x, int y, int w, int h,
     }
 
     if (!toff || !tpitch) return 0;   /* color path needs the color render target */
+    if (!mach64_vram_span_ok(toff, (uint64_t)tpitch * M64_CBPP(p) * height)) return 0;
     /* Decode (format, type).  Our framebuffer is X8R8G8B8 (no real dst alpha) -> a missing-alpha
      * buffer reads back alpha = 1.0 (opaque) per the GL spec.  For the packed INT_8_8_8_8[_REV]
      * types we build a native uint32 by BIT position and store it natively -- so the layout is
@@ -1186,16 +1193,17 @@ int mach64_ctl08(void *rb_ctx, int x, int y, int w, int h,
         }
         mach64_flush_batch(gc);   /* submit any residual geometry; the app's glFinish already fenced */
 
-        /* Read our render target from the whole-VRAM CPU map (gc->regs).  ARGB8888 stored LE ->
+        /* Read our render target from the CPU VRAM view (mach64_vram_cpu_begin).  ARGB8888 stored LE ->
          * bytes [B,G,R,A].  glReadPixels origin is bottom-left (flip Y vs drawable height H).
          * Honour GL_PACK_* state from GLEngine's gc (default-safe fallback): ALIGNMENT@0x63d8,
          * ROW_LENGTH@0x63c4, SKIP_PIXELS@0x63d0, SKIP_ROWS@0x63cc, SWAP_BYTES@0x63dc (byte). */
-        {   const volatile unsigned char *vram = (const volatile unsigned char *)gc->regs;
+        {   const volatile unsigned char *vram = mach64_vram_cpu_begin();
             unsigned char *base = (unsigned char *)pixels;
             uint32_t pitch_b = tpitch * (p ? M64_CBPP(p) : 4u);
             int bpp_out = (pk || has_a) ? 4 : 3;
             int elem = pk ? 4 : 1;                                   /* element size (bytes) */
             int p_align, p_rowlen, p_skippix, p_skiprows, p_swap, l, row_stride, row, col;
+            if (!vram) return 0;
             mach64_pack_state(gc, &p_align, &p_rowlen, &p_skippix, &p_skiprows, &p_swap);
             l = p_rowlen > 0 ? p_rowlen : w;
             row_stride = (elem >= p_align) ? (l * bpp_out)
@@ -1205,10 +1213,14 @@ int mach64_ctl08(void *rb_ctx, int x, int y, int w, int h,
                 int fbrow = (int)height - 1 - (y + row);
                 unsigned char *o;
                 if (fbrow < 0) fbrow = 0;
+                if (fbrow >= (int)height) fbrow = (int)height - 1;
                 o = base + row * row_stride;
                 for (col = 0; col < w; col++) {
-                    const volatile unsigned char *s =
-                        vram + toff + (uint32_t)fbrow * pitch_b + (uint32_t)(x + col) * (p ? M64_CBPP(p) : 4u);
+                    int fx = x + col;                   /* clamp like the row: stay inside the checked span */
+                    const volatile unsigned char *s;
+                    if (fx < 0) fx = 0;
+                    if (fx >= (int)tpitch) fx = (int)tpitch - 1;
+                    s = vram + toff + (uint32_t)fbrow * pitch_b + (uint32_t)fx * (p ? M64_CBPP(p) : 4u);
                     unsigned R, G, B, A = 0xFFu;                          /* X8 / RGB565 -> opaque */
                     if ((p ? M64_CBPP(p) : 4u) == 2u) {               /* RGB565, little-endian u16: expand with bit replication */
                         unsigned v16 = s[0] | ((unsigned)s[1] << 8), r5 = (v16 >> 11) & 0x1fu, g6 = (v16 >> 5) & 0x3fu, b5 = v16 & 0x1fu;
@@ -1244,7 +1256,7 @@ int mach64_ctl08(void *rb_ctx, int x, int y, int w, int h,
  *   f = type   (UBYTE 0x1401 / INT_8_8_8_8 0x8035 / INT_8_8_8_8_REV 0x8367)
  *   g = pixels (client CPU pointer to the source image)
  * We convert each client pixel to native ARGB8888 (inverse of the glReadPixels/mach64_ctl08 path) and
- * write it to the render target via the whole-VRAM CPU map (c->regs), Y-flipping GL's bottom-left
+ * write it to the render target via the CPU VRAM view (mach64_vram_cpu_begin), Y-flipping GL's bottom-left
  * origin (image row 0 = bottom = raster y).  Honours GL_UNPACK_ALIGNMENT/ROW_LENGTH/SKIP_ROWS/
  * SKIP_PIXELS/SWAP_BYTES (mach64_unpack_state) and glPixelZoom (gc+0x63bc/0x63c0): each source pixel
  * fills its zoomed destination rectangle (fragment-center rule; negative zoom flips that axis). */
@@ -1301,11 +1313,11 @@ int mach64_ctl0c(gld_context *c, uint32_t a, uint32_t b, uint32_t d,
         case 0x8367u: pk = 2; if (!has_a) return 0; break; /* INT_8_8_8_8_REV */
         default: return 0;   /* unsupported type */
     }
-    vram = (volatile unsigned char *)c->regs;
-    if (!vram) return 0;
     W = (int)*(uint32_t *)((unsigned char *)c + 0x1f0);
     H = (int)*(uint32_t *)((unsigned char *)c + 0x1f4);
     if (W <= 0 || H <= 0) return 0;
+    if (W > (int)p->target_pitch) W = (int)p->target_pitch;   /* a row never runs past the pitch */
+    if (!mach64_vram_span_ok(p->target_off, (uint64_t)p->target_pitch * M64_CBPP(p) * (uint32_t)H)) return 0;
     bpp_in = (pk || has_a) ? 4 : 3;       /* client bytes per pixel */
     elem   = pk ? 4 : 1;                  /* element size (packed word / component), for row alignment */
     dx = (int)(rp[0] + 0.5f);
@@ -1322,6 +1334,8 @@ int mach64_ctl0c(gld_context *c, uint32_t a, uint32_t b, uint32_t d,
     src += u_skiprows * rowstride + u_skippix * bpp_in;   /* GL_UNPACK_SKIP_ROWS/PIXELS */
     mach64_frame_start(c);                /* deferred glClear -> clear before this upload */
     mach64_flush_batch(c);                /* pending geometry before the upload */
+    vram = mach64_vram_cpu_begin();       /* engine idle: the CPU writes land after the queued geometry */
+    if (!vram) return 0;
     for (row = 0; row < h; row++) {
         const unsigned char *srow = src + row * rowstride;
         float wy0 = (float)dy + (float)row * zy, wy1 = (float)dy + (float)(row + 1) * zy;
@@ -1415,11 +1429,11 @@ int mach64_ctl14(gld_context *c, uint32_t a, uint32_t b, uint32_t d,
     (void)e; (void)f;
 
     if (!p || p->render_skip || !p->target_pitch || !rp || !bm || w <= 0 || h <= 0) return 0;
-    vram = (volatile unsigned char *)c->regs;
-    if (!vram) return 0;
     W = (int)*(uint32_t *)((unsigned char *)c + 0x1f0);
     H = (int)*(uint32_t *)((unsigned char *)c + 0x1f4);
     if (W <= 0 || H <= 0) return 0;
+    if (W > (int)p->target_pitch) W = (int)p->target_pitch;   /* a row never runs past the pitch */
+    if (!mach64_vram_span_ok(p->target_off, (uint64_t)p->target_pitch * M64_CBPP(p) * (uint32_t)H)) return 0;
     /* current raster colour (RGBA floats) from the GLEngine gc.  Raster block: pos x@0x2d0..w@0x2e0,
      * then GL_CURRENT_RASTER_COLOR at 0x2e4 (verified: glColor3f(1,1,0) reads back R@0x2e4=1 G@0x2e8=1
      * B@0x2ec=0).  Fallback to white if the gc pointer is unset. */
@@ -1440,6 +1454,8 @@ int mach64_ctl14(gld_context *c, uint32_t a, uint32_t b, uint32_t d,
     bm += u_skiprows * rowbytes;           /* GL_UNPACK_SKIP_ROWS */
     mach64_frame_start(c);            /* deferred glClear -> clear before this bitmap */
     mach64_flush_batch(c);
+    vram = mach64_vram_cpu_begin();   /* engine idle: the CPU writes land after the queued geometry */
+    if (!vram) return 0;
     for (row = 0; row < h; row++) {
         int fbrow = H - 1 - (dy + row);   /* bitmap row 0 = bottom = raster y -> VRAM row */
         const unsigned char *brow = bm + row * rowbytes;

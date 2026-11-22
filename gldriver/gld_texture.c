@@ -33,6 +33,7 @@
 #include "../common/mach64_abi.h"        /* Path A user client: kMach64Sel_get_config, MACH64_MEM_* (DMA staging memory) */
 #include <libkern/OSByteOrder.h>
 #include <mach/mach.h>
+#include <mach/mach_time.h>   /* mach64_vram_cpu_begin idle-wait timeout */
 #include <sys/sysctl.h>
 #include <sys/file.h>
 #include <fcntl.h>
@@ -451,6 +452,7 @@ static struct {
     int state;                            /* 0 untried, 1 ready, -1 unavailable */
     io_connect_t conn;
     volatile uint8_t *cmd, *ring, *regs;  /* staging, descriptor table, BAR0 register window (BAR + 0x7ff800) */
+    volatile uint8_t *vram;               /* BAR0 itself: the little-endian VRAM view, CPU offset == engine VRAM offset */
     uint32_t cmdbus, ringbus, prev_end;
     int lockfd;
     size_t cmdsz, ringsz;                 /* sizes of the Path A staging/ring maps (the single-thread engine needs the 384 KB / 64 KB kext) */
@@ -473,6 +475,28 @@ int mach64_pathA(io_connect_t *conn, volatile uint8_t **regs, volatile uint8_t *
     return 1;
 }
 static unsigned dma_rd(uint32_t reg) { return OSReadLittleInt32((void *)g_dma.regs, reg); }
+/* CPU view of VRAM for the pixel paths (glReadPixels / glDrawPixels / glBitmap): BAR0 from Mach64Accelerator, offsets == engine VRAM
+ * offsets, usable span [0, MACH64_VRAM_USABLE_END).  NOT ctx->regs -- that is Apple's type-1 COMMAND buffer (~768 KB); treating it as VRAM
+ * read past its end (Chess: SIGBUS in glReadPixels) or, for small offsets, overwrote queued engine commands.  Drains every queued and in-flight
+ * engine job and waits for the GUI engine to go idle first, so reads see finished pixels and writes are not overdrawn by a pending batch.
+ * Returns 0 (caller skips the op) if Path A is unavailable or the engine never goes idle. */
+volatile unsigned char *mach64_vram_cpu_begin(void)
+{
+    extern void mach64_dma_fence(void);
+    uint64_t t0;
+    unsigned long n = 0;
+    if (!dma_ready_pathA()) return 0;
+    mach64_dma_fence();
+    t0 = mach_absolute_time();
+    while ((dma_rd(MACH64_FIFO_STAT) & 0xffffu) || (dma_rd(MACH64_GUI_STAT) & 1u)) {
+        if ((++n & 0x3ffu) == 0) {
+            static mach_timebase_info_data_t tb;
+            if (!tb.denom) mach_timebase_info(&tb);
+            if ((mach_absolute_time() - t0) * tb.numer / tb.denom > 1000000000ull) return 0;   /* 1 s: wedged engine -> skip, don't spin forever */
+        }
+    }
+    return (volatile unsigned char *)g_dma.vram;
+}
 static void dma_wr(uint32_t reg, uint32_t v) { OSWriteLittleInt32((void *)g_dma.regs, reg, v); }
 static void dma_mb(void) { __asm__ volatile("sync; eieio" ::: "memory"); }
 static int dma_map(io_connect_t c, unsigned type, vm_address_t *a, vm_size_t *sz)
@@ -493,6 +517,7 @@ static int dma_ready(void)
         if (IOServiceOpen(sv, mach_task_self(), MACH64_GL_CONNECT_TYPE, &g_dma.conn)) { IOObjectRelease(sv); return 0; }
         IOObjectRelease(sv);
         if (!dma_map(g_dma.conn, MACH64_MEM_SURFACE, &a, &sz) || sz < 0x800000u) return 0;
+        g_dma.vram = (volatile uint8_t *)a;
         g_dma.regs = (volatile uint8_t *)a + MACH64_REG_WINDOW;
         if (!dma_map(g_dma.conn, MACH64_MEM_CMDBUF, &a, &sz) || sz < M64_DMA_STAGE) return 0;
         g_dma.cmd = (volatile uint8_t *)a; g_dma.cmdsz = sz;
@@ -688,9 +713,10 @@ static int mach64_upload_image(gld_context *ctx, uint32_t dst_off,
  * h@2, fmt@0xc, src@0x10); we upload the WHOLE chain into one region and record
  * each level's offset in mip_off[maxLog2] for its TEX_[maxLog2]_OFF register.
  *
- * WHY A BLIT (not a CPU poke): the userspace VRAM aperture (ctx->regs) is NOT
- * offset-aligned with the engine's VRAM offset space (a wide CPU write there
- * panics the box).  A 2D host-data blit writes through DST_OFF_PITCH in the
+ * WHY A BLIT (not a CPU poke): ctx->regs is not VRAM at all -- it is Apple's type-1
+ * COMMAND buffer, so a wide CPU write there corrupted queued engine commands and
+ * panicked the box.  (The real CPU VRAM view is mach64_vram_cpu_begin's BAR0 map.)
+ * A 2D host-data blit writes through DST_OFF_PITCH in the
  * ENGINE's own offset space -- exactly where TEX_n_OFF then reads. */
 /* Cheap 64-bit content hash of a source image (two independent 32-bit lanes): the game re-uploads ~10 unchanged 256x256 texture pages per frame, each ~10 ms
  * through the kext; hashing the source costs under a millisecond. */

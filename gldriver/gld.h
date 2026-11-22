@@ -230,6 +230,7 @@ void mach64_set_depth_test(gld_context *ctx, int enable, uint32_t gl_func);
 void mach64_set_zbuffer(gld_context *ctx, uint32_t off, uint32_t pitch_px);
 void mach64_clear_zbuffer(gld_context *ctx);
 void mach64_flush_batch(gld_context *ctx);   /* submit accumulated triangles */
+volatile unsigned char *mach64_vram_cpu_begin(void);   /* engine-idle CPU view of VRAM (BAR0) for pixel ops; 0 = skip (gld_texture.c) */
 void mach64_clear_color(gld_context *ctx);
 void mach64_batch_clear_color(gld_context *ctx);  /* clear folded into the triangle batch */
 void mach64_fill_rect(gld_context *ctx, uint32_t off, uint32_t x, uint32_t y,
