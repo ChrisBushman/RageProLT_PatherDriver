@@ -232,3 +232,15 @@ Open: the SonicR plugin failure on this rig is not understood; the new driver wi
 - **The SonicR plugin does draw on this rig.** After running the suite's `gouraud` check against it, the scan-out buffer shows the red/green/blue triangle at the expected place (bottom left of the 640x480 frame). The suite's FAILs came from reading the render target at `0x97000` in 32-bit layout; the plugin renders into the 15 bpp scan-out. The earlier conclusion in 11.5 that the plugin "draws nothing" is withdrawn; what was true is that nothing appeared at the address the suite reads. The texture-heap trace (`heap 0x0-0x0`, alloc FAILED) is still unexplained and may be why textured draws are missing from the screen; that needs a scan-out check of a textured draw.
 - The throughput and error figures in 11.5 (24.5 ms per 1024x768 stretch, mean error 3.8) were taken with the older plugin where the readback matched; they stand.
 - `mach64_arrange rage` (Rage as primary display) made no difference to the suite results and was restored afterwards. `mach64_repaint` restores the desktop after a test writes the scan-out (verified byte-identical).
+
+### 11.7 Suite repaired against the SonicR plugin (2026-11-24)
+Base: G4 up >1 h, no stray processes, kexts as expected (`RageStubFB`, `ATIRagePro` = e64ddc65, `Mach64Accelerator`), CRTC/BUS_CNTL/GUI_STAT sane, desktop byte-identical to the original. No reboot was needed.
+Run: `suite2` built from the SonicR plugin (`-DSUITE_SHIMS -DSUITE_FENCE -DSUITE_HAVE_CBPP`), `MACH64_SINGLE=1`. Log: `~/g5logs/rage-standalone/suite-sonicr-plugin-nov24.txt`.
+
+**Result: 180 passed, 10 failed.**
+- Root cause of the earlier "draws nothing": a **suite bug**. The suite flipped y with a hard-coded 256 while the plugin flips with the real surface height (`ctx+0x1f4`, 480 here), so everything landed 224 rows below where it was read. Fixed in `tools/mach64_pathb_suite.c` (`V()`); found with a VRAM before/after page diff (`SUITE_VRAMDIFF=1`).
+- 7 failures (5 DMA uploads, per-context texture binding, both upscale cases) are textured draws. In fullscreen (`win_mode=0`) the plugin **marks the texture heap invalid on purpose** (`gld_render.c` ~l.704: its allocator could return a heap overlapping the live scanout, which panicked the machine) so a fullscreen app renders **untextured**. A headless suite is always fullscreen. A windowed attach needs a real CGS window, which the suite cannot create.
+- 1 failure (`SCALE_3D_CNTL bit 8 on`): the check needs the `MACH64_SC_BIT8` env knob, which only the older plugin reads. Not a hardware or driver fault.
+- 1 failure (`register audit`): the stand-in `m64_reg_seen` shim records nothing. A harness artifact.
+
+**Design consequence (new driver).** The kernel driver owns VRAM, so it can hand the user-space bundle a texture heap that is provably clear of the scanout and the cursor block, in fullscreen as well as windowed. Fullscreen texturing is therefore a requirement for us, not an optional extra, and the textured upscale (L4 option A) cannot be validated headless on this plugin. The numbers in 11.5 (older plugin) remain the only measurement of it.

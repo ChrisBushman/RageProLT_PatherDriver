@@ -93,7 +93,10 @@ static void default_state(void)
 /* top-down FB coords x,y -> GLEngine gli vertex (y-up window coords; the plugin flips back) */
 static void V(unsigned char *v, int x, int y, float z, unsigned argb)
 {
-    float xf = (float)x, yf = (float)(H - y), w = 1.0f, c[4]; int i;
+    /* GLEngine hands the plugin y-up window coords and the plugin flips them with the SURFACE height it keeps at ctx+0x1f4 (480 on a
+     * full-screen surface, 256 for the old 256x256 target): flip with the same number or the scene lands (surface_h - 256) rows off */
+    unsigned sh_ = ctx ? *(const uint32_t *)((const unsigned char *)ctx + 0x1f4) : 0;
+    float xf = (float)x, yf = (float)((sh_ ? (int)sh_ : H) - y), w = 1.0f, c[4]; int i;
     memset(v, 0, MACH64_GLIVERTEX_STRIDE);
     for (i = 0; i < 4; i++) c[i] = (float)((argb >> (i == 3 ? 24 : 16 - 8 * i)) & 0xff) / 255.0f;
     memcpy(v + 0x00, &xf, 4); memcpy(v + 0x04, &yf, 4); memcpy(v + 0x0c, &w, 4); memcpy(v + 0x18, &z, 4);
@@ -138,10 +141,22 @@ static void tri(int x0, int y0, unsigned c0, int x1, int y1, unsigned c1, int x2
 static void zclear(void) { mach64_clear_zbuffer(ctx); endframe(); }
 
 /* ------------------------------------------------------------------ tests */
+/* diagnostic (SUITE_VRAMDIFF=1): which 4 KB pages of usable VRAM changed across one gouraud triangle -- shows where the engine/present really write */
+static void vramdiff_report(const unsigned *before)
+{
+    unsigned pg, np = 0, first = 0, last = 0; printf("    vramdiff: changed pages (4 KB) outside the clear target:");
+    for (pg = 0; pg < 0x7ff000u / 4096u; pg++) { unsigned i, d = 0;
+        for (i = 0; i < 1024; i++) if (vrd(pg * 4096u + i * 4u) != before[pg * 1024u + i]) d++;
+        if (d) { if (!np) first = pg; last = pg; if (np < 24) printf(" 0x%x(%u)", pg * 4096u, d); np++; } }
+    printf("\n    vramdiff: %u pages changed, first 0x%x last 0x%x\n", np, first * 4096u, last * 4096u);
+}
 static void t_gouraud(void)
 {
+    unsigned *snap = NULL;
     default_state(); sync(); clear_rt(0);
+    if (getenv("SUITE_VRAMDIFF")) { unsigned o; snap = malloc(0x7ff000u); for (o = 0; o < 0x7ff000u; o += 4) snap[o / 4] = vrd(o); }
     tri(20, 16, 0xffff0000u, 110, 44, 0xff00ff00u, 50, 116, 0xff0000ffu, 0.0f);
+    if (snap) { vramdiff_report(snap); free(snap); }
     CHECK("gouraud: vertex 0 region red",   ch(px(24, 22), 16) > 150 && ch(px(24, 22), 8) < 90);
     CHECK("gouraud: vertex 1 region green", ch(px(100, 44), 8) > 150 && ch(px(100, 44), 16) < 90);
     CHECK("gouraud: vertex 2 region blue",  ch(px(50, 108), 0) > 150 && ch(px(50, 108), 16) < 90);
