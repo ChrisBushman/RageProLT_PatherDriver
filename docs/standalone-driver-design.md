@@ -312,3 +312,6 @@ scissor and no clearly-inside pixel missing (edge band of ~2 px tolerated, count
 (4096/4096), edge crossing the box, triangle wholly outside the scissor (nothing drawn), whole-surface scissor (shape), inverted scissor (nothing drawn),
 partly overlapping triangle.  Together with 11.11 the hardware clip is proven for fills, blits and triangles, so the kernel may own the scissor and
 clamp user 3D streams to it (E1 design).
+
+Allow-list tightened accordingly (common/rage_guard.h, tests/guard_test.c 62 checks): removed DST/Z/SRC_OFF_PITCH, TEX_n_OFF, SECONDARY_TEX_OFF, SC_*,
+DP_PIX_WIDTH, DST_Y_X..DST_HEIGHT_WIDTH, DST_X_Y/WIDTH_HEIGHT, SRC_Y_X/SRC_WIDTH1, SRC_CNTL, HOST_DATA, GUI_TRAJ_CNTL.  Open item E1 is closed.

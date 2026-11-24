@@ -23,18 +23,20 @@ static void t_span(void)
 static void t_regs(void)
 {
     uint32_t good_pitch = (80u << 22) | (0x97000u >> 3);          /* 640 px pitch, offset 0x97000 */
-    CHECK("reg: DST_OFF_PITCH sane ok", rage_reg_ok(MACH64_DST_OFF_PITCH, good_pitch));
-    CHECK("reg: DST_OFF_PITCH base in register window refused", !rage_reg_ok(MACH64_DST_OFF_PITCH, (80u << 22) | (0x7ff800u >> 3)));
-    CHECK("reg: DST_OFF_PITCH base past 8MB refused", !rage_reg_ok(MACH64_DST_OFF_PITCH, (80u << 22) | (0x900000u >> 3)));
-    CHECK("reg: Z_OFF_PITCH base checked too", !rage_reg_ok(MACH64_Z_OFF_PITCH, (80u << 22) | (0x7ff800u >> 3)));
-    CHECK("reg: TEX_0_OFF raw offset ok", rage_reg_ok(MACH64_TEX_0_OFF, 0x400000));
-    CHECK("reg: TEX_0_OFF in window refused", !rage_reg_ok(MACH64_TEX_0_OFF, 0x7ff800));
-    CHECK("reg: TEX_10_OFF (0x5e8) covered", rage_reg_ok(0x5e8, 0x1000) && !rage_reg_ok(0x5e8, 0x7ffc00));
-    CHECK("reg: SECONDARY_TEX_OFF checked", rage_reg_ok(MACH64_SECONDARY_TEX_OFF, 0x1000) && !rage_reg_ok(MACH64_SECONDARY_TEX_OFF, 0x7ff800));
-    CHECK("reg: SRC_CNTL plain ok", rage_reg_ok(MACH64_SRC_CNTL, 0x1));
-    CHECK("reg: SRC_CNTL BM_ENABLE (bit 8) refused", !rage_reg_ok(MACH64_SRC_CNTL, 1u << 8));
-    CHECK("reg: SRC_CNTL BM_SYNC (bit 9) refused", !rage_reg_ok(MACH64_SRC_CNTL, 1u << 9));
-    CHECK("reg: SRC_CNTL SYSTEM_TO_REG (bits 10/11) refused", !rage_reg_ok(MACH64_SRC_CNTL, 3u << 10));
+    /* E1: everything that decides where the engine writes is kernel-owned; a client may not set it, whatever the value */
+    CHECK("reg: DST_OFF_PITCH is kernel-owned (even a sane value)", !rage_reg_ok(MACH64_DST_OFF_PITCH, good_pitch));
+    CHECK("reg: Z_OFF_PITCH kernel-owned", !rage_reg_ok(MACH64_Z_OFF_PITCH, good_pitch));
+    CHECK("reg: SRC_OFF_PITCH kernel-owned", !rage_reg_ok(MACH64_SRC_OFF_PITCH, good_pitch));
+    CHECK("reg: TEX_0_OFF .. TEX_10_OFF kernel-owned", !rage_reg_ok(MACH64_TEX_0_OFF, 0x400000) && !rage_reg_ok(0x5e8, 0x1000));
+    CHECK("reg: SECONDARY_TEX_OFF kernel-owned", !rage_reg_ok(MACH64_SECONDARY_TEX_OFF, 0x1000));
+    CHECK("reg: scissor kernel-owned", !rage_reg_ok(MACH64_SC_LEFT_RIGHT, 0x1fff0000u) && !rage_reg_ok(MACH64_SC_TOP_BOTTOM, 0x1fff0000u));
+    CHECK("reg: scissor single registers (SC_LEFT/RIGHT/TOP/BOTTOM) refused", !rage_reg_ok(0x6a0, 0) && !rage_reg_ok(0x6a4, 0) && !rage_reg_ok(0x6ac, 0) && !rage_reg_ok(0x6b0, 0));
+    CHECK("reg: DP_PIX_WIDTH kernel-owned", !rage_reg_ok(MACH64_DP_PIX_WIDTH, 0x60040464u));
+    CHECK("reg: 2D rectangle / blit registers and triggers kernel-owned",
+          !rage_reg_ok(MACH64_DST_Y_X, 0) && !rage_reg_ok(MACH64_DST_HEIGHT_WIDTH, 0x100010) && !rage_reg_ok(MACH64_DST_X_Y, 0) &&
+          !rage_reg_ok(MACH64_DST_WIDTH_HEIGHT, 0x100010) && !rage_reg_ok(MACH64_SRC_Y_X, 0) && !rage_reg_ok(MACH64_SRC_WIDTH1, 0));
+    CHECK("reg: SRC_CNTL (bus-master source) refused", !rage_reg_ok(MACH64_SRC_CNTL, 0) && !rage_reg_ok(MACH64_SRC_CNTL, 1u << 8));
+    CHECK("reg: HOST_DATA window and GUI_TRAJ_CNTL refused", !rage_reg_ok(MACH64_HOST_DATA0, 0xdeadbeef) && !rage_reg_ok(0x63c, 0) && !rage_reg_ok(MACH64_GUI_TRAJ_CNTL, 3));
     CHECK("reg: BUS_CNTL refused", !rage_reg_ok(MACH64_BUS_CNTL, 0));
     CHECK("reg: BM_ADDR refused", !rage_reg_ok(MACH64_BM_ADDR, 0x1000));
     CHECK("reg: BM_GUI_TABLE_CMD refused", !rage_reg_ok(MACH64_BM_GUI_TABLE_CMD, 0x1000));
@@ -42,21 +44,28 @@ static void t_regs(void)
     CHECK("reg: CRTC_OFF_PITCH refused", !rage_reg_ok(MACH64_CRTC_OFF_PITCH, 0));
     CHECK("reg: CRTC_V_TOTAL_DISP refused", !rage_reg_ok(MACH64_CRTC_V_TOTAL_DISP, 0));
     CHECK("reg: HW_DEBUG refused", !rage_reg_ok(MACH64_HW_DEBUG, 0));
-    CHECK("reg: unaligned refused", !rage_reg_ok(MACH64_DST_Y_X + 2, 0));
+    CHECK("reg: GEN_TEST_CNTL (engine reset) / DST_CNTL refused", !rage_reg_ok(0x04d0, 0) && !rage_reg_ok(0x0530, 0));
+    CHECK("reg: unaligned refused", !rage_reg_ok(0x0244 + 2, 0));
     CHECK("reg: past DRI max refused", !rage_reg_ok(0x800, 0) && !rage_reg_ok(0xfffffffcu, 0));
     CHECK("reg: vertex block ok", rage_reg_ok(0x240, 1) && rage_reg_ok(0x2fc, 1));
     CHECK("reg: below vertex block refused", !rage_reg_ok(0x23c, 1));
     CHECK("reg: SETUP_CNTL / ONE_OVER_AREA ok", rage_reg_ok(MACH64_SETUP_CNTL, 0) && rage_reg_ok(MACH64_ONE_OVER_AREA_UC, 0x3f800000u));
-    CHECK("reg: host data window ok", rage_reg_ok(MACH64_HOST_DATA0, 0xdeadbeef) && rage_reg_ok(0x63c, 0));
+    CHECK("reg: per-primitive state ok (Z, alpha test, SCALE_3D, DP colours/mix/src, CLR_CMP, TEX size/cntl, PAT)",
+          rage_reg_ok(MACH64_Z_CNTL, 0) && rage_reg_ok(0x550, 0) && rage_reg_ok(MACH64_SCALE_3D_CNTL, 0x100c1u) &&
+          rage_reg_ok(MACH64_DP_FRGD_CLR, 1) && rage_reg_ok(MACH64_DP_WRITE_MASK, 0xffffffffu) && rage_reg_ok(MACH64_DP_MIX, 0x70003u) &&
+          rage_reg_ok(MACH64_DP_SRC, 0x101) && rage_reg_ok(MACH64_CLR_CMP_CNTL, 0) && rage_reg_ok(0x770, 0) && rage_reg_ok(0x774, 0) &&
+          rage_reg_ok(0x680, 0) && rage_reg_ok(0x684, 0));
     CHECK("reg: FIFO_STAT / GUI_STAT (read-only status) refused", !rage_reg_ok(MACH64_FIFO_STAT, 0) && !rage_reg_ok(MACH64_GUI_STAT, 0));
 }
 
 static void t_batch(void)
 {
-    uint32_t ok[4] = { MACH64_DST_Y_X, 0x10001, MACH64_DST_HEIGHT_WIDTH, 0x00100010 };
-    uint32_t bad[4] = { MACH64_DST_Y_X, 0x10001, MACH64_BUS_CNTL, 0 };
+    uint32_t ok[4] = { MACH64_Z_CNTL, 0, MACH64_DP_FRGD_CLR, 0x1234 };
+    uint32_t bad[4] = { MACH64_Z_CNTL, 0, MACH64_BUS_CNTL, 0 };
+    uint32_t addr[4] = { MACH64_Z_CNTL, 0, MACH64_DST_OFF_PITCH, (80u << 22) | (0x97000u >> 3) };
     CHECK("batch: good batch ok", rage_batch_ok(ok, 2));
     CHECK("batch: one bad register drops the whole batch", !rage_batch_ok(bad, 2));
+    CHECK("batch: a kernel-owned address register drops the whole batch", !rage_batch_ok(addr, 2));
     CHECK("batch: NULL refused", !rage_batch_ok(0, 2));
     CHECK("batch: empty refused", !rage_batch_ok(ok, 0));
     CHECK("batch: over cap refused", !rage_batch_ok(ok, RAGE_BATCH_MAX_PAIRS + 1));

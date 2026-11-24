@@ -8,9 +8,9 @@
  *                            (CRTC), clocks, HW_DEBUG, bus control and the bus-master table registers are kernel-owned and refused.
  *   3. rage_batch_ok()       a whole {reg,val} batch passes or the whole batch is dropped (no partial application).
  *
- * KNOWN LIMIT (Phase 1): address registers are checked for their BASE only.  The extent (pitch x height, scissor) is not tracked
- * here; the engine class must track the destination rectangle and call rage_vram_span_ok() on the real extent before any trigger
- * register is written (design 3.1 RageLTEngine; open item E1 in docs/standalone-driver-design.md). */
+ * E1 (closed Nov 24, design 11.11-11.12): a client can no longer set any address, scissor, pixel-width or 2D-trigger register.  The
+ * kernel's RageLTEngine owns the render target, scissor and extent, emits fills/blits itself, and the hardware clip contains every
+ * client primitive (proven on the G4 for fills, blits and triangles).  rage_vram_span_ok() is applied to kernel-chosen extents.  */
 #ifndef RAGE_GUARD_H
 #define RAGE_GUARD_H
 
@@ -33,31 +33,21 @@ struct rage_reg_rule {
     uint32_t forbid;      /* value bits a client may not set */
 };
 
-/* Derived from the registers the emission core and the register header define for drawing (Phase 1 list; the measured 45-register
- * audit of Nov 20 was never saved, so this is rebuilt from source and re-audited in Phase 3 by the kext's own counters). */
+/* User-writable registers.  Everything not listed is refused (display, clocks, bus control, bus-master, engine addresses, scissor, 2D triggers). */
 static const struct rage_reg_rule rage_reg_rules[] = {
-    { 0x0240, 0x02fc, RAGE_ADDR_NONE,      0 },            /* vertex setup block */
-    { 0x0300, 0x0300, RAGE_ADDR_NONE,      0 },            /* ONE_OVER_AREA_UC */
-    { 0x0304, 0x0304, RAGE_ADDR_NONE,      0 },            /* SETUP_CNTL */
-    { 0x0500, 0x0500, RAGE_ADDR_OFF_PITCH, 0 },            /* DST_OFF_PITCH */
-    { 0x050c, 0x0518, RAGE_ADDR_NONE,      0 },            /* DST_Y_X .. DST_HEIGHT_WIDTH */
-    { 0x0548, 0x0548, RAGE_ADDR_OFF_PITCH, 0 },            /* Z_OFF_PITCH */
+    /* Phase 3 / E1 (hardware-proven containment, design 11.11-11.12): the KERNEL owns everything that decides WHERE the engine writes - destination,
+     * Z and source surfaces (OFF_PITCH), texture bases, the scissor, DP_PIX_WIDTH, and the 2D rectangle/blit registers and triggers.  A client
+     * stream carries only per-primitive state and vertices; the kernel prepends the scissor/target state and clamps to it. */
+    { 0x0240, 0x02fc, RAGE_ADDR_NONE,      0 },            /* vertex setup block (the draw itself; clipped by the kernel's scissor) */
+    { 0x0300, 0x0300, RAGE_ADDR_NONE,      0 },            /* ONE_OVER_AREA_UC (triangle trigger) */
+    { 0x0304, 0x0304, RAGE_ADDR_NONE,      0 },            /* SETUP_CNTL (no memory-addressing bits) */
     { 0x054c, 0x0550, RAGE_ADDR_NONE,      0 },            /* Z_CNTL, ALPHA_TST_CNTL */
-    { 0x0580, 0x0580, RAGE_ADDR_OFF_PITCH, 0 },            /* SRC_OFF_PITCH */
-    { 0x058c, 0x0590, RAGE_ADDR_NONE,      0 },            /* SRC_Y_X, SRC_WIDTH1 */
-    { 0x05b4, 0x05b4, RAGE_ADDR_NONE,      0x00000f00u },  /* SRC_CNTL: bus-master bits 8..11 are the kernel's */
-    { 0x05c0, 0x05e8, RAGE_ADDR_BYTES,     0 },            /* TEX_0_OFF .. TEX_10_OFF (raw byte offsets) */
     { 0x05fc, 0x05fc, RAGE_ADDR_NONE,      0 },            /* SCALE_3D_CNTL */
-    { 0x0600, 0x063c, RAGE_ADDR_NONE,      0 },            /* HOST_DATA0..15 */
     { 0x0680, 0x0684, RAGE_ADDR_NONE,      0 },            /* PAT_REG0/1 */
-    { 0x06a8, 0x06a8, RAGE_ADDR_NONE,      0 },            /* SC_LEFT_RIGHT */
-    { 0x06b4, 0x06b4, RAGE_ADDR_NONE,      0 },            /* SC_TOP_BOTTOM */
-    { 0x06c4, 0x06d8, RAGE_ADDR_NONE,      0 },            /* DP_FRGD_CLR .. DP_SRC */
-    { 0x06e8, 0x06ec, RAGE_ADDR_NONE,      0 },            /* DST_X_Y, DST_WIDTH_HEIGHT */
+    { 0x06c4, 0x06cc, RAGE_ADDR_NONE,      0 },            /* DP_FRGD_CLR, DP_BKGD_CLR, DP_WRITE_MASK (0x6d0 DP_PIX_WIDTH is the kernel's) */
+    { 0x06d4, 0x06d8, RAGE_ADDR_NONE,      0 },            /* DP_MIX, DP_SRC */
     { 0x0708, 0x0708, RAGE_ADDR_NONE,      0 },            /* CLR_CMP_CNTL */
-    { 0x0730, 0x0730, RAGE_ADDR_NONE,      0 },            /* GUI_TRAJ_CNTL */
     { 0x0770, 0x0774, RAGE_ADDR_NONE,      0 },            /* TEX_SIZE_PITCH, TEX_CNTL */
-    { 0x0778, 0x0778, RAGE_ADDR_BYTES,     0 },            /* SECONDARY_TEX_OFF */
 };
 #define RAGE_NREG_RULES ((uint32_t)(sizeof rage_reg_rules / sizeof rage_reg_rules[0]))
 
