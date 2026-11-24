@@ -6,6 +6,8 @@
 #include <IOKit/IOLib.h>
 #include <libkern/OSByteOrder.h>
 #include <ppc/proc_reg.h>      /* eieio */
+#include <kern/clock.h>
+#include "RageLTLogClient.h"
 
 #define super IOService
 OSDefineMetaClassAndStructors(RageLTDevice, IOService)
@@ -28,11 +30,19 @@ bool RageLTDevice::start(IOService *provider)
 
     fLock = IOLockAlloc();
     if (!fLock) return false;
+#if RAGE_FEAT_PANIC_LOG
+    fLog = (struct rage_log *)IOMalloc(sizeof(struct rage_log));
+    fLogLock = IOSimpleLockAlloc();
+    if (!fLog || !fLogLock) { LOG("no memory for the event ring\n"); return false; }
+    rage_log_init(fLog);
+#endif
     rage_vram_init(&fVram);
     fNextOwner = 1;
     fEngineLive = false;
     fRefused = 0;
 
+    logEvent(RAGE_EV_START, 0, RAGE_FEATURE_BITS, 0, 0, 0, 0);
+    setProperty("RageLTFeatures", (unsigned long long)RAGE_FEATURE_BITS, 32);
     LOG("attached (skeleton, dormant): BAR0 %lu MB, engine off, no register access\n", (unsigned long)(fMap->getLength() >> 20));
     registerService();
     return true;
@@ -41,6 +51,7 @@ bool RageLTDevice::start(IOService *provider)
 void RageLTDevice::stop(IOService *provider)
 {
     fEngineLive = false;
+    logEvent(RAGE_EV_STOP, 0, 0, 0, 0, 0, 0);
     super::stop(provider);
 }
 
@@ -49,6 +60,10 @@ void RageLTDevice::free(void)
     if (fMap) { fMap->release(); fMap = 0; }
     if (fFB)  { fFB->release();  fFB = 0; }
     if (fLock) { IOLockFree(fLock); fLock = 0; }
+#if RAGE_FEAT_PANIC_LOG
+    if (fLogLock) { IOSimpleLockFree(fLogLock); fLogLock = 0; }
+    if (fLog) { IOFree(fLog, sizeof(struct rage_log)); fLog = 0; }
+#endif
     super::free();
 }
 
@@ -59,14 +74,17 @@ uint32_t RageLTDevice::newOwner(void)
     o = fNextOwner++;
     if (fNextOwner == 0) fNextOwner = 1;          /* 0 is the reserved owner */
     IOLockUnlock(fLock);
+    logEvent(RAGE_EV_OWNER_NEW, o, 0, 0, 0, 0, 0);
     return o;
 }
 
 void RageLTDevice::releaseOwner(uint32_t owner)
 {
+    uint32_t n;
     IOLockLock(fLock);
-    (void)rage_vram_free_owner(&fVram, owner);
+    n = rage_vram_free_owner(&fVram, owner);
     IOLockUnlock(fLock);
+    logEvent(RAGE_EV_OWNER_FREE, owner, n, 0, 0, 0, 0);
 }
 
 IOReturn RageLTDevice::vramAlloc(uint32_t owner, uint32_t length, uint32_t align, uint32_t *offset)
@@ -75,6 +93,7 @@ IOReturn RageLTDevice::vramAlloc(uint32_t owner, uint32_t length, uint32_t align
     IOLockLock(fLock);
     rc = rage_vram_alloc(&fVram, length, align, owner, offset);
     IOLockUnlock(fLock);
+    logEvent(RAGE_EV_VRAM_ALLOC, owner, length, align, rc ? 0xffffffffu : *offset, rc ? 1u : 0u, 0);
     return rc ? kIOReturnNoSpace : kIOReturnSuccess;
 }
 
@@ -84,14 +103,20 @@ IOReturn RageLTDevice::vramFree(uint32_t owner, uint32_t offset)
     IOLockLock(fLock);
     rc = rage_vram_free(&fVram, offset, owner);
     IOLockUnlock(fLock);
+    logEvent(RAGE_EV_VRAM_FREE, owner, offset, rc ? 1u : 0u, 0, 0, 0);
     return rc ? kIOReturnBadArgument : kIOReturnSuccess;
 }
 
 IOReturn RageLTDevice::submitBatch(const uint32_t *pairs, uint32_t npairs)
 {
     uint32_t i;
-    if (!rage_batch_ok(pairs, npairs)) { fRefused++; return kIOReturnBadArgument; }   /* whole batch dropped */
+    if (!rage_batch_ok(pairs, npairs)) {                                               /* whole batch dropped */
+        fRefused++;
+        logEvent(RAGE_EV_BATCH_REFUSED, 0, npairs, pairs ? pairs[0] : 0, pairs ? pairs[1] : 0, fRefused, 0);
+        return kIOReturnBadArgument;
+    }
     if (!fEngineLive) return kIOReturnNotReady;                                        /* dormant until a later phase enables it */
+    logEvent(RAGE_EV_BATCH, 0, npairs, pairs[0], pairs[1], 0, 0);
     IOLockLock(fLock);
     for (i = 0; i < npairs; i++) {
         OSWriteLittleInt32((void *)fRegs, pairs[2 * i], pairs[2 * i + 1]);
@@ -100,3 +125,56 @@ IOReturn RageLTDevice::submitBatch(const uint32_t *pairs, uint32_t npairs)
     IOLockUnlock(fLock);
     return kIOReturnSuccess;
 }
+
+/* ---- RAGE_FEAT_PANIC_LOG ---- */
+#if RAGE_FEAT_PANIC_LOG
+void RageLTDevice::logEvent(uint32_t id, uint32_t owner, uint32_t a0, uint32_t a1, uint32_t a2, uint32_t a3, uint32_t a4)
+{
+    uint32_t sec = 0, usec = 0; IOInterruptState s;
+    if (!fLog || !fLogLock) return;
+    clock_get_system_microtime(&sec, &usec);
+    s = IOSimpleLockLockDisableInterrupt(fLogLock);
+    rage_log_put(fLog, sec * 1000u + usec / 1000u, id, owner, a0, a1, a2, a3, a4);
+    IOSimpleLockUnlockEnableInterrupt(fLogLock, s);
+}
+
+IOReturn RageLTDevice::logInfo(uint32_t *head, uint32_t *capacity, uint32_t *refused, uint32_t *features)
+{
+    IOInterruptState s;
+    if (!fLog) return kIOReturnNotReady;
+    s = IOSimpleLockLockDisableInterrupt(fLogLock);
+    *head = fLog->head;
+    IOSimpleLockUnlockEnableInterrupt(fLogLock, s);
+    *capacity = RAGE_LOG_ENTRIES; *refused = fRefused; *features = RAGE_FEATURE_BITS;
+    return kIOReturnSuccess;
+}
+
+IOReturn RageLTDevice::logRead(uint32_t fromSeq, struct rage_log_read_out *out)
+{
+    IOInterruptState s; uint32_t i;
+    if (!fLog) return kIOReturnNotReady;
+    for (i = 0; i < sizeof *out / 4; i++) ((uint32_t *)out)[i] = 0;
+    s = IOSimpleLockLockDisableInterrupt(fLogLock);                 /* copies at most 31 x 32 bytes: short */
+    out->count = rage_log_read(fLog, fromSeq, out->ev, RAGE_LOG_READ_EVENTS, &out->lost);
+    out->head = fLog->head;
+    IOSimpleLockUnlockEnableInterrupt(fLogLock, s);
+    out->capacity = RAGE_LOG_ENTRIES;
+    return kIOReturnSuccess;
+}
+
+IOReturn RageLTDevice::newUserClient(task_t owningTask, void *securityID, UInt32 type, IOUserClient **handler)
+{
+    RageLTLogClient *c;
+    if (type != RAGE_CLIENT_LOG) return kIOReturnUnsupported;
+    c = new RageLTLogClient;
+    if (!c) return kIOReturnNoMemory;
+    if (!c->initWithTask(owningTask, securityID, type) || !c->attach(this) || !c->start(this)) { c->release(); return kIOReturnError; }
+    *handler = c;
+    return kIOReturnSuccess;
+}
+#else
+void RageLTDevice::logEvent(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t) {}
+IOReturn RageLTDevice::logInfo(uint32_t *, uint32_t *, uint32_t *, uint32_t *) { return kIOReturnUnsupported; }
+IOReturn RageLTDevice::logRead(uint32_t, struct rage_log_read_out *) { return kIOReturnUnsupported; }
+IOReturn RageLTDevice::newUserClient(task_t, void *, UInt32, IOUserClient **) { return kIOReturnUnsupported; }
+#endif

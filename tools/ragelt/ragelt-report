@@ -1,0 +1,22 @@
+#!/bin/sh
+# ragelt-report - gather what a bug report needs into ONE text file.  Run on the machine with the problem, as root if possible:
+#   sudo sh ragelt-report [OUTFILE]            (default: ./ragelt-report-YYYYMMDD-HHMMSS.txt)
+# Attach the file to the GitHub issue.  It contains no personal data beyond the machine's hardware and the driver's own log.
+OUT=${1:-./ragelt-report-$(date +%Y%m%d-%H%M%S).txt}
+HERE=$(dirname "$0")
+RAGELT=${RAGELT:-$HERE/ragelt}
+sec() { printf '\n===== %s =====\n' "$1"; }
+{
+  echo "ragelt-report $(date)"
+  sec "system";        sw_vers 2>&1; uname -a; hostname | sed 's/.*/hostname: (omitted)/'; sysctl hw.model hw.ncpu hw.physmem hw.cpufrequency 2>&1
+  sec "kexts";         kextstat 2>&1 | grep -i -E "ATI|Rage|IOGraphics|IOPCI|Index" 
+  sec "driver features / ring state"; [ -x "$RAGELT" ] && "$RAGELT" info 2>&1 || echo "ragelt not built or driver not loaded"
+  sec "driver event ring (all events still held)"; [ -x "$RAGELT" ] && "$RAGELT" dump 2>&1
+  sec "ioreg (Rage / RageLT / framebuffer nodes)"
+  ioreg -l -w0 2>&1 | grep -i -E "RageLT|ATIRagePro|ATY,|IOAccelerator|IOFramebuffer|MEMSIZE|vendor-id|device-id" | head -80
+  sec "daemon log (last 200 lines)"; for f in /var/log/ratelt-driver.log /var/log/ragelt-driver.log; do [ -f "$f" ] && { echo "[$f]"; tail -200 "$f"; }; done
+  sec "panic.log (last panic, if any)"; for f in /Library/Logs/panic.log /Library/Logs/PanicReporter/*; do [ -f "$f" ] && { echo "[$f]"; tail -120 "$f"; }; done
+  sec "system.log (driver lines)"; grep -i -E "RageLT|ATIRagePro|Rage Pro|panic|kernel:.*ATY" /var/log/system.log 2>/dev/null | tail -100
+  sec "crash logs (GL apps, last 3 mentioning Rage)"; ls -t ~/Library/Logs/CrashReporter/*.crash.log /Library/Logs/CrashReporter/*.crash.log 2>/dev/null | head -3
+} > "$OUT" 2>&1
+echo "wrote $OUT ($(wc -c < "$OUT") bytes)"

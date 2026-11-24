@@ -14,11 +14,12 @@ KCXX := -static -mlong-branch -fno-rtti -fno-exceptions -fcheck-new -fno-builtin
 KCC  := -static -mlong-branch -fno-builtin $(KARCH) -O2 -Wall
 EXEC := ATIRageProLT
 BUNDLE := $(EXEC).kext
-OBJS := RageLTDevice.o kmod_glue.o
+OBJS := RageLTDevice.o RageLTLogClient.o kmod_glue.o
 
 .PHONY: syntax kext checkfp validate clean
 syntax:
 	$(CXX) -fsyntax-only $(KCXX) $(KDEF) $(KINC) RageLTDevice.cpp
+	$(CXX) -fsyntax-only $(KCXX) $(KDEF) $(KINC) RageLTLogClient.cpp
 %.o: %.cpp
 	$(CXX) -c $(KCXX) $(KDEF) $(KINC) $< -o $@
 kmod_glue.o: kmod_glue.c

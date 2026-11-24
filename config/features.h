@@ -33,6 +33,11 @@
 #define RAGE_DEBUG_TRACE      0   /* verbose, fsync'd trace; off in release                                        */
 #endif
 
+/* feature bits as reported by the kext (values in common/rage_abi.h) */
+#define RAGE_FEATURE_BITS ((RAGE_FEAT_PANIC_LOG ? 0x01u : 0u) | (RAGE_FEAT_2D_GA ? 0x02u : 0u) | (RAGE_FEAT_SLEEPWAKE ? 0x04u : 0u) | \
+                           (RAGE_FEAT_DMA ? 0x08u : 0u) | (RAGE_FEAT_OVERLAY ? 0x10u : 0u) | (RAGE_FEAT_SCALER ? 0x20u : 0u) | \
+                           (RAGE_FEAT_DVD ? 0x40u : 0u) | (RAGE_FEAT_FS_SCALE ? 0x80u : 0u))
+
 /* The FPU is never used in the kernel (design 2). */
 #define RAGE_KERNEL_NO_FP 1
 
