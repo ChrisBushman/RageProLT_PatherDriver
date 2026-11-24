@@ -187,3 +187,35 @@ Any live G4 run follows the standing rules: explicit safe arguments, never `mach
 | 4 | G4 acceptance | Four apps pass; soak and process-cycle soak pass. |
 | 5 | 2D GA, sleep/wake, overlay, scaler, DVD | Each behind its flag; G4-testable parts tested, the rest listed for the contributor. |
 | 6 | Installer/revert/checklist/issue template | Pushed to `standalone-driver`. |
+
+## 11. Phase 0 addendum (2026-11-24, after user review)
+
+### 11.1 Decisions from review
+- **2D acceleration is always on** (`RAGE_FEAT_2D_GA` is not a user-facing off switch; software 2D is not acceptable). Resolves R3.
+- Overlay, scaler and DVD scope is decided from ATI's Win98 driver (4.13.1.2655), see `win98-*.md` in this directory.
+- Path A / Path B code is deleted at the start of Phase 1; only the new driver remains.
+
+### 11.2 Stock kext inventory (static, from the stock `ATIRagePro.kext` md5 8fc97891 and `ATIRageProGA.plugin`, pulled read-only from the G4)
+- Personality: `IOClass ATIRagePro`, `IOProviderClass IOPCIDevice`, `IOMatchCategory IOAccelerator`, `IOPCIMatch` = 0x4c491002 0x4c471002 0x47491002 0x47501002 0x4c4e1002 0x47561002, `IOGLBundleName ATIRageProGLDriver`, `IOCFPlugInTypes ACCF0000-0000-0000-0000-000a2789904e -> ATIRageProGA.plugin`. Libraries: IOGraphicsFamily, IONDRVSupport, IOPCIFamily. **O1 answered in outline; O2 answered:** `IOAccelerator` is imported from IOGraphicsFamily (`__ZN13IOAccelerator10gMetaClassE`, `__ZTV13IOAccelerator`), so a third-party kext can subclass it. Our kext can reuse this personality under its own bundle id with the stock kext set aside.
+- Stock user clients: surface (type 0, 16 selectors), GL context (type 1, 15), 2D context (type 2, **16 selectors**): 0 set_surface, 1 get_config, 2 get_surface_info, 3 swap_surface, 4 scale_surface, 5 lock_memory, 6 unlock_memory, 7 finish, 8 declare_image, 9 create_image, 10 create_transfer, 11 delete_image, 12 wait_image, 13 set_surface_paging_options, 14 set_surface_vsync_options, 15 set_macrovision (scalar/struct counts in the kext's `methodDescs` at 0x17c68). This is the ABI `ATIRageProGA` expects; `RAGE_FEAT_2D_GA` must reproduce it.
+- **O3 answered:** stock has sleep/wake hooks (`IOATIRProAccelerator::system_will_sleep` / `system_did_wake`), AGP code (unused on this PCI chip), a polled timestamp/fence (`waitForTimeStamp`, `sleepForTimeStamp`; no hardware interrupt handler), `set_scaling` (a size record only) and `set_macrovision`. **Stock has no video overlay, no front-end scaler use, no DVD assist.** Those three are new ("stock+") features.
+- Display (hardware cursor, gamma, DDC, DPMS, mode set) lives in the NDRV framebuffer (`ATY,264LTPro`), not in the accelerator, so we do not have to reproduce it.
+
+### 11.3 Byte order (O4) resolved from documents; no live test needed
+ATI's register reference (RRG-G03300, MEM_CNTL) documents `UPPER_APER_ENDIAN` (bits 27:26): the 8-16 MB half of BAR0 is a byte-swapping alias of the first 8 MB (00 none, 01 big-endian 16 bpp swapping, 10 big-endian 32 bpp swapping). The existing `RageStubFB` already sets it to 01 and WindowServer draws through it. Design: the framebuffer driver (NDRV on the Lombard) owns that setting and changes it with colour depth, so **we never touch it**. The kernel accesses VRAM through the lower (unswapped) view and uses byte-reversed loads and stores (`lwbrx`/`stwbrx`/`lhbrx`/`sthbrx`) for 32- and 16-bit data. The G4 shows the BAR0 mapping is 0x1000000 bytes, so the alias is reachable if ever needed. This removes the texel byte-order dependence on the Lombard's framebuffer.
+
+### 11.4 Full-screen at 32 bpp (bug L4): options after the Win98 review
+| Option | Basis | G4 can verify? |
+|---|---|---|
+| A. Textured-quad upscale at present (render small, stretch to scanout with the 3D engine, bilinear) | Existing, hardware-verified textured path; measured 35-38 Mpix/s (README audit), so a 1024x768 stretch costs about 21 ms | Yes (VRAM readback), but see 11.5 |
+| B. Overlay scaler (display-side upscale, no engine time) | Win98 HAL: RGB565/xRGB8888 sources accepted; recipe in `win98-overlay-scaler.md`; needs a display to see | **No** (no display on the G4 Rage); register read-back only |
+| C. `FS_SHRINK` (smaller surface, no scaling) | Pre-import code | Partly |
+
+Overlay limits to remember: one overlay, source width max 768 (720 on later revisions) which fits 640x480 but not 1024-wide sources; key colour/blending semantics partly NOT ESTABLISHED. The overlay is also what a video/DVD path would use, so it is worth building behind `RAGE_FEAT_OVERLAY` either way.
+Plan: build A first (testable here), B as the preferred path for the Lombard once confirmed by a contributor, C as the fallback.
+
+### 11.5 G4 experiment status (not finished)
+- Rig state found: the chip is initialised at boot by `RageStubFB`'s in-kernel replay (the card is only in 640x480 15 bpp; 1024x768 would need the stub extended, and there is no monitor anyway). `RageProInit` skips because a stale `init.inprogress` marker exists from Nov 22; harmless while the stub does the init.
+- Stack loaded with `bringup.sh` (patched `ATIRagePro` + `Mach64Accelerator`). `tools/mach64_regpeek` (new, read-only) confirms BUS_CNTL 0x7b330101 (bit 27 set), engine idle.
+- New suite check `upscale` (bilinear 160x120 -> 256x192, NPOT and padded-POT sources, error vs a software reference, throughput) is written, but **no valid measurement yet**: the suite built from the imported SonicR plugin renders nothing on this rig (even `gouraud` fails) because that plugin expects the SonicR-patched `ATIRagePro` (DMA/texture handlers) while the G4 has the older patch chain loaded and `ATIRagePro` cannot be unloaded without a reboot. The earlier suite binary (built from my Nov 20 plugin, whose sources are not in the repo) still passes `gouraud`. The numbers printed by the first run (24.6 Mpix/s) are from a run in which nothing was drawn and are **not evidence**.
+- Unblocking options: (1) locate the Nov 20 plugin sources (G5 search in progress), (2) rebuild SonicR's patched kext chain and load it after a G4 reboot (not allowed unless approved), (3) measure in the new driver's own harness once Phase 1 exists.

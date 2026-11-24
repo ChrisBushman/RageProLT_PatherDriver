@@ -26,6 +26,31 @@
 #define GLI_POINT_SIZE_OFF 0x6630
 #define GLI_LINE_WIDTH_OFF 0x6394
 
+
+/* The Nov 20 plugin exported a few test hooks that the imported SonicR plugin does not have.  Build with -DSUITE_SHIMS against such a plugin:
+ * the checks that need the hooks (regaudit, DMA counters, soak watch) then report nothing instead of failing to link. */
+#ifdef SUITE_SHIMS
+#include <stdarg.h>
+/* each shim can be switched off with -DSUITE_HAVE_<NAME> when the plugin under test provides the hook */
+#ifndef SUITE_HAVE_REGSEEN
+unsigned m64_reg_seen[64];
+#endif
+#ifndef SUITE_HAVE_DMASTATS
+void mach64_dma_stats(unsigned long *a, unsigned long *b, unsigned long *c) { *a = *b = *c = 0; }
+#endif
+#ifndef SUITE_HAVE_LOG
+int gld_log(const char *f, ...) { (void)f; return 0; }
+#endif
+#ifndef SUITE_HAVE_WATCH
+void m64_watch(gld_context *c, unsigned *a, unsigned *b, unsigned *d, unsigned *e) { (void)c; *a = *b = *d = *e = 0; }
+#endif
+#ifndef SUITE_HAVE_TIMING
+void mach64_dma_timing(double *a, double *b, double *c) { *a = *b = *c = 0; }
+void mach64_vdma_timing(double *a, double *b, unsigned long *c) { *a = *b = 0; *c = 0; }
+void mach64_vdma_split(double *a, double *b) { *a = *b = 0; }
+#endif
+#endif
+
 static unsigned char *FB;
 static unsigned vrd(unsigned o) { return OSReadLittleInt32((void *)FB, o); }
 static void vwr(unsigned o, unsigned v) { OSWriteLittleInt32((void *)FB, o, v); }
@@ -725,6 +750,62 @@ static void t_texperf(void)
         free(big); free(bl); free(b16); }
     CHECK("texperf: measured", 1);
     free(rgba); free(lum); free(s16);
+}
+
+
+/* Full-screen upscale feasibility (standalone-driver design, bug L4): can the textured-quad path stretch a low-resolution frame to a larger
+ * destination with bilinear filtering, correctly and fast enough?  Source 160x120 (non-power-of-two) -> 256x192 (1.6x), and the same
+ * content padded into a 256x128 power-of-two texture with sub-rectangle texcoords.  Compared against a software bilinear reference. */
+static void upscale_ref(const unsigned char *src, int sw, int sh, int dw, int dh, int x, int y, int *r, int *g, int *b)
+{
+    int c[3], k, x0, y0, x1, y1; double u = ((x + 0.5) * sw) / dw - 0.5, v = ((y + 0.5) * sh) / dh - 0.5, fx, fy;
+    if (u < 0) u = 0; if (v < 0) v = 0; if (u > sw - 1) u = sw - 1; if (v > sh - 1) v = sh - 1;
+    x0 = (int)u; y0 = (int)v; x1 = x0 + 1 < sw ? x0 + 1 : x0; y1 = y0 + 1 < sh ? y0 + 1 : y0; fx = u - x0; fy = v - y0;
+    for (k = 0; k < 3; k++)
+        c[k] = (int)(src[(y0 * sw + x0) * 4 + k] * (1 - fx) * (1 - fy) + src[(y0 * sw + x1) * 4 + k] * fx * (1 - fy) +
+                     src[(y1 * sw + x0) * 4 + k] * (1 - fx) * fy + src[(y1 * sw + x1) * 4 + k] * fx * fy + 0.5);
+    *r = c[0]; *g = c[1]; *b = c[2];
+}
+static void upscale_case(const char *label, void *tex, float s1, float t1, const unsigned char *src, int sw, int sh, int dw, int dh)
+{
+    int x, y, n = 0, maxe = 0, big = 0, r, g, b, e; double sum = 0, t0, rate; int f, k;
+    default_state(); bindtex(tex, GL_REPLACE_ENV); sync(); clear_rt(0);
+    { unsigned char *vb = VB(1); free(vb); }
+    /* texcoords 0..s1 / 0..t1 across the destination; LINEAR min+mag set by mktex caller */
+    tquad(0, 0, dw, dh, 0.0f, 0.0f, s1, t1, 0xffffffffu);
+    for (y = 1; y < dh - 1; y++) for (x = 1; x < dw - 1; x++) {
+        unsigned c = px(x, y); upscale_ref(src, sw, sh, dw, dh, x, y, &r, &g, &b);
+        e = abs(ch(c, 16) - r); if (abs(ch(c, 8) - g) > e) e = abs(ch(c, 8) - g); if (abs(ch(c, 0) - b) > e) e = abs(ch(c, 0) - b);
+        sum += e; n++; if (e > maxe) maxe = e; if (e > 24) big++;
+    }
+    printf("    (%s: %dx%d -> %dx%d  mean |err| %.2f, max %d, %d of %d pixels off by >24)\n", label, sw, sh, dw, dh, sum / n, maxe, big, n);
+    CHECK(label, sum / n < 8.0 && big * 50 < n);
+    g_endframe = 0; t0 = now_s(); f = 40;
+    for (k = 0; k < f; k++) { int q; for (q = 0; q < 6; q++) tquad(0, 0, dw, dh, 0.0f, 0.0f, s1, t1, 0xffffffffu); endframe(); }
+    g_endframe = 1; rate = (double)f * 6.0 * dw * dh / (now_s() - t0) / 1e6;
+    printf("    (%s: %.2f Mpix/s of destination => a 1024x768 frame would take %.1f ms)\n", label, rate, 1024.0 * 768.0 / rate / 1000.0);
+}
+static void t_upscale(void)
+{
+    enum { SW = 160, SH = 120, DW = 256, DH = 192 };
+    unsigned char *src = malloc(SW * SH * 4), *pad = calloc(256 * 128, 4); int x, y; void *t;
+    for (y = 0; y < SH; y++) for (x = 0; x < SW; x++) {
+        unsigned char *p = src + (y * SW + x) * 4;
+        p[0] = (unsigned char)(x * 255 / (SW - 1)); p[1] = (unsigned char)(y * 255 / (SH - 1));
+        p[2] = (((x / 20) + (y / 20)) & 1) ? 220 : 30; p[3] = 255;                  /* smooth gradients plus hard-edged 20-px checks */
+        memcpy(pad + (y * 256 + x) * 4, p, 4);
+    }
+    t = mktex_typed(SW, SH, 0x1908, 0x1401, src);
+    { unsigned char *st = *(unsigned char **)((unsigned char *)t + 0x30); *(uint16_t *)(st + 0x16) = 0x2601; *(uint16_t *)(st + 0x18) = 0x2601;
+      *(uint32_t *)(st + 0x10) = (GL_CLAMP_E << 16) | GL_CLAMP_E; }
+    upscale_case("upscale NPOT 160x120 texture, bilinear", t, 1.0f, 1.0f, src, SW, SH, DW, DH);
+    texreset(); mach64_texture_deleted(t);
+    t = mktex_typed(256, 128, 0x1908, 0x1401, pad);
+    { unsigned char *st = *(unsigned char **)((unsigned char *)t + 0x30); *(uint16_t *)(st + 0x16) = 0x2601; *(uint16_t *)(st + 0x18) = 0x2601;
+      *(uint32_t *)(st + 0x10) = (GL_CLAMP_E << 16) | GL_CLAMP_E; }
+    upscale_case("upscale 160x120 inside 256x128 POT texture (sub-rect texcoords)", t, (float)SW / 256.0f, (float)SH / 128.0f, src, SW, SH, DW, DH);
+    texreset(); mach64_texture_deleted(t);
+    free(src); free(pad);
 }
 
 /* Bus-mastered texture upload (MACH64_DMA_UPLOAD): textures large enough to go through the system transfer, drawn and checked; counters must move */
@@ -1664,7 +1745,7 @@ static void t_dmabench(void)
 }
 static const struct { const char *name; void (*fn)(void); } TESTS[] = {
     {"gouraud", t_gouraud}, {"flat", t_flat}, {"colormask", t_colormask}, {"depth", t_depth}, {"blend", t_blend},
-    {"alphatest", t_alphatest}, {"prims", t_prims}, {"clear", t_clear}, {"stress", t_stress}, {"dbg", t_dbg}, {"guards", t_guards}, {"prims2", t_prims2}, {"fog", t_fog}, {"stipple", t_stipple}, {"logicop", t_logicop}, {"tex_replace", t_tex_replace}, {"texdbg", t_texdbg}, {"multitex", t_multitex}, {"mtdbg", t_mtdbg}, {"seq", t_seq}, {"heavy", t_heavy}, {"dmabench", t_dmabench}, {"present", t_present}, {"drainswitch", t_drainswitch}, {"dmaupload", t_dmaupload}, {"texperf", t_texperf}, {"dstalpha", t_dstalpha}, {"uploadbw", t_uploadbw}, {"texfmt8", t_texfmt8}, {"cbpp16", t_cbpp16}, {"texfmt", t_texfmt}, {"texfmt_fallback", t_texfmt_fallback}, {"texfmt_mt", t_texfmt_mt}, {"specular", t_specular}, {"multitex_min", t_multitex_min}, {"tex_alpha", t_tex_alpha}, {"tex_wrap", t_tex_wrap}, {"tex_filter", t_tex_filter}, {"tex_alpha_edge", t_tex_alpha_edge}, {"tex_alpha_decal_probe", t_tex_alpha_decal_probe}, {"tex_alpha_bilinear", t_tex_alpha_bilinear}, {"tex_churn", t_tex_churn}, {"tex_highptr", t_tex_highptr}, {"tex_mip", t_tex_mip}, {"tex_mip_nonsq", t_tex_mip_nonsq}, {"tex_bit8", t_tex_bit8}, {"tex_lodbias", t_tex_lodbias}, {"tex_mip_prims", t_tex_mip_prims}, {"tex_mip_fog", t_tex_mip_fog}, {"tex_mip_gouraud", t_tex_mip_gouraud}, {"tex_hwmip", t_tex_hwmip}, {"tex_minlin", t_tex_minlin}, {"volume", t_volume}, {"atdbg", t_atdbg}, {"multictx", t_multictx}, {"soak", t_soak}, {"regaudit", t_regaudit},
+    {"alphatest", t_alphatest}, {"prims", t_prims}, {"clear", t_clear}, {"stress", t_stress}, {"dbg", t_dbg}, {"guards", t_guards}, {"prims2", t_prims2}, {"fog", t_fog}, {"stipple", t_stipple}, {"logicop", t_logicop}, {"tex_replace", t_tex_replace}, {"texdbg", t_texdbg}, {"multitex", t_multitex}, {"mtdbg", t_mtdbg}, {"seq", t_seq}, {"heavy", t_heavy}, {"dmabench", t_dmabench}, {"present", t_present}, {"drainswitch", t_drainswitch}, {"dmaupload", t_dmaupload}, {"texperf", t_texperf}, {"upscale", t_upscale}, {"dstalpha", t_dstalpha}, {"uploadbw", t_uploadbw}, {"texfmt8", t_texfmt8}, {"cbpp16", t_cbpp16}, {"texfmt", t_texfmt}, {"texfmt_fallback", t_texfmt_fallback}, {"texfmt_mt", t_texfmt_mt}, {"specular", t_specular}, {"multitex_min", t_multitex_min}, {"tex_alpha", t_tex_alpha}, {"tex_wrap", t_tex_wrap}, {"tex_filter", t_tex_filter}, {"tex_alpha_edge", t_tex_alpha_edge}, {"tex_alpha_decal_probe", t_tex_alpha_decal_probe}, {"tex_alpha_bilinear", t_tex_alpha_bilinear}, {"tex_churn", t_tex_churn}, {"tex_highptr", t_tex_highptr}, {"tex_mip", t_tex_mip}, {"tex_mip_nonsq", t_tex_mip_nonsq}, {"tex_bit8", t_tex_bit8}, {"tex_lodbias", t_tex_lodbias}, {"tex_mip_prims", t_tex_mip_prims}, {"tex_mip_fog", t_tex_mip_fog}, {"tex_mip_gouraud", t_tex_mip_gouraud}, {"tex_hwmip", t_tex_hwmip}, {"tex_minlin", t_tex_minlin}, {"volume", t_volume}, {"atdbg", t_atdbg}, {"multictx", t_multictx}, {"soak", t_soak}, {"regaudit", t_regaudit},
 };
 
 int main(int argc, char **argv)
