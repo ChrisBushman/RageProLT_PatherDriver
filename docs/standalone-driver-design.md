@@ -244,3 +244,17 @@ Run: `suite2` built from the SonicR plugin (`-DSUITE_SHIMS -DSUITE_FENCE -DSUITE
 - 1 failure (`register audit`): the stand-in `m64_reg_seen` shim records nothing. A harness artifact.
 
 **Design consequence (new driver).** The kernel driver owns VRAM, so it can hand the user-space bundle a texture heap that is provably clear of the scanout and the cursor block, in fullscreen as well as windowed. Fullscreen texturing is therefore a requirement for us, not an optional extra, and the textured upscale (L4 option A) cannot be validated headless on this plugin. The numbers in 11.5 (older plugin) remain the only measurement of it.
+
+### 11.8 Phase 1 status (2026-11-24)
+**Done**
+- Path A and Path B deleted (commit 55677a5). Kept: `rig/stubfb` (the G4's boot-time chip init, not part of the product), driver-agnostic GL test apps in `tools/`, `common/`, the old suite as `tests/suite-reference/` (not built), bug history in `docs/history/`.
+- `config/features.h` (all flags of 3.2).
+- `common/rage_guard.h`: usable-VRAM span check, register allow-list with per-register forbidden bits (bus-master bits of `SRC_CNTL`), base-address checks on every `*_OFF_PITCH` / `TEX_*_OFF` register, all-or-nothing batch validation. `common/rage_vram.h`: the single VRAM allocator (sorted extent table, owner-tagged, best-fit, reservations that clients cannot free, release-by-owner for closed or crashed clients). No libc, no heap, no floating point.
+- `tests/guard_test.c`: 61 checks; mutation-tested (removing the SRC_CNTL mask, the span start check, the free-owner check or the alignment check each makes tests fail). Passes on Linux x86_64 and on the G4 (PPC, gcc 3.3).
+- `kext/`: `RageLTDevice` skeleton (attach, BAR0 uncached map, allocator, owner bookkeeping, validated `submitBatch`), built on the G4 with `-mcpu=750 -msoft-float`. **Makes no register read or write**; the write path exists but `fEngineLive` is false, so `submitBatch` returns "not ready" after validating. `make checkfp` passes and was shown to fail on a hardware-float object (`lfd`, `fmadd`, `fdivs`). `kextload -n` reports the bundle valid; it has not been loaded.
+
+**Provenance of the allow-list.** The measured 45-register audit of Nov 20 was not saved. The Phase 1 list is rebuilt from the registers `common/` defines for drawing (vertex block, setup, destination/source/Z/texture, scissor, DP_*, host data, `TEX_*`). It is re-audited in Phase 3 with the kext's own counters on a real run; anything the plugin legitimately writes that is missing will be refused loudly (refusal counter), not silently.
+
+**Open item E1 (extent tracking).** Address registers are checked for their base only. Before a trigger register is written the engine must also check the real extent (pitch x height, clamped by the scissor). This is required before `fEngineLive` can be turned on; it is the first task of the engine work.
+
+**Not started:** VRAM reservations for the scanout/cursor block (needs the chip initialised to read `CRTC_OFF_PITCH`), user clients, DMA ring, interrupts, panic log. **Exit of Phase 1 met:** builds for PPC, `checkfp` clean, host tests pass. The first G4 load is waiting for your OK.

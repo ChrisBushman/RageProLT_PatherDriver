@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple Computer//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- ATIRageProLT.kext - standalone Rage LT Pro driver (docs/standalone-driver-design.md).  Phase 1 skeleton: attaches, maps, allocates
+     VRAM bookkeeping; touches no registers. -->
+<plist version="1.0">
+<dict>
+  <key>CFBundleIdentifier</key>          <string>com.local.ATIRageProLT</string>
+  <key>CFBundleName</key>                <string>ATIRageProLT</string>
+  <key>CFBundleExecutable</key>          <string>ATIRageProLT</string>
+  <key>CFBundleVersion</key>             <string>0.1</string>
+  <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
+  <key>CFBundleSignature</key>           <string>????</string>
+  <key>CFBundlePackageType</key>         <string>KEXT</string>
+  <key>OSBundleLibraries</key>
+  <dict>
+    <key>com.apple.kernel.iokit</key>       <string>1.0.0b1</string>
+    <key>com.apple.kernel.mach</key>        <string>1.0.0b1</string>
+    <key>com.apple.iokit.IOPCIFamily</key>  <string>1.0.0b1</string>
+    <key>com.apple.iokit.IOGraphicsFamily</key> <string>1.0.0b1</string>
+  </dict>
+  <key>IOKitPersonalities</key>
+  <dict>
+    <key>ATIRageProLT</key>
+    <dict>
+      <key>CFBundleIdentifier</key>  <string>com.local.ATIRageProLT</string>
+      <key>IOClass</key>             <string>RageLTDevice</string>
+      <key>IOProviderClass</key>     <string>IOPCIDevice</string>
+      <!-- Rage LT Pro (verified 1002:4c49 rev 0xdc).  Only the ID verified on hardware; the other Rage Pro IDs stock lists are added in
+           Phase 5 once they can be tested. -->
+      <key>IOPCIMatch</key>          <string>0x4c491002</string>
+      <!-- A category distinct from stock's "IOAccelerator" lets this load NEXT TO the stock kext while developing.  The installer
+           (Phase 6) removes stock ATIRagePro, so the final system has exactly one accelerator. -->
+      <key>IOMatchCategory</key>     <string>RageLTAccelerator</string>
+      <key>IOProbeScore</key>        <integer>1000</integer>
+    </dict>
+  </dict>
+  <key>OSBundleRequired</key>        <string>Console</string>
+</dict>
+</plist>

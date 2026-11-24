@@ -1,63 +1,52 @@
-# RageProLT Panther Driver - build
+# RageProLT Panther driver - top-level build
 #
-# hosttest : builds/runs on THIS machine (x86_64/arm64) to verify the
-#            portable emission core.  This is what `make` builds by default.
+#   make            host tests (run on any machine: Linux, macOS, the G4)
+#   make hosttest   same
+#   make kext       build ATIRageProLT.kext - run on a Panther PPC host (the G4 rig); never loads anything
+#   make checkfp    kext + fail on any floating-point instruction (run on the Panther host)
 #
-# kext / gldriver : the real driver.  These CANNOT be built on a modern
-#            machine - they need a PowerPC + Mac OS X 10.3 toolchain and the
-#            10.3 IOKit / OpenGL private headers.  Targets are provided for
-#            documentation; see README.md "Building the real driver".
+# The kext needs the 10.3 Kernel framework and gcc 3.3, so it cannot be built on a modern machine; kext/Makefile documents the flags.
 
-# -W (not -Wextra) and -std=gnu99 keep this buildable on Panther's gcc 3.3
-# as well as modern clang.
-CC      ?= cc
-CFLAGS  ?= -O2 -Wall -W -std=gnu99
-COMMON   = common
+CC     ?= cc
+CFLAGS ?= -O2 -Wall -W -std=gnu99
+COMMON  = common
+B       = build
 
-.PHONY: all hosttest clean kext gldriver
+.PHONY: all hosttest clean kext checkfp features-check
 
 all: hosttest
 
-# ---- host-verifiable portable core ----------------------------------
-hosttest: build/test_triangle
-	./build/test_triangle
+hosttest: $(B)/test_triangle $(B)/guard_test $(B)/vram_span_test $(B)/cgl_attribs_test
+	./$(B)/test_triangle
+	./$(B)/guard_test
+	./$(B)/vram_span_test
+	./$(B)/cgl_attribs_test
 
-build/test_triangle: hosttest/test_triangle.c $(COMMON)/mach64_emit.c \
-                     $(COMMON)/mach64_emit.h $(COMMON)/mach64_regs.h
-	@mkdir -p build
+$(B)/test_triangle: hosttest/test_triangle.c $(COMMON)/mach64_emit.c $(COMMON)/mach64_emit.h $(COMMON)/mach64_regs.h
+	@mkdir -p $(B)
 	$(CC) $(CFLAGS) -I$(COMMON) -o $@ hosttest/test_triangle.c $(COMMON)/mach64_emit.c
 
-clean:
-	rm -rf build
+$(B)/guard_test: tests/guard_test.c $(COMMON)/rage_guard.h $(COMMON)/rage_vram.h $(COMMON)/rage_types.h $(COMMON)/mach64_regs.h
+	@mkdir -p $(B)
+	$(CC) $(CFLAGS) -I$(COMMON) -o $@ tests/guard_test.c
 
-# ---- push to / build on the Lombard (Panther PPC target) ------------
-# Modern rsync can't talk to Panther's rsync 2.6, so use a gnutar pipe.
-# COPYFILE_DISABLE + --format=gnutar avoid pax/AppleDouble cruft.
-LOMBARD ?= lombard
-REMOTE_DIR ?= RageProLT
+$(B)/vram_span_test: tests/vram_span_test.c $(COMMON)/mach64_regs.h
+	@mkdir -p $(B)
+	$(CC) $(CFLAGS) -I. -I$(COMMON) -o $@ tests/vram_span_test.c
 
-sync:
-	@COPYFILE_DISABLE=1 tar --format=gnutar -cf - \
-	  --exclude='./docs/pdfs' --exclude='./build' --exclude='./.git' \
-	  --exclude='./.DS_Store' --exclude='._*' . \
-	  | ssh $(LOMBARD) 'mkdir -p $(REMOTE_DIR) && tar xf - -C $(REMOTE_DIR)' \
-	  && echo "synced -> $(LOMBARD):$(REMOTE_DIR)"
+$(B)/cgl_attribs_test: tests/cgl_attribs_test.c $(COMMON)/cgl_attribs.h
+	@mkdir -p $(B)
+	$(CC) $(CFLAGS) -I. -I$(COMMON) -o $@ tests/cgl_attribs_test.c
 
-# push, then build+run the host smoke test on real PPC big-endian
-remote-hosttest: sync
-	ssh $(LOMBARD) 'cd $(REMOTE_DIR) && make'
-
-# ---- real driver (requires PPC / 10.3 SDK; see README) --------------
-PPC_SDK   ?= /Developer/SDKs/MacOSX10.3.9.sdk
-PPC_CC    ?= powerpc-apple-darwin7-gcc      # cross toolchain, not present here
+# Release builds must keep 2D acceleration on (software 2D is not acceptable).
+features-check:
+	@grep -q 'define RAGE_FEAT_2D_GA       1' config/features.h && echo "features-check: RAGE_FEAT_2D_GA default is on"
 
 kext:
-	@echo "kext build requires the 10.3 PPC toolchain + IOKit headers."
-	@echo "On a Panther build host:  cd kext && xcodebuild (or gcc -arch ppc"
-	@echo "  -isysroot $(PPC_SDK) -I.../IOKit -bundle ... Mach64GLUserClient.cpp)"
-	@false
+	$(MAKE) -C kext kext
+checkfp:
+	$(MAKE) -C kext checkfp
 
-gldriver:
-	@echo "gldriver bundle requires the 10.3 PPC toolchain + OpenGL private hdrs."
-	@echo "Build as a CFBundle exporting the gld* symbols (see gldriver/gld.h)."
-	@false
+clean:
+	rm -rf $(B)
+	-$(MAKE) -C kext clean
