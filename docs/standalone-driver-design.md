@@ -1,0 +1,189 @@
+# Standalone driver: design (Phase 0 draft)
+
+Status: **DRAFT for review. No hardware has been touched and no driver code has been written.**
+Branch `standalone-driver`, based on `sonicr-driver-import` (e0296f4). Date: 2026-11-24.
+
+## 1. Goal
+
+One new kernel extension, `ATIRageProLT.kext`, plus a rewritten GL bundle, that replace **everything** this repo and Apple use for the Rage LT Pro GL path today:
+
+| Replaced | Why |
+|---|---|
+| Apple `ATIRagePro.kext` (stock or binary-patched) | Patching it is fragile: arbitrary kernel read (sel 14 peek), sel 10 multiplexing, an Apple stack-descriptor bug that panicked ~10% of processes |
+| `Mach64Accelerator.kext` ("Path A") | Second accelerator on the same chip; kernel code was written around the patched Apple kext |
+| Path-A / Path-B code in `kext/`, `kext-patch/`, `install-*.sh`, the old `gldriver/` | Deleted on this branch at the start of Phase 1. History stays on `sonicr-driver-import`. |
+
+Product bar: **"stock+"**. Everything stock `ATIRagePro.kext` does for the Lombard (2D acceleration for Quartz, surfaces, swap, mode change, sleep/wake) keeps working, and the GL driver Apple never shipped is added.
+
+Kept: `common/` (register definitions, command emission, host-tested), the register recipes in `docs/re-notes/`, the GL feature logic in `gldriver/` (rewritten to the new ABI), the test suite in `tools/`.
+
+## 2. Constraints (user, Nov 24)
+
+1. **Target is the Lombard G3 (PPC 750, one core).**
+2. **Arithmetic order of preference:** integer; then lookup table plus interpolation; then fixed point; single-precision float only if the precision loss is too great. **Never `double`.** Kernel code uses no floating point at all (Mac OS X kernel code must not touch the FPU).
+3. **One CPU:** extra threads only for genuinely asynchronous waiting (interrupts, hardware events). No worker-thread rendering engine.
+4. **No Lombard access for me.** Another contributor tests builds and files issues. All Lombard-only features are built and unit-tested, never claimed verified from G4 results.
+5. **Optional features compile out** with build flags.
+6. **Test apps (on the G4 MDD):** Sonic R, Chess, Flurry, Atlantis.
+7. Attach alongside Apple's `ATY_*` framebuffer; do not take over display or modesets.
+
+### 2.1 How the no-double rule will be enforced
+
+- `-mcpu=750 -msoft-float` for the kext (no FP instructions at all, and a link-time/objdump check that none appear).
+- Plugin: `-mcpu=750 -fsingle-precision-constant -Wdouble-promotion -Wfloat-conversion`; a `make checkfp` target disassembles every object and fails on any double-precision instruction (`fadd`, `fmul`, `fdiv`, `fsub`, `fmadd`, `lfd`, `stfd`, `fcmpu` on doubles...), with an explicit allow-list for compiler-generated `lfd/stfd` 8-byte copies that the check can tell apart (to be worked out in Phase 1).
+- Current inventory of `double`/`float` in the code being carried over (counts of the words, not of operations): `gld_prims.c` float 76; `gld_render.c` double 9 / float 25; `gld_texture.c` double 3 / float 15; `gld_context.c` double 3; `gld_pixelformat.c` double 4; `gld_entry.c` double 1; `common/mach64_emit.c` double 2 / float 3. Each will be classified in Phase 3 (integer, LUT, fixed point, or single float) and the choice recorded.
+- The hardware itself wants IEEE single floats in three places (vertex `W = 1/w`, `ONE_OVER_AREA_UC = 1/area`, and S/T). Plan: GLEngine hands us single-float vertex data; we read the bits and produce those register values with integer code (reciprocal by table plus one Newton step in fixed point, then pack to IEEE single bits). Whether a hardware single-float divide is cheaper or more accurate than that is **measured** in Phase 3 before choosing.
+
+## 3. Architecture
+
+```
+ Quartz / WindowServer ---> ATIRageProGA.plugin ---(type 0/2 user clients)---+
+ GLEngine --> ATIRageProGLDriver.bundle (new) --(type 0/1 user clients)------+--> ATIRageProLT.kext (new)
+                                                                              |        |
+                                              ATY_* framebuffer (Apple) <-----+        v
+                                              owns display, modesets            Rage LT Pro (mach64)
+```
+
+### 3.1 Kernel classes (working names)
+
+| Class | Role |
+|---|---|
+| `RageLTDevice` | `IOService` matched on PCI `1002:4c49` (and the Rage Pro family IDs the stock kext lists); maps BAR0/BAR2; owns the chip: register access, init after ROM POST, engine reset, interrupt source. |
+| `RageLTVram` | Single VRAM allocator for surfaces, Z, textures, cursor reservation. Enforces the usable range `[0, 0x7FF800)` in one place. Replaces Apple's heap *and* the plugin's own texture heap. |
+| `RageLTEngine` | Command validation and submission. Takes `{reg,val}` batches from user space and writes them to the chip through an **allow-list** (the 45 registers measured in `memory-map.md` §4, plus additions needing review), never raw offsets. Owns FIFO throttling and idle. DMA ring behind `RAGE_FEAT_DMA`. |
+| `RageLTSurface` (user client, type 0) | Stock-compatible surface protocol (`set_id_mode`, `set_shape`, `surface_flush`, read/write lock). |
+| `RageLTGLContext` (user client, type 1) | Stock-compatible selectors 0-14 plus **dedicated** selectors replacing the hacks: `get_render_target`, `upload_texture`, `alloc_vram`, `free_vram`, `get_mode_gen`. |
+| `RageLT2DContext` (user client, type 2) | Stock-compatible 2D context for `ATIRageProGA.plugin` (`rProCopy`, `rProFill`, scanlines, surface lock/swap, beam position). Behind `RAGE_FEAT_2D_GA`. |
+| `RageLTPower` | Sleep/wake (`RAGE_FEAT_SLEEPWAKE`). |
+| `RageLTLog` | Diagnostics and panic record (`RAGE_FEAT_PANIC_LOG`), see §6. |
+| `RageLTOverlay` / `RageLTScaler` | Video overlay and scaler (`RAGE_FEAT_OVERLAY`, `RAGE_FEAT_SCALER`). |
+| `RageLTDVD` | Only if Phase 0 confirms stock has nothing (`RAGE_FEAT_DVD`). |
+
+Class names and the selector/type numbers of the stock-compatible clients **must equal** what `ATIRageProGA.plugin` and GLEngine look up. Open item O1 below.
+
+### 3.2 Build-time features
+
+One header `config/features.h` and Makefile switches, all default ON except where noted. Each flag removes its class, selectors and Info.plist personality properties.
+
+| Flag | Default | Notes |
+|---|---|---|
+| `RAGE_FEAT_PANIC_LOG` | on | First feature built (Phase 2). |
+| `RAGE_FEAT_2D_GA` | on | Needed for "no loss vs stock". |
+| `RAGE_FEAT_SLEEPWAKE` | on | Lombard only; unverifiable on the G4 rig. |
+| `RAGE_FEAT_DMA` | on | Bus-master ring for command and texture upload; off = PIO only (smaller, simpler, slower). |
+| `RAGE_FEAT_OVERLAY`, `RAGE_FEAT_SCALER` | on if stock lacks them | Decided in Phase 0 from the stock binary. |
+| `RAGE_FEAT_DVD` | on if stock lacks it | Same. |
+| `RAGE_FEAT_FS_SCALE` | on | Fullscreen at 32-bit within 8 MB VRAM (see bug L4). |
+| `RAGE_DEBUG_TRACE` | off | Verbose, fsync'd trace. |
+
+### 3.3 Interrupts and threads (single CPU)
+
+- Engine-idle, DMA-complete and vblank are **interrupt events** (`IOInterruptEventSource`/`IOFilterInterruptEventSource` on the device's interrupt), not poll loops. If the chip's interrupt line is not usable on a given board, fall back to a bounded timed wait, never an unbounded spin (the Lombard "~50% CPU in R state then total lockup" in README-SONICR §2.6 looks like an unbounded spin).
+- No render worker thread (`gld_engine.c` already abandoned it; `vdma_*` in `gld_render.c` goes). The plugin builds a batch, submits, and continues; completion is signalled through the stamp/fence selector.
+- The only extra thread allowed is one kernel work loop for interrupt events and mode-change notifications.
+
+### 3.4 Display coexistence with `ATY_*`
+
+- The `ATY_*` framebuffer keeps scanout, CRTC and modesets. We register for `IOFramebuffer` notifications (the technique already proven in `ca5d788`) and treat *will-change/did-change* as an atomic quiesce: take the engine lock, fence, free VRAM-heap objects the way stock does, redirect user mappings of the aperture, re-init the engine on did-change including **`BUS_CNTL` bit 27 `BUS_EXT_REG_EN`** and bus-mastering state, bump a mode generation.
+- DMA/bus-master state is **kernel state, re-established on every did-change**, never "disabled for the life of the process" (README-SONICR §2.6 hypothesis for the Snowball Run lockup).
+
+### 3.5 Memory safety rules (from `docs/memory-map.md`, carried forward)
+
+1. Usable VRAM is `[0, 0x7FF800)`; the register window is the top 2 KB. One checker, in the kernel, on every offset a client can supply.
+2. User-supplied register numbers pass the allow-list. No arbitrary kernel read selector exists.
+3. All user memory goes through `IOMemoryDescriptor` prepare/complete or `copyin`; texture data is never dereferenced by the kernel through a raw user pointer.
+4. Nothing is ever mapped before the context is fully set up (the stock NULL-deref panic of mapping an un-bound context).
+5. Each new guard gets a refusal case in the suite's `guards` test.
+
+### 3.6 VRAM byte order (open item O4)
+
+The existing notes found texels arrive byte-reversed through the plain LE aperture on the G4 stub rig, and could not establish whether Apple's framebuffer supplies a swapped view on the Lombard. The mach64 BAR0 is 16 MB; the second 8 MB is documented as a big-endian alias of the first (not probed so far). Plan: have the **kernel** own the question. It maps the aperture view that is correct for a PPC host and exposes a single "write texels in surface format" path, so the user plugin never swaps bytes. The G4 can test the BE alias with a single, bounded, read/write at a known-safe VRAM address after the existing safe-bring-up (no scan). That is a live experiment and will be proposed separately before it is run.
+
+## 4. GL bundle
+
+Rewrite `gldriver/` against the new selector set. Keeps GLEngine integration (`gld*` entry points, dispatch table) and the feature logic documented in `re-notes/`. Changes:
+
+- Delete `m64_peek`, gli/kernel pointer walking, `ctx->regs` as a VRAM view, the DMA worker, `getenv`-based debug switches (replaced by a flags file read once).
+- Pixel ops (`glReadPixels`, `glDrawPixels`, `glBitmap`, `glCopyPixels`) go through kernel selectors that validate spans; the plugin never holds a CPU view of VRAM.
+- Fixed-point/LUT geometry setup (§2.1).
+- Multiple GL windows: the surface resolver is keyed by the CGS surface id from the context, not "first window with a surface" (bug L8).
+- Fullscreen at 32 bpp: `RAGE_FEAT_FS_SCALE` renders at a size that fits VRAM and upscales with the hardware scaler during present. Whether the Rage LT Pro scaler can do the upscale at the needed quality is **unverified**; fallback is the old `MACH64_FS_SHRINK` smaller-surface path, which is documented as the likely fix.
+
+## 5. Bug ledger (every defect documented in the repo)
+
+Source: `README-SONICR.md` (Lombard session, 2026-11-22 on), `README.md` known gaps, `docs/memory-map.md`, `docs/re-notes/`. "Fixed" means fixed in the imported code; every fixed item still gets a regression test because the new code is a rewrite.
+
+| ID | Symptom | Cause (as documented) | State in repo | Plan in new driver |
+|---|---|---|---|---|
+| L1 | Panics leave no `panic.log`, no NVRAM record | Not understood; Lombard clock was 2006 | open | Phase 2: own persistent record plus UDP mirror; kernel never relies on Apple's panic log. |
+| L2 | Chess `glReadPixels` crash, `KERN_INVALID_ADDRESS` reading Z at `regs+0x301000` | Pixel ops treated the 768 KB command buffer map as a VRAM view | fixed 3dad95c | Removed by design (no CPU view in plugin); regression test with Chess and a span-hostile test. |
+| L3 | Windowed Chess board turns white | Present blits direct to scanout, WindowServer repaints from its white backing store | fixed 47f0ae2 (idle-repaint timer on the app's run loop) | Re-examine in Phase 3: present through the surface protocol so the backing store and scanout agree; keep the timer only if it is still required. Needs Lombard-side confirmation of any different approach. |
+| L4 | 32-bit fullscreen 1024x768 white (no buffer fits 8 MB) | `target_off=0` so `render_skip`; `MACH64_FS_SHRINK` dropped in import | open | `RAGE_FEAT_FS_SCALE` / port `FS_SHRINK` (§4). Flurry renders at 16-bit already. |
+| L5a | Mode change while GL open wedges the machine | Driver kept stale offsets and a live BAR0 map across Apple's heap reset | fixed ca5d788 | Designed in (§3.4); regression: mode-switch tool during Chess. |
+| L5b | Screen-saver preview wedges after a mode change (once, after `sample`) | **Unknown** | open | Cannot reproduce on the G4 (no display on the Rage). Kept as an open issue; ship panic capture (L1) and the traced logging so the contributor's report is useful. |
+| L6 | Snowball Run: no textures, no background, then a full lockup, no panic | Hypothesis (unconfirmed): game's own mode switch reinits `BUS_CNTL`, DMA path calls `dma_disable()` for the process lifetime; mode-generation query shared the DMA connection | open | §3.3/3.4: DMA state is kernel-owned and re-established per did-change; mode generation is separate state; no unbounded spin. Game is not on the G4 test list, so this stays open until a Lombard report. |
+| L7 | Intermittent kernel panic ~10% of processes (uninitialised stack descriptor in Apple's `clientMemoryForType`) | Stock Apple bug | worked around by 1-instruction patch | Gone by replacement. |
+| L8 | Several simultaneous GL windows: resolver picks the first window with a surface | Design gap | open (README) | §4. Regression with two Atlantis instances. |
+| L9 | Texels byte-reversed on the G4 stub rig; Lombard behaviour unknown | Unknown | open | §3.6, open item O4. |
+| L10 | Chip registers latch but setup engine never fires | `BUS_CNTL.BUS_EXT_REG_EN` (bit 27) clear after PC BIOS | fixed in `biosrun` | Kernel init sets it on attach and on every did-change. |
+| L11 | Never-posted card hangs on any read | BIOS POST not run | worked around on G4 (`biosrun`) | G4 only; the Lombard POSTs from its own firmware. Not a driver concern, but `bringup` tooling for the G4 rig stays (tools/). |
+| L12 | Kernel peeks of unchecked addresses (panic risk) | Patch design | mitigated by `m64_peek` range check | Eliminated: no peek exists. |
+| L13 | Windowed/Atlantis/laser-arena "worked on the Lombard earlier, not re-run in the current rig" | Not re-verified | gap | Atlantis becomes a standing test on the G4 (headless via readback). Present is unverifiable there. |
+| L14 | Scaler/overlay/capture/MPP/TV-out register fields undocumented ("omitted on purpose" by ATI) | Docs gap | n/a | Overlay and scaler recipes must come from tracing stock behaviour or the Win98 driver notes; flagged as risk R2. |
+
+Not documented anywhere, therefore not in the ledger: whatever the Lombard tester has seen beyond README-SONICR. The Lombard contributor's issues will extend this ledger.
+
+## 6. Panic and diagnostic capture (Phase 2, `RAGE_FEAT_PANIC_LOG`)
+
+Goal: after any hang or panic, the contributor can attach something useful to an issue.
+
+1. **In-RAM ring** inside the kext (fixed size, e.g. 64 KB) holding timestamped driver events: user-client opens, selector calls with args, will/did-change, fences, errors, last N register batches.
+2. **Persistent copy:** on a normal path the ring is flushed to `/var/log/ratelt-driver.log` by a small user-space helper over a dedicated selector; on panic (`PE_register_panic_hook` / panic callback if Panther xnu-517 provides one; verify in Phase 0) the ring is written to a reserved, driver-owned region (reserved system RAM that survives warm reboot is not guaranteed on this hardware, so this is explicitly **best effort**; the NVRAM route was tried (Lombard §2.1) and left nothing, so it is not relied upon).
+3. **UDP mirror** to a configurable host (works for the G4 rig, and for the Lombard if the tester has a second machine).
+4. A one-shot `ragelt-report` script bundles ring dump, `ioreg` output, kext versions, and the kext's feature flags for pasting into an issue.
+
+Whether any of the persistent paths survives the Lombard's "Please restart" screen is **not known**; the design records why each path was chosen so the next report tells us which one worked.
+
+## 7. Test strategy
+
+Layers, cheapest first:
+
+1. **Host tests** (Linux): `common/` emission, span/allow-list checkers, fixed-point/LUT routines compared against a float reference over exhaustive or dense random inputs, with error bounds written down per function.
+2. **Offline PPC checks:** build with the PPC toolchain, run host tests under `qemu-ppc`, run `make checkfp`.
+3. **G4 headless:** the existing 178-check `mach64_pathb_suite` ported to the new selectors, plus new `guards` for each new guard; soak (100k frames), process-cycle soak, context churn, mode-switch tests, hostile-argument selector tests run against the new kext only in a mode that cannot reach a never-POSTed card.
+4. **G4 apps:** Sonic R, Chess, Flurry, Atlantis, headless via framebuffer readback; per-app acceptance = starts, runs N minutes, no panic, frames read back correctly, no leak in `IOKitDiagnostics`.
+5. **Lombard (contributor):** installer, revert script, a one-page checklist, and issue template asking for the `ragelt-report` bundle. Everything unverifiable on the G4 is listed in the release notes as "needs Lombard confirmation": present to a real display, sleep/wake, overlay, scaler, DVD, fullscreen at 32 bpp, 8 MB VRAM pressure, byte order.
+
+Any live G4 run follows the standing rules: explicit safe arguments, never `mach64_post` bare, no broad kernel scans, `kextload` only through the bringup sequence, G4 not rebooted.
+
+## 8. Open items for Phase 0 (need the stock binary or a G4 read)
+
+| # | Question | How I'll answer it |
+|---|---|---|
+| O1 | Exactly which classes/IOKit properties/selector numbers does `ATIRageProGA.plugin` and GLEngine look up on the accelerator (names, `IOGLBundleName`, `IOAccelIndex`, type numbers)? Can our kext simply provide these under our own bundle id, with Apple's kext moved aside? | Static analysis of the stock kext's `Info.plist` and the GA plugin on the G4's Panther HD (read-only). |
+| O2 | Does Panther's `IOAccelerator` base come from `IOGraphicsFamily` (usable by a third-party kext) or only inside Apple's kext? | Symbols and `kextstat` dependency lists. |
+| O3 | What does stock already provide for sleep/wake, overlay, scaler, DVD (affects the flags' defaults)? | Symbol and selector inventory of stock `ATIRagePro` and `ATIRageProGA`. |
+| O4 | Byte-order/aperture question (§3.6). | Offline first (what Apple's framebuffer does on the Lombard may be readable from its binary), then one proposed bounded G4 experiment. |
+| O5 | Does Panther's xnu-517 offer a panic callback usable from a kext? | Kernel headers for 10.3.9 and symbol check on the G4. |
+| O6 | Interrupt line wiring for the chip and whether stock uses it. | Stock kext symbols; OF device tree on the G4. |
+| O7 | Installation: how stock `ATIRagePro.kext` is set aside (moved to a backup dir, kext caches rebuilt, revertable) so there is never a window with two accelerators matching. | Existing `install-*.sh` plus `swap.sh` patterns on the G4. |
+
+## 9. Risks
+
+- **R1: Lombard cannot be tested by me.** Mitigation: panic/trace capture first, compile-out flags so a contributor can bisect by rebuilding with a feature off, strict "needs Lombard confirmation" labelling.
+- **R2: Overlay, scaler and DVD register semantics are undocumented** (ATI withheld them). May become "best-effort reproduction of stock behaviour" or be dropped if stock already provides the function and we cannot improve it.
+- **R3: Replacing the 2D accelerator can regress the Lombard desktop** if the GA plugin ABI is not matched exactly. Mitigation: O1 first, 2D phase after GL, easy revert script, `RAGE_FEAT_2D_GA` off keeps stock 2D... but stock 2D needs stock kext, which we replace, so off means software 2D. This tension is called out for review.
+- **R4: A fixed-point geometry pipeline may show visible precision artefacts.** Mitigation: per-function error bounds in host tests, then image comparison on Atlantis and Sonic R against the float version; single float stays available for any stage that fails the bound.
+- **R5: VRAM is 8 MB.** The usable heap, Z and texture budgets are tight; budget table is part of the Phase 1 design.
+
+## 10. Phases and exit criteria
+
+| Phase | Deliverable | Exit |
+|---|---|---|
+| 0 | This doc, ledger, answers to O1-O7 | You approve the doc. |
+| 1 | Delete Path A/B; kext skeleton: attach, map, VRAM allocator, allow-listed engine, features.h, host tests | Builds for PPC, `checkfp` clean, host tests pass; first G4 load needs your OK. |
+| 2 | `RAGE_FEAT_PANIC_LOG` | Ring + mirror + report script; forced-panic test on the G4. |
+| 3 | New GL bundle | Suite ports; fixed-point routines have error bounds. |
+| 4 | G4 acceptance | Four apps pass; soak and process-cycle soak pass. |
+| 5 | 2D GA, sleep/wake, overlay, scaler, DVD | Each behind its flag; G4-testable parts tested, the rest listed for the contributor. |
+| 6 | Installer/revert/checklist/issue template | Pushed to `standalone-driver`. |
