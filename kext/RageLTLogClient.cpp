@@ -27,6 +27,9 @@ bool RageLTLogClient::start(IOService *provider)
             { (IOService *)0, (IOMethod)&RageLTLogClient::selMark, kIOUCScalarIScalarO, 2, 0 },
         };
         for (int i = 0; i < RAGE_LOG_SEL_COUNT; i++) fMethods[i] = m[i];
+#if RAGE_DEBUG_ENGTEST
+        { IOExternalMethod e = { (IOService *)0, (IOMethod)&RageLTLogClient::selEngTest, kIOUCScalarIScalarO, 1, 4 }; fMethods[RAGE_LOG_SEL_ENGTEST] = e; }
+#endif
 #if RAGE_DEBUG_PANIC
         { IOExternalMethod p = { (IOService *)0, (IOMethod)&RageLTLogClient::selPanic, kIOUCScalarIScalarO, 1, 0 }; fMethods[RAGE_LOG_SEL_PANIC] = p; }
 #endif
@@ -37,7 +40,8 @@ bool RageLTLogClient::start(IOService *provider)
 
 IOExternalMethod *RageLTLogClient::getTargetAndMethodForIndex(IOService **target, UInt32 index)
 {
-    if (index >= RAGE_LOG_SEL_COUNT + RAGE_DEBUG_PANIC || !fDev) return 0;
+    if (!fDev) return 0;
+    if (index >= RAGE_LOG_SEL_COUNT && !(RAGE_DEBUG_PANIC && index == RAGE_LOG_SEL_PANIC) && !(RAGE_DEBUG_ENGTEST && index == RAGE_LOG_SEL_ENGTEST)) return 0;
     *target = this;
     return &fMethods[index];
 }
@@ -83,4 +87,14 @@ IOReturn RageLTLogClient::selPanic(uint32_t token)
 }
 #else
 IOReturn RageLTLogClient::selPanic(uint32_t) { return kIOReturnUnsupported; }
+#endif
+
+#if RAGE_DEBUG_ENGTEST
+IOReturn RageLTLogClient::selEngTest(uint32_t mask, uint32_t *passmask, uint32_t *outside, uint32_t *inside, uint32_t *status)
+{
+    if (!fDev) return kIOReturnNotAttached;
+    return fDev->engineSelfTest(mask, passmask, outside, inside, status);
+}
+#else
+IOReturn RageLTLogClient::selEngTest(uint32_t, uint32_t *, uint32_t *, uint32_t *, uint32_t *) { return kIOReturnUnsupported; }
 #endif

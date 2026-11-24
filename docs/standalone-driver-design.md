@@ -288,3 +288,18 @@ Conclusions
 5. `ragelt-report` verified on Panther's shell (15 KB with the driver absent; trims `ioreg` lines to 240 columns).
 
 **Phase 2 exit met** (ring + file + UDP mirror + report script + forced-panic test on the G4). Still to do for the installed product (Phase 6): where `ragelt daemon` lives and how it starts at boot.
+
+
+### 11.11 E1 step A: 2D scissor containment proven on hardware (G4 MDD, Nov 24)
+
+Debug selector ENGTEST (RAGE_DEBUG_ENGTEST) drives the engine from the kernel against a 512 KB allocator block and scans every pixel afterwards.
+All 17 cases pass (outside_changed = 0, every in-scissor pixel correct): fill and blit larger than the scissor, with and without fast-fill/block-write,
+inverted scissor (right < left), rect wholly outside the scissor, whole-surface scissor with the rect overshooting, 0x1fff "no clip", and offset probes.
+
+Root causes found on the way (each cost a run):
+* **SETUP_CNTL (0x304) left by the boot replay made DST_X, DST_Y and the height behave as S.12.2 sub-pixel values** (a quarter of the requested
+  position/size; width unaffected).  Writing SETUP_CNTL = 0 before a 2D op fixed it.  DST_CNTL writes did not (all 16 upper bits probed).
+* DST_X_Y is (Y<<16)|X, DST_WIDTH_HEIGHT is (H<<16)|W (low half is the first-named field; RRG 5-13, matches Linux DRM).
+* Draw-engine registers (DST_CNTL, GUI_TRAJ_CNTL, SC_*) do not read back what was written; do not use readback to verify.
+* The CPU must not touch the VRAM aperture until the engine has been idle for several consecutive reads; engine reset (GEN_GUI_RESETB pulse) recovers a wedged engine.
+* Table 5-2 standard context (Programmer's Guide) is now applied once by eng_init_context().

@@ -40,6 +40,7 @@ bool RageLTDevice::start(IOService *provider)
     fNextOwner = 1;
     fEngineLive = false;
     fRefused = 0;
+    fDispReserved = false;
 
     logEvent(RAGE_EV_START, 0, RAGE_FEATURE_BITS, 0, 0, 0, 0);
     setProperty("RageLTFeatures", (unsigned long long)RAGE_FEATURE_BITS, 32);

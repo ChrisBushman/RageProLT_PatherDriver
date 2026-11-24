@@ -32,6 +32,9 @@
 #ifndef RAGE_DEBUG_PANIC
 #define RAGE_DEBUG_PANIC      0   /* DEBUG ONLY: a selector that panics on purpose, to test what the capture paths preserve. Never in release. */
 #endif
+#ifndef RAGE_DEBUG_ENGTEST
+#define RAGE_DEBUG_ENGTEST    0   /* DEBUG ONLY: in-kernel engine self-test (scissor containment proof, E1). Writes engine registers; never in release. */
+#endif
 #ifndef RAGE_DEBUG_TRACE
 #define RAGE_DEBUG_TRACE      0   /* verbose, fsync'd trace; off in release                                        */
 #endif

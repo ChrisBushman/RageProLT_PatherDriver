@@ -7,11 +7,12 @@
 
 #define RAGE_CLIENT_LOG   0x4c4f4700u            /* 'LOG': diagnostics client (Phase 2) */
 
-enum { RAGE_LOG_SEL_INFO = 0, RAGE_LOG_SEL_READ = 1, RAGE_LOG_SEL_MARK = 2, RAGE_LOG_SEL_COUNT = 3, RAGE_LOG_SEL_PANIC = 3 /* only with RAGE_DEBUG_PANIC */ };
+enum { RAGE_LOG_SEL_INFO = 0, RAGE_LOG_SEL_READ = 1, RAGE_LOG_SEL_MARK = 2, RAGE_LOG_SEL_COUNT = 3, RAGE_LOG_SEL_PANIC = 3 /* only with RAGE_DEBUG_PANIC */, RAGE_LOG_SEL_ENGTEST = 4 /* only with RAGE_DEBUG_ENGTEST */ };
 
 /* SEL_INFO: scalarI 0, scalarO 4 = { head, capacity, refused batches, feature bits } */
 /* SEL_READ: scalarI 1 = from_seq, structO RAGE_LOG_READ_BYTES = struct rage_log_read_out */
 /* SEL_PANIC (debug builds only): scalarI 1 = token; logs an ERROR event then calls panic().  Refused (bad index) in normal builds. */
+/* SEL_ENGTEST (debug builds only): scalarI 1 = test mask, scalarO 4 = { pass mask, outside-changed words, inside-correct pixels, status }; details go to the event ring. */
 /* SEL_MARK: scalarI 2 = { a0, a1 }: logs a RAGE_EV_MARK so test phases can be lined up with the driver's events */
 
 #define RAGE_LOG_READ_EVENTS 31u

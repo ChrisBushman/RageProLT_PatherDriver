@@ -22,6 +22,7 @@ class RageLTDevice : public IOService
     uint32_t               fNextOwner;
     bool                 fEngineLive;  /* false until a later phase turns the engine on; the validated write path is dormant until then */
     uint32_t               fRefused;     /* batches refused by the guard (diagnostic) */
+    bool                 fDispReserved; /* scanout + cursor block reserved in the allocator (done once, permanent) */
     struct rage_log     *fLog;         /* event ring (RAGE_FEAT_PANIC_LOG), allocated at start */
     IOSimpleLock        *fLogLock;     /* short spin lock: logging must be safe from any context, including an interrupt filter */
 
@@ -44,6 +45,9 @@ public:
     IOReturn     logInfo(uint32_t *head, uint32_t *capacity, uint32_t *refused, uint32_t *features);
     IOReturn     logRead(uint32_t fromSeq, struct rage_log_read_out *out);
     virtual IOReturn newUserClient(task_t owningTask, void *securityID, UInt32 type, IOUserClient **handler);
+
+    /* DEBUG ONLY (RAGE_DEBUG_ENGTEST): see RageLTSelfTest.cpp */
+    IOReturn     engineSelfTest(uint32_t mask, uint32_t *passmask, uint32_t *outside, uint32_t *inside, uint32_t *status);
 
     uint32_t       refusedCount(void) const { return fRefused; }
     bool         engineLive(void) const { return fEngineLive; }
