@@ -27,6 +27,7 @@
 int gldAttachDrawable(gld_context *ctx, int type, void *drawable, uint32_t flags)
 {
     if (!ctx) return 0x271e;
+    GLD_TRACE("attach: ctx %p type 0x%x drawable %p flags 0x%x\n", (void *)ctx, type, drawable, flags);
     { extern void mach64_dma_fence(void); mach64_dma_fence(); }   /* (re)binding a drawable replaces the surface/backing: let a queued present finish first */
     if ((type == 0x50 || type == 0x5a || type == 0x36) && !drawable)
         return 0x2715;

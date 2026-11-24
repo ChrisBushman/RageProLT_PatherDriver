@@ -34,6 +34,9 @@
 #include <libkern/OSByteOrder.h>
 #include <mach/mach.h>
 #include <mach/mach_time.h>   /* mach64_vram_cpu_begin idle-wait timeout */
+#include <stdarg.h>   /* gld_trace_printf */
+#include <stdio.h>
+#include <unistd.h>   /* access, getpid, fsync */
 #include <sys/sysctl.h>
 #include <sys/file.h>
 #include <fcntl.h>
@@ -111,6 +114,7 @@ void mach64_set_texheap(uint32_t base, uint32_t end)
     TEX_LOCK();
     g_heap_base = base; g_heap_end = end; g_heap_next = base;
     TEX_UNLOCK();
+    GLD_TRACE("tex: heap set 0x%x-0x%x\n", base, end);
 }
 
 typedef struct { uint32_t off, size; } mach64_free_blk;
@@ -269,7 +273,7 @@ static mach64_tex_slot *slot_alloc_locked(uint32_t key, uint32_t w, uint32_t h, 
         heap_free(v->off, v->rsize); v->off = 0; v->rsize = 0; g_nevict++;
         off = heap_alloc(sz);
     }
-    if (!off) { if (s->key != key) s->key = 0; return 0; }
+    if (!off) { GLD_TRACE("tex: heap alloc FAILED %u bytes (heap 0x%x-0x%x next 0x%x)\n", sz, g_heap_base, g_heap_end, g_heap_next); if (s->key != key) s->key = 0; return 0; }
     s->key = key; s->off = off; s->w = w; s->h = h; s->rsize = sz;
     return s;
 }
@@ -488,14 +492,49 @@ int mach64_pathA(io_connect_t *conn, volatile uint8_t **regs, volatile uint8_t *
     return 1;
 }
 static unsigned dma_rd(uint32_t reg) { return OSReadLittleInt32((void *)g_dma.regs, reg); }
-/* Display-mode generation from Mach64Accelerator (odd while a mode change is in progress).  An older kext has no selector 19: the call
+/* Display-mode generation from Mach64Accelerator (odd while a mode change is in progress).  Its own connection: the DMA path can be
+ * disabled for the process (dma_disable) and mode tracking must keep working regardless.  An older kext has no selector 19: the call
  * fails and this stays 0, so mode tracking is simply off. */
 uint32_t mach64_mode_gen(void)
 {
+    static io_connect_t mc = 0; static int tried = 0; static uint32_t last = 0xffffffffu;
     uint32_t gen = 0;
-    if (!dma_ready_pathA()) return 0;
-    if (IOConnectMethodScalarIScalarO(g_dma.conn, kMach64Sel_get_mode_gen, 0, 1, &gen) != KERN_SUCCESS) return 0;
+    if (!tried) {
+        io_service_t sv = IOServiceGetMatchingService(kIOMasterPortDefault, IOServiceMatching("Mach64Accelerator"));
+        tried = 1;
+        if (sv) { if (IOServiceOpen(sv, mach_task_self(), MACH64_GL_CONNECT_TYPE, &mc)) mc = 0; IOObjectRelease(sv); }
+        GLD_TRACE("mode_gen: connection %s\n", mc ? "open" : "UNAVAILABLE");
+    }
+    if (!mc || IOConnectMethodScalarIScalarO(mc, kMach64Sel_get_mode_gen, 0, 1, &gen) != KERN_SUCCESS) gen = 0;
+    if (gen != last) { GLD_TRACE("mode_gen: %u\n", gen); last = gen; }
     return gen;
+}
+
+/* ---- opt-in trace ---- */
+int g_gld_trace = -1;   /* -1 = not decided yet: the first gld_trace_init() reads MACH64_TRACE / /tmp/gld-trace-on */
+static int g_trace_fd = -1;
+static void gld_trace_init(void)
+{
+    const char *e = getenv("MACH64_TRACE");
+    char path[64];
+    g_gld_trace = (e && atoi(e)) || access("/tmp/gld-trace-on", F_OK) == 0;
+    if (!g_gld_trace) return;
+    snprintf(path, sizeof path, "/tmp/gld-trace-%d.log", (int)getpid());
+    g_trace_fd = open(path, O_CREAT | O_WRONLY | O_APPEND, 0666);
+    if (g_trace_fd < 0) g_gld_trace = 0;
+}
+void gld_trace_printf(const char *fmt, ...)
+{
+    char buf[512]; int n; va_list ap;
+    uint64_t t = mach_absolute_time(); static mach_timebase_info_data_t tb;
+    if (g_gld_trace < 0) gld_trace_init();
+    if (g_gld_trace <= 0) return;
+    if (!tb.denom) mach_timebase_info(&tb);
+    n = snprintf(buf, sizeof buf, "%10.3f [%p] ", (double)(t * tb.numer / tb.denom) / 1e6, (void *)pthread_self());
+    va_start(ap, fmt); n += vsnprintf(buf + n, sizeof buf - (size_t)n, fmt, ap); va_end(ap);
+    if (n > (int)sizeof buf - 1) n = (int)sizeof buf - 1;
+    write(g_trace_fd, buf, (size_t)n);
+    fsync(g_trace_fd);
 }
 /* CPU view of VRAM for the pixel paths (glReadPixels / glDrawPixels / glBitmap): BAR0 from Mach64Accelerator, offsets == engine VRAM
  * offsets, usable span [0, MACH64_VRAM_USABLE_END).  NOT ctx->regs -- that is Apple's type-1 COMMAND buffer (~768 KB); treating it as VRAM
@@ -526,7 +565,7 @@ static int dma_map(io_connect_t c, unsigned type, vm_address_t *a, vm_size_t *sz
     *a = 0; *sz = 0;
     return IOConnectMapMemory(c, type, mach_task_self(), a, sz, kIOMapAnywhere | kIOMapInhibitCache) == KERN_SUCCESS && *a;
 }
-static void dma_disable(void) { g_dma.state = -1; }
+#define dma_disable() do { GLD_TRACE("dma: DISABLED at %s:%d (BUS_CNTL=0x%08x)\n", __func__, __LINE__, g_dma.regs ? dma_rd(M64_DMA_BUS_CNTL) : 0u); g_dma.state = -1; } while (0)
 static int dma_ready(void);
 static int dma_ready_pathA(void) { return dma_ready(); }
 static int dma_ready(void)
@@ -551,9 +590,10 @@ static int dma_ready(void)
         if (cmdbus < 0x1000u || (uint64_t)cmdbus + M64_DMA_STAGE > physmem || ringbus < 0x1000u || (uint64_t)ringbus + 0x4000u > physmem || (ringbus & 0xfu) || (cmdbus & 0xfffu)) {
             return 0; }
         g_dma.cmdbus = cmdbus; g_dma.ringbus = ringbus; g_dma.prev_end = 0;
+        GLD_TRACE("dma_ready: maps ok cmdbus=0x%x ringbus=0x%x BUS_CNTL=0x%08x\n", cmdbus, ringbus, dma_rd(M64_DMA_BUS_CNTL));
         g_dma.lockfd = open("/var/tmp/mach64_dma.lock", O_CREAT | O_RDWR, 0666);
         if (g_dma.lockfd >= 0) fchmod(g_dma.lockfd, 0666);   /* a root-created lock (umask 022) must stay usable by every user, else DMA upload silently falls back to the engine path */
-        if (g_dma.lockfd < 0) return 0;
+        if (g_dma.lockfd < 0) { GLD_TRACE("dma_ready: lock file unusable\n"); return 0; }
         g_dma.state = 1;
     }
     return 1;
@@ -596,7 +636,7 @@ static int dma_xfer(uint32_t dst, const unsigned char *src, uint32_t first, uint
     if (!mach64_vram_span_ok(dst, bytes) || (dst & 3u)) return 0;
     mach64_eng_lock();
     { uint32_t bus = dma_rd(M64_DMA_BUS_CNTL);    /* bus mastering must already be on: we do not touch BUS_CNTL (shared with Apple's kext) */
-      if ((bus & (1u << 6)) || !(bus & (1u << 27))) { mach64_eng_unlock(); dma_disable(); return 0; } }
+      if ((bus & (1u << 6)) || !(bus & (1u << 27))) { GLD_TRACE("dma_xfer: bus mastering off (BUS_CNTL=0x%08x)\n", bus); mach64_eng_unlock(); dma_disable(); return 0; } }
     dma_fill(src, first, n, fmt, type, bpt, hwfmt);
     tbl = g_dma.ringbus; if (tbl + nd * 16u == g_dma.prev_end) tbl += 0x2000u;       /* a table end different from the last one, so "pointer at end" cannot be stale */
     end = tbl + nd * 16u;
@@ -615,7 +655,7 @@ static int dma_xfer(uint32_t dst, const unsigned char *src, uint32_t first, uint
     }
     if (ok) g_dma.prev_end = end;
     mach64_eng_unlock();
-    if (!ok) dma_disable();
+    if (!ok) { GLD_TRACE("dma_xfer: TIMEOUT dst=0x%x bytes=%u table=0x%x/0x%x cmd=0x%08x\n", dst, bytes, dma_rd(M64_DMA_BM_SYSTEM_TABLE), end, dma_rd(M64_DMA_BM_COMMAND)); dma_disable(); }
     return ok;
 }
 /* Upload one whole image through DMA, in <=128 KB transfers.  Returns 1 when the whole image is in VRAM, 0 to let the caller use the kext path. */
@@ -773,6 +813,7 @@ static int mach64_upload(gld_context *ctx, void *texobj)
 
     if (!t) return 0;
     state = *(const uint32_t *)(t + 0x30);
+    GLD_TRACE("tex: upload texobj=%p state=0x%x heap 0x%x-0x%x next 0x%x dma=%d\n", texobj, state, g_heap_base, g_heap_end, g_heap_next, g_dma.state);
     if (state < 0x10000 || state > M64_UADDR_MAX) return 0;
     s = (const unsigned char *)(uintptr_t)state;
     base_lod = s[0x5e];

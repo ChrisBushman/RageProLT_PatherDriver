@@ -244,6 +244,11 @@ void mach64_flush_batch(gld_context *ctx);   /* submit accumulated triangles */
 volatile unsigned char *mach64_vram_cpu_begin(void);
 void mach64_repaint_stop(gld_context *ctx);   /* remove the windowed idle-repaint timer (gld_render.c) */
 uint32_t mach64_mode_gen(void);               /* kext display-mode generation; 0 if the kext predates it (gld_texture.c) */
+/* Opt-in diagnostic trace (gld_texture.c): enabled by MACH64_TRACE=1 or by the file /tmp/gld-trace-on existing at the first call.
+ * Appends to /tmp/gld-trace-<pid>.log and fsyncs every line, so the last line survives a hang or a power cycle.  Off = one branch. */
+extern int g_gld_trace;
+void gld_trace_printf(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
+#define GLD_TRACE(...) do { if (g_gld_trace) gld_trace_printf(__VA_ARGS__); } while (0)
 void mach64_tex_invalidate_all(void);         /* VRAM layout reset: every texture -> evicted, heap emptied (gld_texture.c) */
 int  mach64_mode_check(gld_context *ctx);     /* 0 = a mode change is in progress: render/present nothing (gld_render.c) */   /* engine-idle CPU view of VRAM (BAR0) for pixel ops; 0 = skip (gld_texture.c) */
 void mach64_clear_color(gld_context *ctx);

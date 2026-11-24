@@ -90,8 +90,9 @@ int mach64_eng_ready(gld_context *ctx)
     g.cmdbus = cmdbus; g.ringbus = ringbus; g.mutex = m;
     /* two descriptor tables, each a 16 KB block that is PHYSICALLY 16 KB aligned (the ring's own alignment is not honoured), above the texture-upload tables [0, 0x2400) */
     { uint32_t o = (((ringbus + 0x2400u) + 0x3fffu) & ~0x3fffu) - ringbus; g.tbl[0] = o; g.tbl[1] = o + 0x4000u; if (g.tbl[1] + 0x4000u > rs) return 0; }
-    { uint32_t bus = rd(R_BUS_CNTL); if ((bus & (1u << 6)) || !(bus & (1u << 27))) return 0; }
+    { uint32_t bus = rd(R_BUS_CNTL); if ((bus & (1u << 6)) || !(bus & (1u << 27))) { GLD_TRACE("eng_ready: bus mastering off (BUS_CNTL=0x%08x): engine off\n", bus); return 0; } }
     g.state = 1;
+    GLD_TRACE("eng_ready: single-thread engine on\n");
     return 1;
 }
 
@@ -111,6 +112,7 @@ static int wait_done(void)
     while (!done_now()) {
         if ((++n & 0x3ffu) == 0) { lim = ticks_ns(mach_absolute_time() - t0); if (lim > 3000000000ull) break; }
     }
+    if (lim > 3000000000ull) GLD_TRACE("eng: wait_done TIMEOUT table=0x%x end=0x%x GUI_STAT=0x%08x FIFO=0x%08x\n", rd(R_BM_GUI_TABLE), g.end, rd(R_GUI_STAT), rd(R_FIFO_STAT));
     restore_regs();
     return lim > 3000000000ull ? -1 : 0;
 }
@@ -170,10 +172,10 @@ int mach64_eng_kick(gld_context *ctx, const uint32_t *w, size_t n)
         kern_return_t kr;
         mach64_eng_lock();
         kr = IOConnectMethodScalarIScalarO(g.pa, kMach64Sel_accel_hold, 1, 0, g.mutex);
-        if (kr) { mach64_eng_unlock(); return -1; }
+        if (kr) { GLD_TRACE("eng: accel_hold refused 0x%x\n", kr); mach64_eng_unlock(); return -1; }
         g.held = 1; g.t_hold = mach_absolute_time();
     }
-    if (!idle_now()) { int i; for (i = 0; i < 4000000 && !idle_now(); i++) ; }   /* engine must be idle before the registers are reprogrammed (same as the kernel handler) */
+    if (!idle_now()) { int i; for (i = 0; i < 4000000 && !idle_now(); i++) ; if (i >= 4000000) GLD_TRACE("eng: engine never idle before kick (GUI_STAT=0x%08x)\n", rd(R_GUI_STAT)); }   /* engine must be idle before the registers are reprogrammed (same as the kernel handler) */
     g.sv_bus = rd(R_BUS_CNTL); g.sv_src = rd(R_SRC_CNTL); g.sv_tbl = rd(R_BM_GUI_TABLE);
     g.end = newend;
     wr(R_BUS_CNTL, (g.sv_bus & ~0x40u) | 0x08000000u);               /* bus mastering on, extended registers on */

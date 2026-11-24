@@ -413,11 +413,15 @@ void mach64_pathb_present(gld_context *ctx)
     p->repaint_ok = (p->win_mode && p->dbuf) ? 1u : 0u;
     p->repaint_t  = mach_absolute_time();
     if (p->repaint_ok) mach64_repaint_arm(ctx);
+    {   static unsigned np; if (g_gld_trace && (np++ < 20 || (np & 63) == 0)) GLD_TRACE("present #%u ctx %p async=%d\n", np, (void *)ctx, async_ok); }
     if (async_ok && mach64_present_async(ctx, (unsigned)surf) == 0) return;   /* queued behind the frame's batches: the worker does finish + surface_flush + finish */
     mach64_dma_fence();
+    GLD_TRACE("present: surface_flush ->\n");
     IOConnectMethodScalarIScalarO(surf, kATIRProSurf_surface_flush, 2, 0, 1u, 0u);
+    GLD_TRACE("present: finish ->\n");
     /* the present's scaler blit runs asynchronously: without this fence the NEXT frame's colour clear races it and wipes the bottom rows before they are read */
     IOConnectMethodScalarIStructureI(ctx->connect, kATIRPro_finish, 0, 0, NULL);
+    GLD_TRACE("present: done\n");
 }
 
 /* ---- display mode changes ----
@@ -439,6 +443,7 @@ int mach64_mode_check(gld_context *ctx)
         return 0;
     }
     if (gen == p->mode_gen) return 1;
+    GLD_TRACE("mode_check: ctx %p gen %u -> %u: re-validating\n", (void *)ctx, p->mode_gen, gen);
     p->mode_gen = gen;
     mach64_dma_fence();
     p->z_record = 0; p->tex_record = 0; p->z_off = 0;
@@ -615,6 +620,9 @@ void mach64_pathb_setup_target(gld_context *ctx)
     } else if (rt) {
         p->render_skip = 0;
     }
+    GLD_TRACE("setup_target: ctx %p surf=0x%x d178=0x%x rt=0x%x -> target 0x%x pitch %u render_skip=%u present_unsafe=%u dbuf=%u win_mode=%u %ux%u @%d,%d\n",
+              (void *)ctx, surf, d178, rt, (rt & 0x3fffffu) << 3, ((rt >> 22) & 0x3ffu) << 3, p->render_skip, p->present_unsafe, p->dbuf, p->win_mode,
+              p->fb_w, *(uint32_t *)((char *)ctx + 0x1f4), (int)p->win_x, (int)p->win_y);
     if (rt) {
         uint32_t toff   = (rt & 0x3fffffu) << 3;         /* VRAM byte offset */
         uint32_t tpitch = ((rt >> 22) & 0x3ffu) << 3;    /* pitch in pixels  */
@@ -1699,7 +1707,9 @@ void mach64_dispatch_render_ctl(gld_context *ctx, uint32_t a4, uint32_t a5,
         }
         if (!(mach64_async_present_ok(ctx) && mach64_frame_end_async(ctx) == 0)) {
             /* (otherwise the batch is queued on the DMA worker; the worker's present job does its own finish fence) */
+            GLD_TRACE("frame: flush_batch ->\n");
             mach64_flush_batch(ctx);
+            GLD_TRACE("frame: finish ->\n");
             /* FENCE before present: the triangle submit KICKS the setup/scaler engine and returns;
              * surface_flush (build_swap) blits the surface buffer to scanout and can race ahead of
              * the still-rasterizing 3D engine, capturing the cleared-but-triangle-less buffer (black
