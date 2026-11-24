@@ -143,6 +143,55 @@ IOReturn RageLTDevice::engineSelfTest(uint32_t mask, uint32_t *passmask, uint32_
     if (vramAlloc(owner, BLOCK_BYTES, 4096, &off0)) { releaseOwner(owner); *status = 5; return kIOReturnNoSpace; }
     logEvent(RAGE_EV_MARK, owner, 0xe0000002u, off0, BLOCK_BYTES, 0, 0);
 
+
+    if (mask & 0x80000000u) {                          /* ---- triangle scissor-containment suite (low bits select cases) ---- */
+        static const struct { uint32_t L, R, T, B; int32_t vx[3], vy[3]; uint32_t ooa; int expect_draw; } tc[] = {
+            {  64, 127,  32,  95, { 10, 250,  60 }, {  10,  20, 240 }, 0x37995b4du, 1 },   /* big triangle, scissor box wholly inside it */
+            {  64, 127,  32,  95, { 90, 250, 100 }, {  10,  60, 200 }, 0x380c4719u, 1 },   /* triangle edge crosses the scissor box */
+            {  64, 127,  32,  95, {150, 240, 190 }, { 150, 150, 240 }, 0x3901742eu, 0 },   /* triangle entirely outside the scissor */
+            {   0, 255,   0, 255, { 10, 250,  60 }, {  10,  20, 240 }, 0x37995b4du, 1 },   /* whole-surface scissor: shape check */
+            { 100,  50,  32,  95, { 10, 250,  60 }, {  10,  20, 240 }, 0x37995b4du, 0 },   /* inverted scissor */
+            {  64, 127,  32,  95, { 40, 120,  70 }, { 20,  40, 120 }, 0x390db310u, 1 },   /* small triangle partly in the scissor box (ooa filled in below) */
+        };
+        uint32_t t, tri_pass = 0, tri_bad = 0;
+        for (t = 0; t < sizeof tc / sizeof tc[0]; t++) {
+            uint32_t o, outside_c = 0, missing = 0, drawn = 0, amb = 0, sample = 0;
+            int32_t ax = tc[t].vx[0], ay = tc[t].vy[0], bx = tc[t].vx[1], by = tc[t].vy[1], cx = tc[t].vx[2], cy = tc[t].vy[2];
+            int rc;
+            if (!(mask & (1u << t))) continue;
+            for (o = 0; o < BLOCK_BYTES; o += 4) vw32(vram, off0 + o, 0xa5a5a5a5u);
+            rc = eng_tri16(fRegs, off0, SURF_PX, tc[t].vx, tc[t].vy, COL_FILL, (tc[t].R << 16) | tc[t].L, (tc[t].B << 16) | tc[t].T, tc[t].ooa);
+            if (!rc) rc = eng_wait_idle(fRegs);
+            if (rc) { logEvent(RAGE_EV_ERROR, owner, 0xf1000000u | t, 0xdeadu, 0, 0, 0); *status = 6; break; }
+            IOSleep(5);
+            vw32(vram, off0 + 4u, vr32(vram, off0 + 4u));
+            for (o = 0; o < BLOCK_BYTES; o += 2) {
+                uint16_t v = vr16(vram, off0 + o); uint32_t px = o >> 1, x = px % SURF_PX, y = px / SURF_PX;
+                int in_surf = o < SURF_BYTES, inscis = in_surf && x >= tc[t].L && x <= tc[t].R && y >= tc[t].T && y <= tc[t].B;
+                if (v == SENT16) {
+                    if (inscis) {                      /* undrawn pixel in the scissor box: a clear miss only if clearly inside the triangle */
+                        int32_t qx = (int32_t)(x * 4 + 2), qy = (int32_t)(y * 4 + 2);
+                        int32_t e0 = (bx - ax) * 4 * (qy - ay * 4) - (by - ay) * 4 * (qx - ax * 4);
+                        int32_t e1 = (cx - bx) * 4 * (qy - by * 4) - (cy - by) * 4 * (qx - bx * 4);
+                        int32_t e2 = (ax - cx) * 4 * (qy - cy * 4) - (ay - cy) * 4 * (qx - cx * 4);
+                        int32_t m0 = 8 * ((bx - ax < 0 ? ax - bx : bx - ax) + (by - ay < 0 ? ay - by : by - ay)) * 4;
+                        int32_t m1 = 8 * ((cx - bx < 0 ? bx - cx : cx - bx) + (cy - by < 0 ? by - cy : cy - by)) * 4;
+                        int32_t m2 = 8 * ((ax - cx < 0 ? cx - ax : ax - cx) + (ay - cy < 0 ? cy - ay : ay - cy)) * 4;
+                        if (e0 > m0 && e1 > m1 && e2 > m2) { missing++; if (!sample) sample = (x << 16) | y; }
+                        else amb++;
+                    }
+                } else if (in_surf && v == COL_FILL && inscis) drawn++;
+                else outside_c++;                      /* anything else that changed: outside the scissor, or a wrong colour */
+            }
+            logEvent(RAGE_EV_MARK, owner, 0xf0000000u | t, outside_c, missing, drawn, amb);
+            if (sample) logEvent(RAGE_EV_MARK, owner, 0xf2000000u | t, sample, 0, 0, 0);
+            if (outside_c == 0 && missing == 0 && (tc[t].expect_draw ? drawn > 0 : drawn == 0)) { *passmask |= 1u << t; tri_pass++; } else tri_bad++;
+            *outside += outside_c; *inside += drawn;
+        }
+        releaseOwner(owner);
+        return *status ? kIOReturnError : kIOReturnSuccess;
+    }
+
     for (k = 0; k < sizeof cases / sizeof cases[0]; k++) {
         const struct tcase *c = &cases[k];
         uint32_t o, outside_c = 0, inside_ok = 0, inside_exp = 0, minx = 0xffff, miny = 0xffff, maxx = 0, maxy = 0;

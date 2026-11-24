@@ -303,3 +303,12 @@ Root causes found on the way (each cost a run):
 * Draw-engine registers (DST_CNTL, GUI_TRAJ_CNTL, SC_*) do not read back what was written; do not use readback to verify.
 * The CPU must not touch the VRAM aperture until the engine has been idle for several consecutive reads; engine reset (GEN_GUI_RESETB pulse) recovers a wedged engine.
 * Table 5-2 standard context (Programmer's Guide) is now applied once by eng_init_context().
+
+### 11.12 E1 step B: triangle scissor containment proven on hardware (G4 MDD, Nov 24)
+
+ENGTEST with mask bit 31 runs 6 flat triangles through the 3D setup engine (SETUP_CNTL 0, SCALE_3D_CNTL 0x100c1, vertices x*4, trigger =
+ONE_OVER_AREA_UC with host-computed 1/area bits) into the same 256x256 RGB565 surface and scans every pixel.  All 6 pass with 0 pixels changed outside the
+scissor and no clearly-inside pixel missing (edge band of ~2 px tolerated, counted as ambiguous): big triangle with the scissor box wholly inside it
+(4096/4096), edge crossing the box, triangle wholly outside the scissor (nothing drawn), whole-surface scissor (shape), inverted scissor (nothing drawn),
+partly overlapping triangle.  Together with 11.11 the hardware clip is proven for fills, blits and triangles, so the kernel may own the scissor and
+clamp user 3D streams to it (E1 design).

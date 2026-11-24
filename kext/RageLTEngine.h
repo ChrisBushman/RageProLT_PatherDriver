@@ -130,4 +130,35 @@ static inline int eng_blit16(volatile uint8_t *regs, uint32_t src_off, uint32_t 
     return 0;
 }
 
+/* Flat-colour triangle into a 16 bpp RGB565 surface through the 3D setup engine (recipe: docs/re-notes/3d-triangle.md, SETUP_CNTL 0 as Mesa).
+ * Vertices are integer pixels (x*4 sub-pixel encoding is applied here); ooa_bits is the IEEE-float bit pattern of 1/area (area in pixels^2,
+ * positive winding), computed by the caller: the kernel has no floating point.  Writing ONE_OVER_AREA_UC triggers the draw. */
+static inline int eng_tri16(volatile uint8_t *regs, uint32_t off, uint32_t pitch_px, const int32_t vx[3], const int32_t vy[3], uint32_t color565,
+                            uint32_t sc_lr, uint32_t sc_tb, uint32_t ooa_bits)
+{
+    uint32_t n;
+    if (eng_wait_idle(regs)) return -1;
+    eng_wq(regs, 0x0304, 0);                                                 /* SETUP_CNTL */
+    eng_wq(regs, MACH64_Z_CNTL, 0);
+    eng_wq(regs, MACH64_SCALE_3D_CNTL, MACH64_SCALE_3D_CNTL_SOLID);
+    eng_wq(regs, RAGE_R_DST_CNTL, 3u);
+    eng_wq(regs, MACH64_DP_PIX_WIDTH, RAGE_PIXW_565);
+    eng_wq(regs, MACH64_DP_FRGD_CLR, color565);
+    eng_wq(regs, MACH64_DP_WRITE_MASK, 0xffffffffu);
+    eng_wq(regs, MACH64_DP_MIX, 0x00070007u);
+    eng_wq(regs, MACH64_DP_SRC, MACH64_DP_SRC_FLAT);
+    eng_wq(regs, MACH64_SC_LEFT_RIGHT, sc_lr);
+    eng_wq(regs, MACH64_SC_TOP_BOTTOM, sc_tb);
+    eng_wq(regs, MACH64_CLR_CMP_CNTL, 0);
+    eng_wq(regs, MACH64_DST_OFF_PITCH, ((pitch_px / 8u) << 22) | (off >> 3));
+    for (n = 0; n < 3; n++) {
+        uint32_t b = MACH64_VERTEX_SLOT(n);
+        eng_wq(regs, b + MACH64_V_S, 0); eng_wq(regs, b + MACH64_V_T, 0); eng_wq(regs, b + MACH64_V_W, 0x3f800000u);
+        eng_wq(regs, b + MACH64_V_SPEC_ARGB, 0); eng_wq(regs, b + MACH64_V_Z, 0); eng_wq(regs, b + MACH64_V_ARGB, 0xffffffffu);
+        eng_wq(regs, b + MACH64_V_X_Y, (((uint32_t)(vx[n] * 4)) << 16) | (((uint32_t)(vy[n] * 4)) & 0xffffu));
+    }
+    eng_wq(regs, MACH64_ONE_OVER_AREA_UC, ooa_bits);                         /* trigger */
+    return 0;
+}
+
 #endif
