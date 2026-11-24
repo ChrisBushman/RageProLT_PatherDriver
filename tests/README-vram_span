@@ -1,0 +1,2 @@
+#!/bin/sh
+# host-side unit test of the usable-VRAM span predicate: gcc -I. -o /tmp/vst tests/vram_span_test.c && /tmp/vst
