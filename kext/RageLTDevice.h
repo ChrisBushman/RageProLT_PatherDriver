@@ -9,6 +9,16 @@
 #include "rage_vram.h"
 #include "rage_abi.h"
 
+/* Per-client drawing context (design 3.1 RageLTEngine).  The KERNEL owns all of it: a client can only ask for values that are checked against what it
+ * owns, and the scissor is always clamped to the target, so the hardware clip (proven, design 11.11-11.12) contains every primitive. */
+struct rage_ctx {
+    uint32_t owner;                    /* 0 = slot free */
+    uint32_t tgt_off, tgt_pitch, tgt_bpp, tgt_w, tgt_h;   /* tgt_bpp 0 = no target set */
+    uint32_t sc_l, sc_r, sc_t, sc_b;
+    uint32_t z_off, z_pitch, z_set;
+};
+#define RAGE_MAX_CTX 16u
+
 class RageLTDevice : public IOService
 {
     OSDeclareDefaultStructors(RageLTDevice)
@@ -23,6 +33,8 @@ class RageLTDevice : public IOService
     bool                 fEngineLive;  /* false until a later phase turns the engine on; the validated write path is dormant until then */
     uint32_t               fRefused;     /* batches refused by the guard (diagnostic) */
     bool                 fDispReserved; /* scanout + cursor block reserved in the allocator (done once, permanent) */
+    struct rage_ctx      fCtx[RAGE_MAX_CTX];
+    uint32_t               fFenceSubmitted, fFenceCompleted;   /* PIO phase: completes before submit returns; DMA keeps the same counters */
     struct rage_log     *fLog;         /* event ring (RAGE_FEAT_PANIC_LOG), allocated at start */
     IOSimpleLock        *fLogLock;     /* short spin lock: logging must be safe from any context, including an interrupt filter */
 
@@ -33,12 +45,24 @@ public:
 
     /* A client must obtain an owner id; closing the client calls releaseOwner() so nothing leaks. */
     uint32_t       newOwner(void);
+    struct rage_ctx *ctxFor(uint32_t owner, bool create);   /* caller holds fLock */
     void         releaseOwner(uint32_t owner);
     IOReturn     vramAlloc(uint32_t owner, uint32_t length, uint32_t align, uint32_t *offset);
     IOReturn     vramFree(uint32_t owner, uint32_t offset);
 
+    /* ---- engine (RageLTEngine.cpp).  All checked against what `owner` owns; refused calls change nothing. ---- */
+    IOReturn     engineEnable(void);                 /* reads the chip: only once the boot init is known to have run (BUS_EXT_REG_EN, CRTC on); resets + initialises the engine */
+    IOReturn     reserveDisplay(void);               /* reserves the scanout buffer (from the live CRTC) and the cursor/framebuffer block at the top */
+    IOReturn     setRenderTarget(uint32_t owner, uint32_t off, uint32_t pitch_px, uint32_t bpp, uint32_t w, uint32_t h);
+    IOReturn     setScissor(uint32_t owner, int32_t l, int32_t r, int32_t t, int32_t b);
+    IOReturn     setZBuffer(uint32_t owner, uint32_t off, uint32_t pitch_px);
+    IOReturn     fillRect(uint32_t owner, int32_t x, int32_t y, int32_t w, int32_t h, uint32_t color565);
+    uint32_t       fenceSubmitted(void) const { return fFenceSubmitted; }
+    uint32_t       fenceCompleted(void) const { return fFenceCompleted; }
+    IOReturn     waitFence(uint32_t seq);            /* bounded; kIOReturnTimeout on a stuck engine (which is reset) */
+
     /* pairs[2*i] = register byte offset, pairs[2*i+1] = value.  Validated as a whole by rage_batch_ok(); refused batches change nothing. */
-    IOReturn     submitBatch(const uint32_t *pairs, uint32_t npairs);
+    IOReturn     submitBatch(uint32_t owner, const uint32_t *pairs, uint32_t npairs);
 
     /* RAGE_FEAT_PANIC_LOG: all of these are no-ops (return success / do nothing) when the feature is compiled out */
     void         logEvent(uint32_t id, uint32_t owner, uint32_t a0, uint32_t a1, uint32_t a2, uint32_t a3, uint32_t a4);

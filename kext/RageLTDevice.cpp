@@ -41,6 +41,8 @@ bool RageLTDevice::start(IOService *provider)
     fEngineLive = false;
     fRefused = 0;
     fDispReserved = false;
+    { uint32_t k; for (k = 0; k < RAGE_MAX_CTX; k++) fCtx[k].owner = 0; }
+    fFenceSubmitted = fFenceCompleted = 0;
 
     logEvent(RAGE_EV_START, 0, RAGE_FEATURE_BITS, 0, 0, 0, 0);
     setProperty("RageLTFeatures", (unsigned long long)RAGE_FEATURE_BITS, 32);
@@ -83,6 +85,7 @@ void RageLTDevice::releaseOwner(uint32_t owner)
 {
     uint32_t n;
     IOLockLock(fLock);
+    { struct rage_ctx *c = ctxFor(owner, false); if (c) c->owner = 0; }
     n = rage_vram_free_owner(&fVram, owner);
     IOLockUnlock(fLock);
     logEvent(RAGE_EV_OWNER_FREE, owner, n, 0, 0, 0, 0);
@@ -106,25 +109,6 @@ IOReturn RageLTDevice::vramFree(uint32_t owner, uint32_t offset)
     IOLockUnlock(fLock);
     logEvent(RAGE_EV_VRAM_FREE, owner, offset, rc ? 1u : 0u, 0, 0, 0);
     return rc ? kIOReturnBadArgument : kIOReturnSuccess;
-}
-
-IOReturn RageLTDevice::submitBatch(const uint32_t *pairs, uint32_t npairs)
-{
-    uint32_t i;
-    if (!rage_batch_ok(pairs, npairs)) {                                               /* whole batch dropped */
-        fRefused++;
-        logEvent(RAGE_EV_BATCH_REFUSED, 0, npairs, pairs ? pairs[0] : 0, pairs ? pairs[1] : 0, fRefused, 0);
-        return kIOReturnBadArgument;
-    }
-    if (!fEngineLive) return kIOReturnNotReady;                                        /* dormant until a later phase enables it */
-    logEvent(RAGE_EV_BATCH, 0, npairs, pairs[0], pairs[1], 0, 0);
-    IOLockLock(fLock);
-    for (i = 0; i < npairs; i++) {
-        OSWriteLittleInt32((void *)fRegs, pairs[2 * i], pairs[2 * i + 1]);
-        eieio();
-    }
-    IOLockUnlock(fLock);
-    return kIOReturnSuccess;
 }
 
 /* ---- RAGE_FEAT_PANIC_LOG ---- */

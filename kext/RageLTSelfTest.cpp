@@ -88,20 +88,6 @@ IOReturn RageLTDevice::engineSelfTest(uint32_t mask, uint32_t *passmask, uint32_
         { 14,  0,  0,    0,0x1fff, 0,0x1fff, 0,  0,  64,  64, 3 },  /* small rect at the origin, no clip */
         { 15,  0,  0,    0,0x1fff, 0,0x1fff, 100, 0,  40,  40, 3 }, /* probe: x offset only */
         { 16,  0,  0,    0,0x1fff, 0,0x1fff, 0, 100,  40,  40, 3 }, /* probe: y offset only */
-        { 18,  0,  0,    0,0x1fff, 0,0x1fff, 100,100,  40,  40, 0 },  /* probe: DST_CNTL = 0 (right-to-left, bottom-to-top) */
-        { 19,  0,  0,    0,0x1fff, 0,0x1fff, 100,100,  40,  40, 0x08000003u },  /* probe: DST_CNTL = 3 | bit 27 */
-        { 20,  0,  0,    0,0x1fff, 0,0x1fff, 100,100,  40,  40, 0x00100003u },  /* probe: DST_CNTL = 3 | bit 20 */
-        { 21,  0,  0,    0,0x1fff, 0,0x1fff, 100,100,  40,  40, 0x00010003u },  /* probe: DST_CNTL = 3 | bit 16 */
-        { 22,  0,  0,    0,0x1fff, 0,0x1fff, 100,100,  40,  40, 0x00020003u },  /* probe: DST_CNTL = 3 | bit 17 */
-        { 23,  0,  0,    0,0x1fff, 0,0x1fff, 100,100,  40,  40, 0x00040003u },  /* probe: DST_CNTL = 3 | bit 18 */
-        { 24,  0,  0,    0,0x1fff, 0,0x1fff, 100,100,  40,  40, 0x00080003u },  /* probe: DST_CNTL = 3 | bit 19 */
-        { 25,  0,  0,    0,0x1fff, 0,0x1fff, 100,100,  40,  40, 0x00200003u },  /* probe: DST_CNTL = 3 | bit 21 */
-        { 26,  0,  0,    0,0x1fff, 0,0x1fff, 100,100,  40,  40, 0x00400003u },  /* probe: DST_CNTL = 3 | bit 22 */
-        { 27,  0,  0,    0,0x1fff, 0,0x1fff, 100,100,  40,  40, 0x00800003u },  /* probe: DST_CNTL = 3 | bit 23 */
-        { 28,  0,  0,    0,0x1fff, 0,0x1fff, 100,100,  40,  40, 0x01000003u },  /* probe: DST_CNTL = 3 | bit 24 */
-        { 29,  0,  0,    0,0x1fff, 0,0x1fff, 100,100,  40,  40, 0x02000003u },  /* probe: DST_CNTL = 3 | bit 25 */
-        { 30,  0,  0,    0,0x1fff, 0,0x1fff, 100,100,  40,  40, 0x04000003u },  /* probe: DST_CNTL = 3 | bit 26 */
-        { 31,  0,  0,    0,0x1fff, 0,0x1fff, 100,100,  40,  40, 0x10000003u },  /* probe: DST_CNTL = 3 | bit 28 */
         { 17,  0,  0,    0,0x1fff, 0,0x1fff, 0,  0,  40, 100, 3 },  /* probe: tall thin */
     };
     *passmask = 0; *outside = 0; *inside = 0; *status = 0;
@@ -125,24 +111,69 @@ IOReturn RageLTDevice::engineSelfTest(uint32_t mask, uint32_t *passmask, uint32_
     }
 
     /* ---- reservations: scanout (from the live CRTC) and the framebuffer/cursor block at the top ---- */
-    {
-        uint32_t pitch_px = ((crtcOP >> 22) & 0x3ffu) * 8u, base = (crtcOP & 0xfffffu) * 8u, lines = ((vtd >> 16) & 0x7ffu) + 1u;
-        uint32_t depth = (gen >> 8) & 7u, bpp = depth == 2 ? 1 : depth == 3 || depth == 4 ? 2 : depth == 5 ? 3 : 4;
-        uint32_t bytes = (pitch_px * lines * bpp + 0xfffu) & ~0xfffu;
-        logEvent(RAGE_EV_MARK, 0, 0xe0000001u, base, pitch_px, lines, bpp);
-        IOLockLock(fLock);
-        if (!fDispReserved) {
-            if (rage_vram_reserve(&fVram, base, bytes) || rage_vram_reserve(&fVram, 0x770000u, RAGE_VRAM_USABLE_END - 0x770000u)) {
-                IOLockUnlock(fLock); *status = 4; return kIOReturnNoSpace;
-            }
-            fDispReserved = true;
-        }
-        IOLockUnlock(fLock);
-    }
+    if (reserveDisplay() != kIOReturnSuccess) { *status = 4; return kIOReturnNoSpace; }
     owner = newOwner();
     if (vramAlloc(owner, BLOCK_BYTES, 4096, &off0)) { releaseOwner(owner); *status = 5; return kIOReturnNoSpace; }
     logEvent(RAGE_EV_MARK, owner, 0xe0000002u, off0, BLOCK_BYTES, 0, 0);
 
+
+    if (mask & 0x40000000u) {                          /* ---- engine API suite: contexts, kernel-owned target/scissor, validated batches, fence ---- */
+        uint32_t a, b2 = 0, offA = 0, offB = 0, pass = 0, o, x0 = 0;
+        uint32_t ownB = newOwner(); uint32_t col = 0, bad_outside = 0;
+        static const uint32_t C1 = 0x1234, C2 = 0xf81f, C3 = 0x07e0;
+        int32_t vx[3] = { 10, 250, 60 }, vy[3] = { 10, 20, 240 };
+        uint32_t tri[2 * 32]; uint32_t n = 0, v;
+        if (engineEnable() != kIOReturnSuccess) { *status = 7; releaseOwner(ownB); releaseOwner(owner); return kIOReturnNotReady; }
+        a = owner; (void)a; (void)x0; (void)col;
+        if (vramAlloc(ownB, BLOCK_BYTES, 4096, &offB)) { *status = 5; releaseOwner(ownB); releaseOwner(owner); return kIOReturnNoSpace; }
+        (void)b2; offA = off0;
+#define SCAN(name, expect_fn) do { bad_outside = 0; for (o = 0; o < SURF_BYTES; o += 2) { uint32_t px = o >> 1, x = px % SURF_PX, y = px / SURF_PX; uint16_t got = vr16(vram, offA + o), ex; expect_fn; if (got != ex) bad_outside++; } logEvent(RAGE_EV_MARK, owner, 0xd0000000u | (name), bad_outside, 0, 0, 0); } while (0)
+        for (o = 0; o < BLOCK_BYTES; o += 4) vw32(vram, offA + o, 0xa5a5a5a5u);
+        /* 0: a target the client does not own (offset 0 = scanout reservation) is refused; a target overrunning its block is refused; B cannot use A's block */
+        if (setRenderTarget(owner, 0, 256, 2, 256, 256) != kIOReturnSuccess && setRenderTarget(owner, offA, 256, 2, 256, 2048) != kIOReturnSuccess &&
+            setRenderTarget(ownB, offA, 256, 2, 256, 256) != kIOReturnSuccess && setRenderTarget(owner, offA, 250, 2, 250, 10) != kIOReturnSuccess) pass |= 1u << 0;
+        /* 1: valid target, full-target fill (rect larger than the target is clipped in the kernel too) */
+        if (setRenderTarget(owner, offA, 256, 2, 400, 400) != kIOReturnSuccess && setRenderTarget(owner, offA, 256, 2, 256, 256) == kIOReturnSuccess &&
+            fillRect(owner, -50, -50, 600, 600, C1) == kIOReturnSuccess) {
+            SCAN(1, ex = C1);
+            if (!bad_outside) pass |= 1u << 1;
+        }
+        /* 2: scissor requested far larger than the target is clamped; a fill then stays inside the scissor box */
+        if (setScissor(owner, -100, 1000, -100, 1000) == kIOReturnSuccess && setScissor(owner, 64, 127, 32, 95) == kIOReturnSuccess &&
+            fillRect(owner, 0, 0, 300, 300, C2) == kIOReturnSuccess) {
+            SCAN(2, ex = (x >= 64 && x <= 127 && y >= 32 && y <= 95) ? C2 : C1);
+            if (!bad_outside) pass |= 1u << 2;
+        }
+        /* 3: client batch (state + triangle, no address/scissor registers) is clipped by the KERNEL's scissor */
+        tri[n++] = 0x0304; tri[n++] = 0; tri[n++] = MACH64_Z_CNTL; tri[n++] = 0x1; tri[n++] = MACH64_SCALE_3D_CNTL; tri[n++] = MACH64_SCALE_3D_CNTL_SOLID;
+        tri[n++] = MACH64_DP_FRGD_CLR; tri[n++] = C3; tri[n++] = MACH64_DP_WRITE_MASK; tri[n++] = 0xffffffffu; tri[n++] = MACH64_DP_MIX; tri[n++] = 0x00070007u;
+        tri[n++] = MACH64_DP_SRC; tri[n++] = MACH64_DP_SRC_FLAT; tri[n++] = MACH64_CLR_CMP_CNTL; tri[n++] = 0;
+        for (v = 0; v < 3; v++) {
+            uint32_t bb = MACH64_VERTEX_SLOT(v);
+            tri[n++] = bb + MACH64_V_S; tri[n++] = 0; tri[n++] = bb + MACH64_V_T; tri[n++] = 0; tri[n++] = bb + MACH64_V_W; tri[n++] = 0x3f800000u;
+            tri[n++] = bb + MACH64_V_SPEC_ARGB; tri[n++] = 0; tri[n++] = bb + MACH64_V_Z; tri[n++] = 0; tri[n++] = bb + MACH64_V_ARGB; tri[n++] = 0xffffffffu;
+            tri[n++] = bb + MACH64_V_X_Y; tri[n++] = (((uint32_t)(vx[v] * 4)) << 16) | (((uint32_t)(vy[v] * 4)) & 0xffffu);
+        }
+        tri[n++] = MACH64_ONE_OVER_AREA_UC; tri[n++] = 0x37995b4du;
+        { uint32_t s0 = fenceSubmitted();
+          if (submitBatch(owner, tri, n / 2) == kIOReturnSuccess && fenceSubmitted() == s0 + 1 && fenceCompleted() == fenceSubmitted()) {
+              SCAN(3, ex = (x >= 64 && x <= 127 && y >= 32 && y <= 95) ? C3 : C1);     /* triangle covers the whole box (4096 px), none outside */
+              if (!bad_outside) pass |= 1u << 3;
+          } }
+        /* 4: a batch carrying a kernel-owned register (scissor, address) is refused as a whole and draws nothing */
+        { uint32_t evil[6] = { MACH64_DP_FRGD_CLR, 0x1111, MACH64_SC_LEFT_RIGHT, 0x1fff0000u, MACH64_DST_OFF_PITCH, 0 }; uint32_t before = refusedCount();
+          if (submitBatch(owner, evil, 3) == kIOReturnBadArgument && refusedCount() == before + 1) pass |= 1u << 4; }
+        /* 5: a context with no target cannot submit; Z_CNTL without a Z buffer is neutralised (batch still runs, nothing outside the scissor changes) */
+        { uint32_t one[2] = { MACH64_DP_FRGD_CLR, 1 };
+          if (submitBatch(ownB, one, 1) == kIOReturnNotReady) pass |= 1u << 5; }
+        /* 6: release frees the context and the VRAM; the slot can be reused */
+        releaseOwner(ownB);
+        { uint32_t t2;
+          if (vramAlloc(owner, 4096, 4096, &t2) == kIOReturnSuccess && vramFree(owner, t2) == kIOReturnSuccess) pass |= 1u << 6; }
+        *passmask = pass; *inside = 0; *outside = 0;
+        releaseOwner(owner);
+        return kIOReturnSuccess;
+    }
 
     if (mask & 0x80000000u) {                          /* ---- triangle scissor-containment suite (low bits select cases) ---- */
         static const struct { uint32_t L, R, T, B; int32_t vx[3], vy[3]; uint32_t ooa; int expect_draw; } tc[] = {

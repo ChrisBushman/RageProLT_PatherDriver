@@ -315,3 +315,18 @@ clamp user 3D streams to it (E1 design).
 
 Allow-list tightened accordingly (common/rage_guard.h, tests/guard_test.c 62 checks): removed DST/Z/SRC_OFF_PITCH, TEX_n_OFF, SECONDARY_TEX_OFF, SC_*,
 DP_PIX_WIDTH, DST_Y_X..DST_HEIGHT_WIDTH, DST_X_Y/WIDTH_HEIGHT, SRC_Y_X/SRC_WIDTH1, SRC_CNTL, HOST_DATA, GUI_TRAJ_CNTL.  Open item E1 is closed.
+
+### 11.13 Phase 3 step 1: engine class (kext/RageLTEngine.cpp), G4 Nov 24
+
+RageLTDevice now has per-owner contexts (16) holding a kernel-owned render target, Z buffer and scissor; `setRenderTarget` / `setZBuffer` accept only extents the
+owner allocated (rage_vram_owns), `setScissor` clamps to the target, `submitBatch(owner, pairs, n)` validates the whole batch (guard), prepends the kernel
+prologue (DST_CNTL, DP_PIX_WIDTH, DST_OFF_PITCH, scissor, Z_OFF_PITCH), neutralises Z_CNTL when the owner has no Z buffer, drains through the FIFO with a
+free-slot wait per write, waits for idle (bounded; a stuck engine is reset and reported) and advances the fence counters.  `fillRect` clips to scissor/target in
+the kernel as well.  `engineEnable()` is the only place that reads the chip to start the engine (needs BUS_EXT_REG_EN and CRTC on).  PIO is synchronous: the
+fence is complete when submit returns; the DMA phase keeps the counters and returns earlier.
+Hardware result (debug ENGTEST): API suite 7/7 (unowned/overrunning/foreign/misaligned targets refused; full fill clipped; oversized scissor clamped; client
+triangle batch clipped by the kernel scissor; kernel-owned register batch refused whole; context-less submit refused; release frees the slot), plus the 17 2D and
+6 triangle cases re-run unchanged.
+Known gaps recorded for the next steps: per-client 3D state (SCALE_3D_CNTL, SETUP_CNTL, TEX_*, DP_*) is not saved per context, so each client batch must carry its
+full state; TEX_n_OFF are not yet settable (texture binding selector comes with the GL bundle; stale texture bases can only point at memory the engine could already read);
+32 bpp fills and kernel blit/present are not done yet.
