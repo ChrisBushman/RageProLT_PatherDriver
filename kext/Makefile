@@ -9,7 +9,8 @@ KFRAME := /System/Library/Frameworks/Kernel.framework
 KINC := -I$(KFRAME)/Headers -I$(KFRAME)/PrivateHeaders -I. -I../common -I../config
 KDEF := -DKERNEL -DKERNEL_PRIVATE -DDRIVER_PRIVATE -DAPPLE -DNeXT
 # -mcpu=750 -msoft-float: G3 target, no FP instructions at all.  Other flags are the proven set from the earlier kext.
-KARCH := -mcpu=750 -msoft-float
+EXTRA ?=
+KARCH := -mcpu=750 -msoft-float $(EXTRA)   # EXTRA: e.g. -DRAGE_DEBUG_PANIC=1 for the forced-panic test build only
 KCXX := -static -mlong-branch -fno-rtti -fno-exceptions -fcheck-new -fno-builtin -fapple-kext $(KARCH) -O2 -Wall
 KCC  := -static -mlong-branch -fno-builtin $(KARCH) -O2 -Wall
 EXEC := ATIRageProLT

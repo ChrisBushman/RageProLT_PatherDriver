@@ -268,3 +268,23 @@ Kernel-originated UDP is not used: the 10.3 kernel has no socket KPI for kexts, 
 **First G4 load (MDD, next to RageStubFB + patched ATIRagePro + Mach64Accelerator):** loaded, no panic; `RageLTDevice` registered/matched/active; property `RageLTFeatures` = 255; log shows start, owner and client lifecycle, marks; daemon followed the ring live and wrote the file; BAR0 maps 16 MB; no register access was made. `kextunload -b com.local.ATIRageProLT` succeeded; `IOMalloc` allocation returned **exactly** to its pre-load value (4268955), `RageLTLogClient` count 0, both displays intact, Apple's kexts untouched.
 
 **Not yet done in Phase 2:** the forced-panic test (what actually survives: file, UDP, `panic.log`), which needs a debug-only selector that panics on purpose; the install location and boot-time start of `ragelt daemon`.
+
+### 11.10 Phase 2: forced-panic test (G4 MDD, 2026-11-24 15:13)
+Debug build only (`make -C kext kext EXTRA=-DRAGE_DEBUG_PANIC=1`; a normal build contains no panic selector, verified with `strings`). Setup: kext loaded, `ragelt daemon FILE 192.168.5.213:9998` running, `ragelt panic 0xc0de0001 200` = MARK, wait 200 ms, then the selector logs `ERROR 0xdead0001` and calls `panic()`. Evidence (not in the repo): `~/g5logs/rage-standalone/panic-test/`.
+
+| Capture path | Survived the panic? | Content |
+|---|---|---|
+| **Daemon file** (`F_FULLFSYNC` per batch) | yes | every event up to and including the MARK (seq 0x0a), 200 ms before the panic |
+| **UDP mirror** | yes | the same events, received on the dev host before the machine died |
+| **Last event** (`ERROR`, seq 0x0b, logged microseconds before `panic()`) | **no** | lost on both paths: it falls inside the 20 ms poll window. Inherent: nothing can drain the ring after the panic starts |
+| **Apple `/Library/Logs/panic.log`** | yes, written at next boot | `panic(cpu 1): RageLT: forced panic test (token 0xc0de0001)`, a backtrace, and `com.local.ATIRageProLT(0.1)@0x320da000` named as the module in the backtrace |
+| **Symbolication** | works | backtrace frame `0x320DD000` - load `0x320da000` - pad `0x1000` = `0x2000`, inside `selPanic` (`0x1f8c..0x2048`) |
+
+Conclusions
+1. The two sources complement each other: the daemon says what led up to a crash, `panic.log` says what and where (string, function via symbolication). Both go into `ragelt-report`.
+2. **Expect to lose the last ~20 ms of events.** Mitigation for the engine code: log *intent* events (e.g. "about to submit batch N") before risky operations, so a crash is bracketed by events that already reached the file; never rely on the final event.
+3. The machine does **not** restart after a kernel panic; the tester must power-cycle it. The issue template (Phase 6) says so.
+4. The unrelated older panics visible earlier in `panic.log` (`0x300 - Data access`, `IOMemoryDescriptor::_RESERVEDIOMemoryDescriptor3 called`) predate this driver and are from earlier sessions.
+5. `ragelt-report` verified on Panther's shell (15 KB with the driver absent; trims `ioreg` lines to 240 columns).
+
+**Phase 2 exit met** (ring + file + UDP mirror + report script + forced-panic test on the G4). Still to do for the installed product (Phase 6): where `ragelt daemon` lives and how it starts at boot.

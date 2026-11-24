@@ -13,7 +13,7 @@ sec() { printf '\n===== %s =====\n' "$1"; }
   sec "driver features / ring state"; [ -x "$RAGELT" ] && "$RAGELT" info 2>&1 || echo "ragelt not built or driver not loaded"
   sec "driver event ring (all events still held)"; [ -x "$RAGELT" ] && "$RAGELT" dump 2>&1
   sec "ioreg (Rage / RageLT / framebuffer nodes)"
-  ioreg -l -w0 2>&1 | grep -i -E "RageLT|ATIRagePro|ATY,|IOAccelerator|IOFramebuffer|MEMSIZE|vendor-id|device-id" | head -80
+  ioreg -l -w0 2>&1 | grep -v IOKitDiagnostics | grep -i -E "RageLT|ATIRagePro|ATY,|IOAccelerator|IOFramebuffer|MEMSIZE|vendor-id|device-id" | cut -c1-240 | head -80
   sec "daemon log (last 200 lines)"; for f in /var/log/ratelt-driver.log /var/log/ragelt-driver.log; do [ -f "$f" ] && { echo "[$f]"; tail -200 "$f"; }; done
   sec "panic.log (last panic, if any)"; for f in /Library/Logs/panic.log /Library/Logs/PanicReporter/*; do [ -f "$f" ] && { echo "[$f]"; tail -120 "$f"; }; done
   sec "system.log (driver lines)"; grep -i -E "RageLT|ATIRagePro|Rage Pro|panic|kernel:.*ATY" /var/log/system.log 2>/dev/null | tail -100

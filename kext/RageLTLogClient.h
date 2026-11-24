@@ -15,7 +15,7 @@ class RageLTLogClient : public IOUserClient
     RageLTDevice    *fDev;
     task_t           fTask;
     uint32_t         fOwner;
-    IOExternalMethod fMethods[RAGE_LOG_SEL_COUNT];
+    IOExternalMethod fMethods[RAGE_LOG_SEL_COUNT + 1];
 
 public:
     virtual bool initWithTask(task_t owningTask, void *securityID, UInt32 type);
@@ -27,6 +27,7 @@ public:
     IOReturn selInfo(uint32_t *head, uint32_t *capacity, uint32_t *refused, uint32_t *features);
     IOReturn selRead(uint32_t fromSeq, void *out, IOByteCount *outSize);
     IOReturn selMark(uint32_t a0, uint32_t a1);
+    IOReturn selPanic(uint32_t token);                 /* RAGE_DEBUG_PANIC only */
 };
 
 #endif

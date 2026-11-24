@@ -29,6 +29,9 @@
 #ifndef RAGE_FEAT_FS_SCALE
 #define RAGE_FEAT_FS_SCALE    1   /* full-screen 32 bpp inside 8 MB VRAM (bug L4)                        (Phase 3/5) */
 #endif
+#ifndef RAGE_DEBUG_PANIC
+#define RAGE_DEBUG_PANIC      0   /* DEBUG ONLY: a selector that panics on purpose, to test what the capture paths preserve. Never in release. */
+#endif
 #ifndef RAGE_DEBUG_TRACE
 #define RAGE_DEBUG_TRACE      0   /* verbose, fsync'd trace; off in release                                        */
 #endif

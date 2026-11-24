@@ -1,6 +1,7 @@
 #include "RageLTLogClient.h"
 #include "RageLTDevice.h"
 #include <IOKit/IOLib.h>
+#include <kern/debug.h>
 
 #define super IOUserClient
 OSDefineMetaClassAndStructors(RageLTLogClient, IOUserClient)
@@ -26,6 +27,9 @@ bool RageLTLogClient::start(IOService *provider)
             { (IOService *)0, (IOMethod)&RageLTLogClient::selMark, kIOUCScalarIScalarO, 2, 0 },
         };
         for (int i = 0; i < RAGE_LOG_SEL_COUNT; i++) fMethods[i] = m[i];
+#if RAGE_DEBUG_PANIC
+        { IOExternalMethod p = { (IOService *)0, (IOMethod)&RageLTLogClient::selPanic, kIOUCScalarIScalarO, 1, 0 }; fMethods[RAGE_LOG_SEL_PANIC] = p; }
+#endif
     }
     fDev->logEvent(RAGE_EV_CLIENT_OPEN, fOwner, RAGE_CLIENT_LOG, 0, 0, 0, 0);
     return true;
@@ -33,7 +37,7 @@ bool RageLTLogClient::start(IOService *provider)
 
 IOExternalMethod *RageLTLogClient::getTargetAndMethodForIndex(IOService **target, UInt32 index)
 {
-    if (index >= RAGE_LOG_SEL_COUNT || !fDev) return 0;
+    if (index >= RAGE_LOG_SEL_COUNT + RAGE_DEBUG_PANIC || !fDev) return 0;
     *target = this;
     return &fMethods[index];
 }
@@ -67,3 +71,16 @@ IOReturn RageLTLogClient::selMark(uint32_t a0, uint32_t a1)
     fDev->logEvent(RAGE_EV_MARK, fOwner, a0, a1, 0, 0, 0);
     return kIOReturnSuccess;
 }
+
+#if RAGE_DEBUG_PANIC
+IOReturn RageLTLogClient::selPanic(uint32_t token)
+{
+    if (!fDev) return kIOReturnNotAttached;
+    fDev->logEvent(RAGE_EV_ERROR, fOwner, 0xdead0001u, token, 0, 0, 0);          /* the last event the ring will ever hold */
+    IOLog("RageLT: DEBUG forced panic, token 0x%lx\n", (unsigned long)token);
+    panic("RageLT: forced panic test (token 0x%x)", token);
+    return kIOReturnSuccess;
+}
+#else
+IOReturn RageLTLogClient::selPanic(uint32_t) { return kIOReturnUnsupported; }
+#endif

@@ -58,6 +58,12 @@ int main(int argc, char **argv)
         if (argc < 3 || !(c = open_log())) return argc < 3 ? 2 : 1;
         return IOConnectMethodScalarIScalarO(c, RAGE_LOG_SEL_MARK, 2, 0, (int)strtoul(argv[2], 0, 0), argc > 3 ? (int)strtoul(argv[3], 0, 0) : 0) ? 1 : 0;
     }
+    if (!strcmp(cmd, "panic")) {      /* debug builds of the kext only: ragelt panic TOKEN [DELAY_MS] -- marks, waits, then panics the machine ON PURPOSE */
+        if (argc < 3 || !(c = open_log())) return argc < 3 ? 2 : 1;
+        IOConnectMethodScalarIScalarO(c, RAGE_LOG_SEL_MARK, 2, 0, (int)strtoul(argv[2], 0, 0), 0x70616e63);
+        if (argc > 3) usleep((useconds_t)atoi(argv[3]) * 1000);
+        return IOConnectMethodScalarIScalarO(c, RAGE_LOG_SEL_PANIC, 1, 0, (int)strtoul(argv[2], 0, 0)) ? 1 : 0;
+    }
     if (!strcmp(cmd, "dump") || !strcmp(cmd, "daemon")) {
         int daemon_mode = !strcmp(cmd, "daemon"), fd = -1, us = -1; struct sockaddr_in dst; uint32_t next = 0; unsigned long long total_lost = 0;
         if (!(c = open_log())) return 1;
@@ -94,6 +100,6 @@ int main(int argc, char **argv)
         (void)total_lost;
         return 0;
     }
-    fprintf(stderr, "usage: ragelt info | dump | mark N [M] | daemon FILE [HOST:PORT]\n");
+    fprintf(stderr, "usage: ragelt info | dump | mark N [M] | panic TOKEN [DELAY_MS] | daemon FILE [HOST:PORT]\n");
     return 2;
 }
