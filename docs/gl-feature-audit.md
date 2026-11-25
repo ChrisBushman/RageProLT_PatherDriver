@@ -1,6 +1,6 @@
 # GL feature audit (Nov 25)
 
-Evidence: `tools/ragegl/gl_probe` (128 probes) on the G4 MDD against the standalone driver: **127 pass, 1 fail** (ARB fragment program); `gl_suite` 290/290.
+Evidence: `tools/ragegl/gl_probe` (129 probes) on the G4 MDD against the standalone driver: **128 pass, 1 fail** (ARB fragment program); `gl_suite` 290/290.
 Status words: **tested** = a probe draws and checks pixels; **accepted-only** = the call is accepted but the effect is not verified (weaker than tested);
 **failing** = probe fails (driver gap); **unsupported** = GLEngine or the chip cannot do it; **untested** = no probe yet.
 
@@ -75,7 +75,7 @@ separate_specular_color, texture_mirror_clamp, compiled_vertex_array, abgr, bgra
 | Destination alpha | unsupported | chip is RGB565/1555, ALPHA_BITS 0 |
 
 ## Known limits of the CPU rasteriser path
-Level-0 only for CPU textures. Two-unit texturing on the CPU path only for crossbar COMBINE. Alpha test (before stencil/depth, so discarded fragments touch neither) and fog (vertex fog factor interpolated, blended with the fog colour) are applied on the CPU path (probes cpu_alpha_test, cpu_fog). Colour-mask nuances remain.
+CPU 2D textures use one mip level per triangle (nearest level from the texel/pixel area ratio; probe cpu_mip_level); cube, 3D and rectangle maps are level 0 only. Two-unit texturing on the CPU path only for crossbar COMBINE. Alpha test (before stencil/depth, so discarded fragments touch neither) and fog (vertex fog factor interpolated, blended with the fog colour) are applied on the CPU path (probes cpu_alpha_test, cpu_fog). Colour-mask nuances remain.
 
 ## Resolved (Nov 25): texture deleted while its draw was unsubmitted
 glDeleteTextures freed the texture's VRAM immediately, but the draw that sampled it could still sit in the unsubmitted batch; the kernel validates texture offsets against live allocations, so that draw sampled garbage (a stale red block in the probes). Apps that delete a texture before the frame ends (common) were exposed. `mach64_texture_deleted` now takes the context and submits the batch first when the slot was bound in the current batch. Regression probe: `tex_delete_before_read`. The bug looked like a heisenbug (any extra getenv/fprintf call moved the batch flush) and took a long bisect; lesson: when a probe result changes with unrelated code, suspect batching/lifetime races before hardware state.

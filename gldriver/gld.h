@@ -187,7 +187,7 @@ void     mach64_dispatch_render_ctl(gld_context *, uint32_t, uint32_t, uint32_t,
 /* gld_pixels.c / control slots */
 void mach64_ctl00(gld_context *, uint32_t op, float value);   /* table[0x00] = glAccum (GL_ACCUM 0x100, LOAD 0x101, RETURN 0x102, MULT 0x103, ADD 0x104) */
 void mach64_accum_clear(gld_context *);
-typedef struct m64_cpuenv_s { const struct m64_cpuenv_s *e2; const uint32_t *img; int w, h, wsh, clamp_s, clamp_t, bil, has_a, cube, vol, depth, clamp_r; const uint32_t *vimg; const uint32_t *face[6]; uint32_t mode, rgbf, alf, src[3], asrc[3], op[3], aop[3]; int rscale, ascale, ec[4]; } m64_cpuenv;
+typedef struct m64_cpuenv_s { const struct m64_cpuenv_s *e2; int nlev; const uint32_t *limg[12]; int lw[12], lh[12]; const uint32_t *img; int w, h, wsh, clamp_s, clamp_t, bil, has_a, cube, vol, depth, clamp_r; const uint32_t *vimg; const uint32_t *face[6]; uint32_t mode, rgbf, alf, src[3], asrc[3], op[3], aop[3]; int rscale, ascale, ec[4]; } m64_cpuenv;
 int mach64_cpu_env(gld_context *, m64_cpuenv *);
 int mach64_env_needs_cpu(uint32_t gli);
 int mach64_copy_tex_sub(gld_context *, void *texobj, int face, uint32_t level, uint32_t xoff, uint32_t yoff, int zoff, uint32_t srcx, uint32_t srcy, int w, int h);

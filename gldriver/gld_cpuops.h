@@ -108,6 +108,23 @@ static inline float fx_abs(float f) { uint32_t b; __builtin_memcpy(&b, &f, 4); b
 static inline int sat255(int v) { return v < 0 ? 0 : v > 255 ? 255 : v; }
 /* Two-unit CPU compositing (ARB_texture_env_crossbar): while unit 1 is evaluated, the primary colour and both units' texels are reachable by name. */
 static struct { int on; uint32_t pri, t0, t1; } g_xb;
+/* Mipmapped CPU textures: one level per triangle, from the ratio of texel area to pixel area (nearest level, LOD = 0.5*log2(ratio) rounded).  `st` are the three
+ * vertices' true texture coordinates; `pix2` is twice the triangle's area in whole pixels.  Returns the level (0 when the texture has one). */
+static int env_pick_level(const m64_cpuenv *e, const float *s, const float *t, float pix2)
+{
+    float a, r, thr = 2.0f; int k = 0;
+    if (e->nlev < 2 || pix2 <= 0.0f) return 0;
+    a = (s[1] - s[0]) * (t[2] - t[0]) - (s[2] - s[0]) * (t[1] - t[0]); if (a < 0.0f) a = -a;
+    r = a * (float)e->lw[0] * (float)e->lh[0] / pix2;
+    while (k < e->nlev - 1 && r >= thr) { k++; thr *= 4.0f; }
+    return k;
+}
+static void env_set_level(m64_cpuenv *e, int k)
+{
+    int w;
+    if (k <= 0 || k >= e->nlev) return;
+    e->img = e->limg[k]; e->w = e->lw[k]; e->h = e->lh[k]; for (w = 0; (1 << (w + 1)) <= e->w; w++) {} e->wsh = w;
+}
 static int env_arg(const m64_cpuenv *e, uint32_t src, uint32_t op, int ch, uint32_t cf, uint32_t ct)    /* ch 0..2 = R,G,B, 3 = A */
 {
     uint32_t c = (g_xb.on && src == 0x84c0u) ? g_xb.t0 : (g_xb.on && src == 0x84c1u) ? g_xb.t1 : (g_xb.on && src == 0x8577u) ? g_xb.pri : src == 0x1702u ? ct : src == 0x8576u ? (((uint32_t)e->ec[3] << 24) | ((uint32_t)e->ec[0] << 16) | ((uint32_t)e->ec[1] << 8) | (uint32_t)e->ec[2]) : cf;     /* TEXTURE / CONSTANT / PRIMARY and PREVIOUS (unit 0) */

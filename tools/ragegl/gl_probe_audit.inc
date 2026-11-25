@@ -532,6 +532,19 @@ static void a_tex2x2_repeat(void)
     glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE); glDeleteTextures(1, &id);
     report("texture deleted before readback", glerr() ? -1 : near3(50, 50, 64, 192, 64, 24), 0);
 }
+/* CPU-composited (COMBINE) draw of a mipmapped texture: a 64x64 map minified onto 8x8 pixels must use level 3 (8x8) */
+static void a_cpu_mip_level(void)
+{
+    static const unsigned char col[7][3] = { { 255, 0, 0 }, { 0, 255, 0 }, { 0, 0, 255 }, { 255, 255, 0 }, { 0, 255, 255 }, { 255, 0, 255 }, { 255, 255, 255 } };
+    static unsigned char img[64 * 64 * 3]; GLuint id; int l, sz, k;
+    reset(0, 0, 0); glEnable(GL_TEXTURE_2D); glGenTextures(1, &id); glBindTexture(GL_TEXTURE_2D, id); glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    for (l = 0, sz = 64; sz >= 1; l++, sz >>= 1) { for (k = 0; k < sz * sz; k++) { img[k * 3] = col[l][0]; img[k * 3 + 1] = col[l][1]; img[k * 3 + 2] = col[l][2]; } glTexImage2D(GL_TEXTURE_2D, l, GL_RGB, sz, sz, 0, GL_RGB, GL_UNSIGNED_BYTE, img); }
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST_MIPMAP_NEAREST); glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_COMBINE_ARB); glTexEnvi(GL_TEXTURE_ENV, GL_COMBINE_RGB_ARB, GL_REPLACE); glTexEnvi(GL_TEXTURE_ENV, GL_SOURCE0_RGB_ARB, GL_TEXTURE); glTexEnvi(GL_TEXTURE_ENV, GL_OPERAND0_RGB_ARB, GL_SRC_COLOR);
+    glColor3f(1, 1, 1); glBegin(GL_QUADS); glTexCoord2f(0, 0); glVertex2f(10, 10); glTexCoord2f(1, 0); glVertex2f(18, 10); glTexCoord2f(1, 1); glVertex2f(18, 18); glTexCoord2f(0, 1); glVertex2f(10, 18); glEnd();
+    glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
+    report("CPU path picks the mip level (64x64 on 8x8 px = level 3)", glerr() ? -1 : near3(14, 14, 255, 255, 0, 24), 0); glDeleteTextures(1, &id);
+}
 static void a_multisample_attr(void)
 {
     GLint attrs[] = { AGL_RGBA, AGL_DOUBLEBUFFER, AGL_SAMPLE_BUFFERS_ARB, 1, AGL_SAMPLES_ARB, 4, AGL_NONE }; AGLPixelFormat pf = aglChoosePixelFormat(0, 0, attrs);
@@ -560,6 +573,7 @@ static void a_cpu_fog(void)
 }
 
 #define AUDIT_ENTRIES \
+    { "cpu_mip_level", a_cpu_mip_level, "GL_ARB_texture_env_combine" }, \
     { "tex_delete_before_read", a_tex2x2_repeat, 0 }, \
     { "depth_texture_draw", a_depth_texture_draw, 0 }, \
     { "cpu_alpha_test", a_cpu_alpha_test, "GL_EXT_blend_minmax" }, { "cpu_fog", a_cpu_fog, "GL_EXT_fog_coord" }, \

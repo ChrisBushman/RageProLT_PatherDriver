@@ -36,6 +36,7 @@ typedef struct {
     uint32_t lvl_off[12], lvl_w[12], lvl_h[12];   /* per level L (0 = base): VRAM offset and size */
     uint32_t hwfmt, bpt;                   /* hardware texel datatype (6 ARGB8888, 4 RGB565, 3 ARGB1555, 15 ARGB4444) and bytes per texel */
     uint32_t tick;                         /* last-use stamp (LRU eviction) */
+    uint32_t *cpul[12];                    /* decoded levels 1.. (mipmapped CPU sampling), same lifetime as cpu */
     uint32_t *cpu;                         /* lazily decoded ARGB8888 copy of level 0 for the CPU rasteriser (mach64_cpu_env); freed on re-upload/delete */
     uint32_t h1, h2, hlen;                 /* content hash of the source image(s) at the last upload: an unchanged re-upload is skipped */
     uint32_t gen;                          /* mach64_batch_gen when last bound: still referenced by the pending (unsubmitted) batch if == current */
@@ -169,6 +170,7 @@ void mach64_texture_bound(void *texobj) { (void)texobj; }   /* no bind hook; see
 static void cube_cache_drop(uint32_t state);
 static void vol_cache_drop(uint32_t state);
 
+static void cpu_free(mach64_tex_slot *s) { int k; free(s->cpu); s->cpu = 0; for (k = 0; k < 12; k++) { free(s->cpul[k]); s->cpul[k] = 0; } }
 void mach64_texture_deleted(gld_context *ctx, void *texobj)
 {
     mach64_tex_slot *s; int used;
@@ -179,7 +181,7 @@ void mach64_texture_deleted(gld_context *ctx, void *texobj)
     TEX_LOCK();
     s = slot_find(tex_key(texobj));
     cube_cache_drop(tex_key(texobj)); vol_cache_drop(tex_key(texobj));
-    if (s) { heap_free(s->owner, s->off); s->key = 0; s->owner = 0; s->rsize = 0; free(s->cpu); s->cpu = 0; }   /* reclaim VRAM + slot */
+    if (s) { heap_free(s->owner, s->off); s->key = 0; s->owner = 0; s->rsize = 0; cpu_free(s); }   /* reclaim VRAM + slot */
     TEX_UNLOCK();
 }
 
@@ -561,7 +563,7 @@ static int mach64_upload(gld_context *ctx, void *texobj)
     if (pre_used || g_evict_used) mach64_flush_batch(ctx);
     p->dirty |= MACH64_DIRTY_STATE;   /* the upload's 2D blit clobbers engine state; the next triangle re-emits it */
     if (!slot) { int k; for (k = 0; k < 12; k++) { free(mir_bufs[k]); free(dec_bufs[k]); } return 0; }
-    free(slot->cpu); slot->cpu = 0;
+    cpu_free(slot);
     slot->hwfmt = hwfmt; slot->bpt = bpt; slot->texobj = texobj; slot->tick = ++g_tick;
     {   uint16_t f0 = (uint16_t)lvl[0].fmt;      /* alpha-bearing: RGBA / ALPHA / LUM_ALPHA / INTENSITY (RGB565 has none, whatever the source) */
         slot->has_alpha = (f0 == 0x1908u || f0 == 0x1906u || f0 == 0x190Au || f0 == 0x8049u) && hwfmt != 4u;
@@ -1422,6 +1424,18 @@ static int vol_env(gld_context *ctx, m64_cpuenv *o)
     return 1;
 }
 /* Fill *o for the CPU rasteriser: the bound texture's level 0 as ARGB8888 and the environment.  Returns 0 if the texture cannot be sampled on the CPU. */
+/* Decode level `lv` of a resident texture from VRAM into a malloc'd ARGB8888 image (0 on failure). */
+static uint32_t *cpu_level(mach64_priv *p, const mach64_tex_slot *sl, uint32_t lv)
+{
+    uint32_t w = sl->lvl_w[lv], h = sl->lvl_h[lv], n = w * h, bytes = (n * sl->bpt + 3u) & ~3u, done = 0; unsigned char *raw; uint32_t *out; int rc = 0;
+    if (!w || !h || !sl->bpt) return 0;
+    raw = (unsigned char *)malloc(bytes); out = (uint32_t *)malloc((size_t)n * 4u);
+    if (!raw || !out) { free(raw); free(out); return 0; }
+    while (done < bytes && !rc) { uint32_t c = bytes - done; if (c > 0x80000u) c = 0x80000u; rc = rgb_readback2(&p->rb, sl->lvl_off[lv] + done, raw + done, c, sl->bpt == 4u ? 2u : sl->bpt == 2u ? 1u : 0u); done += c; }
+    if (rc) { free(raw); free(out); return 0; }
+    cpu_decode(sl, raw, n, out); free(raw);
+    return out;
+}
 static int slot_env(gld_context *ctx, mach64_tex_slot *sl, uint32_t u, m64_cpuenv *o)
 {
     mach64_priv *p = MACH64_PRIV(ctx); uint32_t k;
@@ -1429,14 +1443,20 @@ static int slot_env(gld_context *ctx, mach64_tex_slot *sl, uint32_t u, m64_cpuen
     if (!sl || !sl->rsize) return 0;
     if (sl->hwfmt == 11u || sl->hwfmt == 12u) return 0;
     if (!sl->cpu) {
-        uint32_t w = sl->lvl_w[0], h = sl->lvl_h[0], n = w * h, bytes = (n * sl->bpt + 3u) & ~3u, done = 0; unsigned char *raw; int rc = 0;
+        uint32_t w = sl->lvl_w[0], h = sl->lvl_h[0];
         if (!w || !h || !sl->bpt) return 0;
-        raw = (unsigned char *)malloc(bytes); sl->cpu = (uint32_t *)malloc((size_t)n * 4u);
-        if (!raw || !sl->cpu) { free(raw); free(sl->cpu); sl->cpu = 0; return 0; }
         mach64_flush_batch(ctx);
-        while (done < bytes && !rc) { uint32_t c = bytes - done; if (c > 0x80000u) c = 0x80000u; rc = rgb_readback2(&p->rb, sl->lvl_off[0] + done, raw + done, c, sl->bpt == 4u ? 2u : sl->bpt == 2u ? 1u : 0u); done += c; }
-        if (rc) { free(raw); free(sl->cpu); sl->cpu = 0; return 0; }
-        cpu_decode(sl, raw, n, sl->cpu); free(raw);
+        sl->cpu = cpu_level(p, sl, 0);
+        if (!sl->cpu) return 0;
+    }
+    o->nlev = 1; o->limg[0] = sl->cpu; o->lw[0] = (int)sl->lvl_w[0]; o->lh[0] = (int)sl->lvl_h[0];
+    if (sl->mipmapped && sl->nlevels > 1) {                          /* the whole chain, so the rasteriser can pick a level per triangle */
+        int k;
+        for (k = 1; k < sl->nlevels && k < 12; k++) {
+            if (!sl->cpul[k]) sl->cpul[k] = cpu_level(p, sl, (uint32_t)k);
+            if (!sl->cpul[k]) break;
+            o->limg[k] = sl->cpul[k]; o->lw[k] = (int)sl->lvl_w[k]; o->lh[k] = (int)sl->lvl_h[k]; o->nlev = k + 1;
+        }
     }
     o->img = sl->cpu; o->w = (int)sl->lvl_w[0]; o->h = (int)sl->lvl_h[0]; o->wsh = (int)ilog2u((uint32_t)o->w); o->clamp_s = (int)sl->clamp_s; o->clamp_t = (int)sl->clamp_t; o->bil = (int)sl->bilinear_mag; o->has_a = (int)sl->has_alpha;
     o->mode = mach64_gli_u32(ctx, GLI_TEX_ENV_MODE + u) >> 16;
