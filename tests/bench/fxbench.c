@@ -14,7 +14,7 @@ static float rf(float a, float b) { return a + (b - a) * (float)(rnd() & 0xffff)
 
 #define NTRI 40
 static tri_t tris[NTRI];
-static int TW = 256, TH = 256; static int SPL = 16;        /* span length in pixels (power of two) */
+static int TW = 256, TH = 256; static int SPL = 16; static int LOOPX = 0;   /* 0: bounding-box scan with per-pixel edge tests (current); 1: analytic per-row covered range */        /* span length in pixels (power of two) */
 
 static void make(int size_px, float ratio, float tile)
 {
@@ -39,7 +39,7 @@ typedef struct { double maxerr, sum; long n, mism; } stat_t;
 static void upd(stat_t *st, double err, int mism) { if (err > st->maxerr) st->maxerr = err; st->sum += err; st->n++; st->mism += mism; }
 
 /* the edge loop shared by every variant; MODE selects the per-pixel stage */
-enum { M_NULL, M_FLOAT32, M_FLOAT, M_FX, M_FXSPAN, M_AFFINE, M_COL_DIV, M_COL_INC, M_CUBE_F, M_CUBE_X };
+enum { M_PIPE, M_PIPE_AFF, M_NULL, M_FLOAT32, M_FLOAT, M_FX, M_FXSPAN, M_AFFINE, M_COL_DIV, M_COL_INC, M_CUBE_F, M_CUBE_X };
 static volatile uint32_t sink;
 
 static uint32_t run(int mode, stat_t *st, stat_t *st2)
@@ -48,24 +48,25 @@ static uint32_t run(int mode, stat_t *st, stat_t *st2)
     for (ti = 0; ti < NTRI; ti++) {
         const tri_t *t = &tris[ti]; int64_t A[3], B[3], E[3], dx1 = t->x[1] - t->x[0], dy1 = t->y[1] - t->y[0], dx2 = t->x[2] - t->x[0], dy2 = t->y[2] - t->y[0], area = t->area;
         int i, minx, maxx, miny, maxy, px, py;
-        fx_plane pP, pQ, pR, pC[4], pX, pY, pZ; int kP = 0, kR = 0, kC = 0; fx_inv iv;
-        if (mode == M_FX || mode == M_FXSPAN || mode == M_AFFINE || mode == M_COL_INC || mode == M_CUBE_X) fx_inv_setup(&iv, area);
-        for (i = 0; i < 3; i++) { int j = (i + 1) % 3; A[i] = -(t->y[j] - t->y[i]); B[i] = t->x[j] - t->x[i]; }
+        fx_plane pP, pQ, pR, pC[4], pX, pY, pZ; int kP = 0, kR = 0, kC = 0; fx_inv iv, einv[3];
+        memset(&pP, 0, sizeof pP); memset(&pQ, 0, sizeof pQ); memset(&pR, 0, sizeof pR); memset(pC, 0, sizeof pC); memset(&pX, 0, sizeof pX); memset(&pY, 0, sizeof pY); memset(&pZ, 0, sizeof pZ);
+        if (mode == M_FX || mode == M_FXSPAN || mode == M_AFFINE || mode == M_COL_INC || mode == M_CUBE_X || mode == M_PIPE || mode == M_PIPE_AFF) fx_inv_setup(&iv, area);
+        for (i = 0; i < 3; i++) { int j = (i + 1) % 3; A[i] = -(t->y[j] - t->y[i]); B[i] = t->x[j] - t->x[i]; if (LOOPX || mode == M_FXSPAN) { int64_t a4 = A[i] < 0 ? -4 * A[i] : 4 * A[i]; if (a4) fx_inv_setup(&einv[i], a4); } }
         minx = (int)(((t->x[0] < t->x[1] ? (t->x[0] < t->x[2] ? t->x[0] : t->x[2]) : (t->x[1] < t->x[2] ? t->x[1] : t->x[2]))) >> 2);
         maxx = (int)(((t->x[0] > t->x[1] ? (t->x[0] > t->x[2] ? t->x[0] : t->x[2]) : (t->x[1] > t->x[2] ? t->x[1] : t->x[2]))) >> 2);
         miny = (int)(((t->y[0] < t->y[1] ? (t->y[0] < t->y[2] ? t->y[0] : t->y[2]) : (t->y[1] < t->y[2] ? t->y[1] : t->y[2]))) >> 2);
         maxy = (int)(((t->y[0] > t->y[1] ? (t->y[0] > t->y[2] ? t->y[0] : t->y[2]) : (t->y[1] > t->y[2] ? t->y[1] : t->y[2]))) >> 2);
         /* per-triangle setup of the fixed-point candidates */
-        if (mode == M_FX || mode == M_FXSPAN || mode == M_AFFINE) {
-            float P[3], Q[3], mp = 0, mr = 0;
-            for (i = 0; i < 3; i++) { P[i] = t->s[i] * t->w[i] * (float)TW * 256.0f; Q[i] = t->t[i] * t->w[i] * (float)TH * 256.0f;
+        if (mode == M_FX || mode == M_FXSPAN || mode == M_AFFINE || mode == M_PIPE || mode == M_PIPE_AFF) {
+            float P[3], Q[3], mp = 0, mr = 0; int aff = (mode == M_AFFINE || mode == M_PIPE_AFF);
+            for (i = 0; i < 3; i++) { P[i] = t->s[i] * (aff ? 1.0f : t->w[i]) * (float)TW * 256.0f; Q[i] = t->t[i] * (aff ? 1.0f : t->w[i]) * (float)TH * 256.0f;
                 if (fabsf(P[i]) > mp) mp = fabsf(P[i]); if (fabsf(Q[i]) > mp) mp = fabsf(Q[i]); if (t->w[i] > mr) mr = t->w[i]; }
             kP = fx_scale_for(mp); kR = fx_scale_for(mr);
             fx_plane_setup(&pP, fx_from_float(P[0], kP), fx_from_float(P[1], kP), fx_from_float(P[2], kP), dx1, dy1, dx2, dy2, &iv);
             fx_plane_setup(&pQ, fx_from_float(Q[0], kP), fx_from_float(Q[1], kP), fx_from_float(Q[2], kP), dx1, dy1, dx2, dy2, &iv);
             fx_plane_setup(&pR, fx_from_float(t->w[0], kR), fx_from_float(t->w[1], kR), fx_from_float(t->w[2], kR), dx1, dy1, dx2, dy2, &iv);
         }
-        if (mode == M_COL_INC) for (i = 0; i < 4; i++) { int sh = i * 8; fx_plane_setup(&pC[i], (int64_t)((t->argb[0] >> sh) & 255u) << 22, (int64_t)((t->argb[1] >> sh) & 255u) << 22, (int64_t)((t->argb[2] >> sh) & 255u) << 22, dx1, dy1, dx2, dy2, &iv); }
+        if (mode == M_COL_INC || mode == M_PIPE || mode == M_PIPE_AFF) for (i = 0; i < 4; i++) { int sh = i * 8; fx_plane_setup(&pC[i], (int64_t)((t->argb[0] >> sh) & 255u) << 22, (int64_t)((t->argb[1] >> sh) & 255u) << 22, (int64_t)((t->argb[2] >> sh) & 255u) << 22, dx1, dy1, dx2, dy2, &iv); }
         if (mode == M_CUBE_X) {
             float mx = 0, S[3], T[3], R[3];
             for (i = 0; i < 3; i++) { S[i] = t->s[i] - 0.5f; T[i] = t->t[i] - 0.5f; R[i] = t->r[i]; S[i] *= t->w[i]; T[i] *= t->w[i]; R[i] *= t->w[i];
@@ -79,22 +80,16 @@ static uint32_t run(int mode, stat_t *st, stat_t *st2)
             int64_t qy = 4 * (int64_t)py + 2, qx0 = 4 * (int64_t)minx + 2, PA = 0, QA = 0, RA = 0, CA[4] = { 0, 0, 0, 0 }, XA = 0, YA = 0, ZA = 0;
             int32_t su = 0, sv = 0, du = 0, dv = 0; int spx0 = 0, spx1 = 0;     /* span state (su, sv, du, dv in Q16 texels) */
             for (i = 0; i < 3; i++) E[i] = A[i] * (qx0 - t->x[i]) + B[i] * (qy - t->y[i]);
-            if (mode == M_FX || mode == M_FXSPAN || mode == M_AFFINE) { PA = fx_plane_at(&pP, qx0 - t->x[0], qy - t->y[0]); QA = fx_plane_at(&pQ, qx0 - t->x[0], qy - t->y[0]); RA = fx_plane_at(&pR, qx0 - t->x[0], qy - t->y[0]); }
-            if (mode == M_COL_INC) for (i = 0; i < 4; i++) CA[i] = fx_plane_at(&pC[i], qx0 - t->x[0], qy - t->y[0]);
+            if (mode == M_FX || mode == M_FXSPAN || mode == M_AFFINE || mode == M_PIPE || mode == M_PIPE_AFF) { PA = fx_plane_at(&pP, qx0 - t->x[0], qy - t->y[0]); QA = fx_plane_at(&pQ, qx0 - t->x[0], qy - t->y[0]); RA = fx_plane_at(&pR, qx0 - t->x[0], qy - t->y[0]); }
+            if (mode == M_COL_INC || mode == M_PIPE || mode == M_PIPE_AFF) for (i = 0; i < 4; i++) CA[i] = fx_plane_at(&pC[i], qx0 - t->x[0], qy - t->y[0]);
             if (mode == M_CUBE_X) { XA = fx_plane_at(&pX, qx0 - t->x[0], qy - t->y[0]); YA = fx_plane_at(&pY, qx0 - t->x[0], qy - t->y[0]); ZA = fx_plane_at(&pZ, qx0 - t->x[0], qy - t->y[0]); }
-            if (mode == M_FXSPAN) {                                          /* covered pixel range of this row, from the three edge equations (one divide per edge per ROW) */
-                int64_t lo = minx, hi = maxx;
-                for (i = 0; i < 3; i++) {
-                    int64_t a4 = 4 * A[i];                                   /* E_i(px) = E_i + a4 * (px - minx) >= 0 */
-                    if (a4 > 0) { int64_t need = (-E[i] + a4 - 1) / a4; if (E[i] >= 0) need = minx; else need += minx; if (need > lo) lo = need; }
-                    else if (a4 < 0) { int64_t room = E[i] >= 0 ? E[i] / (-a4) : -1; if (room < 0) { hi = lo - 1; } else if (minx + room < hi) hi = minx + room; }
-                    else if (E[i] < 0) hi = lo - 1;
-                }
+            if (mode == M_FXSPAN || LOOPX) {                                 /* covered pixel range of this row, from the three edge equations (one divide per edge per ROW) */
+                int64_t lo, hi; fx_row_extent(E, A, einv, minx, maxx, &lo, &hi);
                 spx0 = (int)lo; spx1 = (int)hi;
                 if (spx0 > spx1) continue;
-                { int64_t k = spx0 - minx; for (i = 0; i < 3; i++) E[i] += 4 * A[i] * k; PA += 4 * pP.gx * k; QA += 4 * pQ.gx * k; RA += 4 * pR.gx * k; }
+                { int64_t k = spx0 - minx; for (i = 0; i < 3; i++) E[i] += 4 * A[i] * k; PA += 4 * pP.gx * k; QA += 4 * pQ.gx * k; RA += 4 * pR.gx * k; XA += 4 * pX.gx * k; YA += 4 * pY.gx * k; ZA += 4 * pZ.gx * k; for (i = 0; i < 4; i++) CA[i] += 4 * pC[i].gx * k; }
             }
-            for (px = (mode == M_FXSPAN ? spx0 : minx); px <= (mode == M_FXSPAN ? spx1 : maxx); px++) {
+            for (px = ((mode == M_FXSPAN || LOOPX) ? spx0 : minx); px <= ((mode == M_FXSPAN || LOOPX) ? spx1 : maxx); px++) {
                 if (mode == M_FXSPAN && ((px - spx0) & (SPL - 1)) == 0) {          /* exact at the span ends, linear between (done for every pixel position so a span is never stale) */
                     int n = spx1 - px; if (n > SPL - 1) n = SPL - 1;                    /* span covers px .. px + n */
                     su = fx_div(PA, RA, kP - kR); sv = fx_div(QA, RA, kP - kR);
@@ -103,7 +98,7 @@ static uint32_t run(int mode, stat_t *st, stat_t *st2)
                     else du = dv = 0;
                     su <<= 8; sv <<= 8;
                 }
-                if ((E[0] | E[1] | E[2]) >= 0) {
+                if (LOOPX || (E[0] | E[1] | E[2]) >= 0) {
                     int64_t w0 = E[1], w1 = E[2], w2 = E[0];
                     switch (mode) {
                     case M_FLOAT32:
@@ -134,11 +129,18 @@ static uint32_t run(int mode, stat_t *st, stat_t *st2)
                             rs = rs / rw * TW; rt = rt / rw * TH;
                             upd(st, fabs(u / 256.0 - rs) > fabs(v / 256.0 - rt) ? fabs(u / 256.0 - rs) : fabs(v / 256.0 - rt), (int)floor(u / 256.0) != (int)floor(rs) || (int)floor(v / 256.0) != (int)floor(rt)); }
                         break; }
-                    case M_AFFINE: {                                     /* valid only when w is constant over the triangle: u = P / R is linear, one divide per ROW */
-                        int32_t u, v;
-                        if (px == minx) { su = fx_div(PA, RA, kP - kR); sv = fx_div(QA, RA, kP - kR); du = fx_div(PA + 4 * pP.gx * 64, RA, kP - kR) - su; dv = fx_div(QA + 4 * pQ.gx * 64, RA, kP - kR) - sv; }
-                        { int k = px - minx; u = su + (int32_t)(((int64_t)du * k) >> 6); v = sv + (int32_t)(((int64_t)dv * k) >> 6); }
+                    case M_AFFINE: {                                     /* valid only when w is constant over the triangle: the texel position is itself a plane (w cancels): no divide, no table */
+                        int32_t u = ((int32_t)(PA >> 16)) >> kP, v = ((int32_t)(QA >> 16)) >> kP;
                         acc += (uint32_t)u ^ (uint32_t)v;
+                        if (st) { double rs = 0, rt = 0; int k; for (k = 0; k < 3; k++) { double l = (double)(k == 0 ? w0 : k == 1 ? w1 : w2) / (double)area; rs += l * t->s[k]; rt += l * t->t[k]; }
+                            { double rs2 = 0, rt2 = 0, rw = 0; for (k = 0; k < 3; k++) { double l = (double)(k == 0 ? w0 : k == 1 ? w1 : w2) / (double)area; rs2 += l * t->s[k] * t->w[k]; rt2 += l * t->t[k] * t->w[k]; rw += l * t->w[k]; } rs = rs2 / rw * TW; rt = rt2 / rw * TH; }
+                            upd(st, fabs(u / 256.0 - rs) > fabs(v / 256.0 - rt) ? fabs(u / 256.0 - rs) : fabs(v / 256.0 - rt), (int)floor(u / 256.0) != (int)floor(rs) || (int)floor(v / 256.0) != (int)floor(rt)); }
+                        break; }
+                    case M_PIPE: case M_PIPE_AFF: {                       /* the real textured Gouraud pixel: colour planes + texture coordinates */
+                        uint32_t out = 0; int c; int32_t u, v;
+                        for (c = 0; c < 4; c++) { int64_t cv = (CA[c] + ((int64_t)1 << 37)) >> 38; if (cv < 0) cv = 0; else if (cv > 255) cv = 255; out |= (uint32_t)cv << (8 * c); }
+                        if (mode == M_PIPE) { u = fx_div(PA, RA, kP - kR); v = fx_div(QA, RA, kP - kR); } else { u = ((int32_t)(PA >> 16)) >> kP; v = ((int32_t)(QA >> 16)) >> kP; }
+                        acc += out ^ (uint32_t)u ^ (uint32_t)v;
                         break; }
                     case M_COL_DIV: {
                         uint32_t out = 0; int sh;
@@ -205,8 +207,10 @@ static uint32_t run(int mode, stat_t *st, stat_t *st2)
                     }
                     (void)st2;
                 } else if (px > minx + 1 && ((E[0] & E[1] & E[2]) == 0) && 0) break;
-                E[0] += 4 * A[0]; E[1] += 4 * A[1]; E[2] += 4 * A[2];
+                if (!LOOPX || st) { E[0] += 4 * A[0]; E[1] += 4 * A[1]; E[2] += 4 * A[2]; }
                 if (mode == M_FX || mode == M_FXSPAN || mode == M_AFFINE) { PA += 4 * pP.gx; QA += 4 * pQ.gx; RA += 4 * pR.gx; }
+                else if (mode == M_PIPE) { PA += 4 * pP.gx; QA += 4 * pQ.gx; RA += 4 * pR.gx; CA[0] += 4 * pC[0].gx; CA[1] += 4 * pC[1].gx; CA[2] += 4 * pC[2].gx; CA[3] += 4 * pC[3].gx; }
+                else if (mode == M_PIPE_AFF) { PA += 4 * pP.gx; QA += 4 * pQ.gx; CA[0] += 4 * pC[0].gx; CA[1] += 4 * pC[1].gx; CA[2] += 4 * pC[2].gx; CA[3] += 4 * pC[3].gx; }
                 else if (mode == M_CUBE_X) { XA += 4 * pX.gx; YA += 4 * pY.gx; ZA += 4 * pZ.gx; }
                 else if (mode == M_COL_INC) { CA[0] += 4 * pC[0].gx; CA[1] += 4 * pC[1].gx; CA[2] += 4 * pC[2].gx; CA[3] += 4 * pC[3].gx; }
             }
@@ -215,6 +219,19 @@ static uint32_t run(int mode, stat_t *st, stat_t *st2)
     return acc;
 }
 
+static void check_coverage(void)
+{
+    long rows = 0, bad = 0; int ti, py, px;
+    for (ti = 0; ti < NTRI; ti++) { const tri_t *t = &tris[ti]; int64_t A[3], B[3], E[3]; int i, minx = 0, maxx = 639;
+        fx_inv einv[3]; for (i = 0; i < 3; i++) { int j = (i + 1) % 3; A[i] = -(t->y[j] - t->y[i]); B[i] = t->x[j] - t->x[i]; { int64_t a4 = A[i] < 0 ? -4 * A[i] : 4 * A[i]; if (a4) fx_inv_setup(&einv[i], a4); } }
+        for (py = 0; py < 480; py++) { int64_t qy = 4 * (int64_t)py + 2, qx0 = 4 * (int64_t)minx + 2, lo, hi; int first = -1, last = -2;
+            for (i = 0; i < 3; i++) E[i] = A[i] * (qx0 - t->x[i]) + B[i] * (qy - t->y[i]);
+            for (px = minx; px <= maxx; px++) { int in = (A[0] * (4 * (int64_t)px + 2 - t->x[0]) + B[0] * (qy - t->y[0]) >= 0) && (A[1] * (4 * (int64_t)px + 2 - t->x[1]) + B[1] * (qy - t->y[1]) >= 0) && (A[2] * (4 * (int64_t)px + 2 - t->x[2]) + B[2] * (qy - t->y[2]) >= 0); if (in) { if (first < 0) first = px; last = px; } }
+            fx_row_extent(E, A, einv, minx, maxx, &lo, &hi); rows++;
+            if (first < 0) { if (lo <= hi) bad++; } else if (lo != first || hi != last) bad++;
+        } }
+    printf("coverage check: %ld rows, %ld where the analytic extent differs from the per-pixel edge test\n", rows, bad);
+}
 static double now(void) { struct timeval tv; gettimeofday(&tv, 0); return tv.tv_sec + tv.tv_usec * 1e-6; }
 static long count_px(void)
 {
@@ -250,23 +267,37 @@ int main(int argc, char **argv)
         { "big triangles, strong perspective (w ratio 16), tile 8", 120, 16.0f, 8.0f },
         { "small triangles (~12 px), perspective 4, tile 1", 12, 4.0f, 1.0f },
         { "big triangles, no perspective (ratio 1), tile 4", 120, 1.0f, 4.0f },
-        { "triangles ~24 px, perspective 4, tile 1", 24, 4.0f, 1.0f }, { "triangles ~40 px, perspective 4, tile 1", 40, 4.0f, 1.0f } };
+        { "triangles ~24 px, perspective 4, tile 1", 24, 4.0f, 1.0f }, { "triangles ~40 px, perspective 4, tile 1", 40, 4.0f, 1.0f },
+        { "big triangles, w nearly constant (ratio 1.02), tile 4", 120, 1.02f, 4.0f }, { "big triangles, w nearly constant (ratio 1.1), tile 4", 120, 1.1f, 4.0f } };
     int c; (void)argc; (void)argv;
     fx_rcp_init();
-    for (c = 0; c < 6; c++) {
-        long npx; double nullns; rng = 777u + (uint32_t)c; make(cfg[c].size, cfg[c].ratio, cfg[c].tile); npx = inside_px(); nullns = timeit(M_NULL, npx);
+    rng = 99u; make(60, 4.0f, 1.0f); check_coverage(); rng = 5u; make(12, 2.0f, 1.0f); check_coverage();
+    for (c = 0; c < 8; c++) {
+        long npx; double nullns;
+        rng = 777u + (uint32_t)c; make(cfg[c].size, cfg[c].ratio, cfg[c].tile); npx = inside_px();
+        if (c >= 6) {
+            LOOPX = 0; nullns = timeit(M_NULL, npx);
+            printf("%s  (%ld px total)\n", cfg[c].nm, npx);
+            report("texture coords: affine planes (no divide)", M_AFFINE, npx, nullns); report("texture coords: fixed + LUT recip", M_FX, npx, nullns);
+            continue;
+        }
+        LOOPX = 0; nullns = timeit(M_NULL, npx);
         printf("%s  (%ld px total, shared edge loop %.1f ns/px)\n", cfg[c].nm, npx, nullns);
         report("texture coords: float (current)", M_FLOAT, npx, nullns);
         report("texture coords: float, int32 weights", M_FLOAT32, npx, nullns);
         report("texture coords: fixed + LUT recip", M_FX, npx, nullns);
-        SPL = 16; report("texture coords: fixed, 16-px spans", M_FXSPAN, npx, nullns);
-        SPL = 8; report("texture coords: fixed, 8-px spans", M_FXSPAN, npx, nullns);
-        SPL = 4; report("texture coords: fixed, 4-px spans", M_FXSPAN, npx, nullns);
-        if (c == 3) report("texture coords: affine (w const)", M_AFFINE, npx, nullns);
+        if (c == 3) report("texture coords: affine planes (w const)", M_AFFINE, npx, nullns);
         report("colour: int64 barycentric divide", M_COL_DIV, npx, nullns);
         report("colour: incremental fixed-point", M_COL_INC, npx, nullns);
         report("cube map: float (current)", M_CUBE_F, npx, nullns);
         report("cube map: fixed + LUT recip", M_CUBE_X, npx, nullns);
+        /* edge loop: the whole textured Gouraud pixel under both loop structures (total ns per covered pixel, loop included) */
+        { double a, b, n0, n1; long visited = 0;
+          LOOPX = 0; n0 = timeit(M_NULL, npx); a = timeit(M_PIPE, npx); LOOPX = 1; n1 = timeit(M_NULL, npx); b = timeit(M_PIPE, npx);
+          printf("  EDGE LOOP  bbox scan: empty %.1f, textured Gouraud pixel %.1f ns/px | analytic row extents: empty %.1f, textured Gouraud pixel %.1f ns/px\n", n0, a, n1, b);
+          if (c == 3) { double a2; LOOPX = 0; a2 = timeit(M_PIPE_AFF, npx); LOOPX = 1; printf("  EDGE LOOP  + affine texture: bbox %.1f / extents %.1f ns/px\n", a2, timeit(M_PIPE_AFF, npx)); }
+          LOOPX = 0; (void)visited; }
+        LOOPX = 0;
     }
     return 0;
 }

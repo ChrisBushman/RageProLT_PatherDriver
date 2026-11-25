@@ -85,12 +85,34 @@ static inline int64_t fx_plane_at(const fx_plane *p, int64_t dqx, int64_t dqy) {
  * folds the texture size and the 8 fraction bits into P, so the result is the texel position in Q8.  d = kp - kr. */
 static inline int32_t fx_div(int64_t pacc, int64_t racc, int d)
 {
-    int32_t p = (int32_t)(pacc >> 16), r = (int32_t)(racc >> 16); int e, sh; int64_t prod;
+    int32_t p = (int32_t)(pacc >> 16), r = (int32_t)(racc >> 16); int e, sh; int64_t prod; int32_t hi; uint32_t lo;
     if (r <= 0) return 0;
     e = 31 - fx_clz((uint32_t)r);
     prod = (int64_t)p * (int64_t)fx_recip_norm((uint32_t)r << (31 - e));
     sh = 31 + e + d;
-    if (sh < 0) sh = 0; else if (sh > 62) sh = 62;
-    return (int32_t)(prod >> sh);
+    if (sh < 1) sh = 1; else if (sh > 62) sh = 62;
+    hi = (int32_t)(prod >> 32); lo = (uint32_t)prod;                  /* 32-bit shifts only: a variable 64-bit shift is a library call on 32-bit PowerPC */
+    return sh >= 32 ? (hi >> (sh - 32)) : (int32_t)(((uint32_t)hi << (32 - sh)) | (lo >> sh));
+}
+
+/* floor(num / den) for num >= 0, den > 0, using the reciprocal of den (iv) and an exact one-step correction: no divide. */
+static inline int64_t fx_floordiv(int64_t num, int64_t den, const fx_inv *iv)
+{
+    int64_t q = (num * (int64_t)iv->rc) >> (iv->e + 31);
+    while (q * den > num) q--;
+    while ((q + 1) * den <= num) q++;
+    return q;
+}
+/* Covered pixel range [lo, hi] of one row from the three edge equations E_i(px) = E[i] + 4 * A[i] * (px - minx) >= 0.  inv[i] = reciprocal of |4 * A[i]| (when A[i] != 0). */
+static inline void fx_row_extent(const int64_t *E, const int64_t *A, const fx_inv *inv, int minx, int maxx, int64_t *plo, int64_t *phi)
+{
+    int64_t lo = minx, hi = maxx; int i;
+    for (i = 0; i < 3; i++) {
+        int64_t a4 = 4 * A[i];
+        if (a4 > 0) { if (E[i] < 0) { int64_t need = minx + fx_floordiv(-E[i] + a4 - 1, a4, &inv[i]); if (need > lo) lo = need; } }
+        else if (a4 < 0) { if (E[i] < 0) hi = lo - 1; else { int64_t room = minx + fx_floordiv(E[i], -a4, &inv[i]); if (room < hi) hi = room; } }
+        else if (E[i] < 0) hi = lo - 1;
+    }
+    *plo = lo; *phi = hi;
 }
 #endif
