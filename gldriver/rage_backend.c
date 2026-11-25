@@ -26,6 +26,7 @@ void rgb_close(rgb_t *b) { if (b->conn) IOServiceClose(b->conn); b->conn = 0; }
 int rgb_surface(rgb_t *b, uint32_t w, uint32_t h, uint32_t bpp, int with_z)
 {
     uint32_t pitch = (w + 7u) & ~7u, bytes = pitch * h * bpp, zbytes = pitch * h * 2u, off, zoff = 0; kern_return_t kr;
+    (void)rgb_gen(b);                                  /* refresh b->flags: the target format follows the scanout depth */
     if (b->col_off) { CALL(RAGE_GL_FREE, 1, 0, b->col_off); b->col_off = 0; }
     if (b->z_off) { CALL(RAGE_GL_FREE, 1, 0, b->z_off); b->z_off = 0; }
     kr = CALL(RAGE_GL_ALLOC, 2, 1, (bytes + 4095u) & ~4095u, 4096u, &off);
@@ -38,6 +39,7 @@ int rgb_surface(rgb_t *b, uint32_t w, uint32_t h, uint32_t bpp, int with_z)
     if (!kr && with_z) kr = CALL(RAGE_GL_SET_Z, 2, 0, zoff, pitch);
     if (kr) { CALL(RAGE_GL_FREE, 1, 0, off); if (zoff) CALL(RAGE_GL_FREE, 1, 0, zoff); return (int)kr; }
     b->col_off = off; b->z_off = zoff; b->w = w; b->h = h; b->pitch = pitch; b->bpp = bpp;
+    b->fmt555 = (bpp == 2 && (b->flags & RAGE_INFO_TGT555)) ? 1 : 0;
     return 0;
 }
 

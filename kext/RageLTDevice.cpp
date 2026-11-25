@@ -3,6 +3,7 @@
  * a PPC read of an un-initialised chip blocks the CPU forever (docs/memory-map.md 6), so the chip is only touched once a later phase
  * establishes that the boot init (RageStubFB on the G4, Apple's ATY,264LTPro on the Lombard) has run.  No floating point anywhere. */
 #include "RageLTDevice.h"
+#include "RageLTSurfaceClient.h"
 #include <IOKit/IOLib.h>
 #include <libkern/OSByteOrder.h>
 #include <ppc/proc_reg.h>      /* eieio */
@@ -10,14 +11,15 @@
 #include "RageLTLogClient.h"
 #include "RageLTGLClient.h"
 
-#define super IOService
-OSDefineMetaClassAndStructors(RageLTDevice, IOService)
+#define super IOAccelerator
+OSDefineMetaClassAndStructors(RageLTDevice, IOAccelerator)
 
 #define LOG(...) IOLog("RageLT: " __VA_ARGS__)
 
 bool RageLTDevice::start(IOService *provider)
 {
     if (!super::start(provider)) return false;
+    setName("ATIRagePro");                       /* the framebuffer's IOAccelTypes path names this node (the stock accelerator has the same name); before modeStart publishes the path */
     fPCI = OSDynamicCast(IOPCIDevice, provider);
     if (!fPCI) return false;
 
@@ -40,6 +42,7 @@ bool RageLTDevice::start(IOService *provider)
     rage_vram_init(&fVram);
     fScratch = 0x770000u;          /* first word of the reserved top block (never engine-written): rewritten with its own value to flush the engine cache */
     fNextOwner = 1;
+    { uint32_t k; for (k = 0; k < RAGE_MAX_SURF; k++) fSurf[k].used = 0; }
     fEngineLive = false;
     fRefused = 0;
     fDispReserved = false;
@@ -52,6 +55,7 @@ bool RageLTDevice::start(IOService *provider)
     logEvent(RAGE_EV_START, 0, RAGE_FEATURE_BITS, 0, 0, 0, 0);
     setProperty("RageLTFeatures", (unsigned long long)RAGE_FEATURE_BITS, 32);
     LOG("attached (skeleton, dormant): BAR0 %lu MB, engine off, no register access\n", (unsigned long)(fMap->getLength() >> 20));
+    setProperty("IOAccelRevision", (unsigned long long)2, 32);
     registerService();
     return true;
 }
@@ -168,6 +172,7 @@ IOReturn RageLTDevice::newUserClient(task_t owningTask, void *securityID, UInt32
     IOUserClient *c;
     if (type == RAGE_CLIENT_LOG && RAGE_FEAT_PANIC_LOG) c = new RageLTLogClient;
     else if (type == RAGE_CLIENT_GL) c = new RageLTGLClient;
+    else if (type == kIOAccelSurfaceClientType) c = new RageLTSurfaceClient;
     else return kIOReturnUnsupported;
     if (!c) return kIOReturnNoMemory;
     if (!c->initWithTask(owningTask, securityID, type) || !c->attach(this) || !c->start(this)) { c->release(); return kIOReturnError; }

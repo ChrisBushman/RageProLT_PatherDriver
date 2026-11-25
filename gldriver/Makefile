@@ -2,7 +2,7 @@
 # Userspace PPC bundle; build on the Panther host (or the G5).  GLEngine builds the executable path from the kext's IOGLBundleName, so EXEC must match it.
 # The bundle talks to the kernel only through the RageLTGLClient selectors (rage_backend.c); it has no CPU view of VRAM.
 CC     ?= cc
-CFLAGS ?= -O2 -Wall -std=gnu99 -mcpu=750 -fsingle-precision-constant -I. -I../common
+CFLAGS ?= -O2 -Wall -std=gnu99 -mcpu=750 -fsingle-precision-constant -DGLD_DBUF -I. -I../common   # GLD_DBUF: advertise double-buffered pixel formats (the CGL scorer rejects every DB request without it)
 
 EXEC   := ATIRageProGLDriver
 BUNDLE := $(EXEC).bundle

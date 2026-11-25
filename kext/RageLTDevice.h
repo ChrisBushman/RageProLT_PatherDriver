@@ -6,6 +6,8 @@
 #include <IOKit/IOLocks.h>
 #include <IOKit/pci/IOPCIDevice.h>
 #include <IOKit/graphics/IOFramebuffer.h>
+#include <IOKit/graphics/IOAccelerator.h>
+#include <IOKit/graphics/IOAccelSurfaceConnect.h>
 #include "features.h"
 #include "rage_vram.h"
 #include "rage_abi.h"
@@ -15,6 +17,7 @@
 struct rage_ctx {
     uint32_t owner;                    /* 0 = slot free */
     uint32_t tgt_off, tgt_pitch, tgt_bpp, tgt_w, tgt_h;   /* tgt_bpp 0 = no target set */
+    uint32_t tgt_555;                  /* 16 bpp target is ARGB1555 (the scanout is 15 bit) rather than RGB565; fixed when the target is set */
     uint32_t sc_l, sc_r, sc_t, sc_b;
     uint32_t z_off, z_pitch, z_set;
     uint32_t tex_off[12], tex_set, tex_fmt, tex2_fmt;   /* TEX_0..10_OFF, SECONDARY_TEX_OFF (index 11); tex_set = bitmask of bound ones; texel formats (DP_PIX_WIDTH) */
@@ -22,9 +25,19 @@ struct rage_ctx {
 #define RAGE_MAX_CTX 16u
 #define RAGE_MAX_FB  4u
 
+/* One WindowServer surface (RageLTSurfaceClient, client type 0): id and mode from set_id_mode, bounds and visible rectangles from set_shape. */
+#define RAGE_MAX_SURF  32u
+#define RAGE_SURF_RECTS 24u
+struct rage_surface {
+    uint32_t used, id, mode, gen;          /* gen increments on every shape change */
+    IOAccelBounds bounds;                  /* unclipped surface rectangle in device coordinates */
+    uint32_t nrects;                       /* 0 = the bounds are the visible rectangle */
+    IOAccelBounds rects[RAGE_SURF_RECTS];
+};
+
 struct rage_display { uint32_t base, pitch_px, w, h, bpp, depth; };   /* live scanout as read from the CRTC (kernel-owned copy) */
 
-class RageLTDevice : public IOService
+class RageLTDevice : public IOAccelerator
 {
     OSDeclareDefaultStructors(RageLTDevice)
 
@@ -40,6 +53,7 @@ class RageLTDevice : public IOService
     bool                 fDispReserved; /* scanout + cursor block reserved in the allocator (done once, permanent) */
     struct rage_ctx      fCtx[RAGE_MAX_CTX];
     struct rage_display  fDisp;
+    struct rage_surface  fSurf[RAGE_MAX_SURF];
     uint32_t               fModeGen, fModeDepth;               /* odd gen = a mode change is in progress; all targets invalid */
     IONotifier          *fFBPublish;
     IOFramebuffer       *fFBs[RAGE_MAX_FB];
@@ -62,6 +76,11 @@ public:
     virtual void free(void);
 
     /* A client must obtain an owner id; closing the client calls releaseOwner() so nothing leaks. */
+    int          surfAcquire(void);                                  /* slot or -1 */
+    void         surfRelease(int slot);
+    void         surfSetIDMode(int slot, uint32_t id, uint32_t mode);
+    IOReturn     surfSetShape(int slot, const IOAccelDeviceRegion *rgn, uint32_t size);
+    void         publishFramebuffer(IOFramebuffer *fb, uint32_t index);   /* IOAccelTypes / IOAccelIndex / IOAccelRevision on the framebuffer */
     uint32_t       newOwner(void);
     struct rage_ctx *ctxFor(uint32_t owner, bool create);   /* caller holds fLock */
     void         releaseOwner(uint32_t owner);
@@ -119,6 +138,7 @@ public:
 
     uint32_t       refusedCount(void) const { return fRefused; }
     bool         engineLive(void) const { return fEngineLive; }
+    bool         scanout555(void) const { return fDisp.depth == 3; }
 };
 
 #endif

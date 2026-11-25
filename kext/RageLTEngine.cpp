@@ -69,6 +69,7 @@ IOReturn RageLTDevice::setRenderTarget(uint32_t owner, uint32_t off, uint32_t pi
     if ((bpp == 2 || bpp == 4) && w && h && w <= pitch_px && !(pitch_px & 7u) && pitch_px <= 8184u && !(off & 7u) && h <= 8191u &&
         rage_vram_owns(&fVram, off, (uint32_t)len, owner) && len < 0x800000u && (c = ctxFor(owner, true)) != 0) {
         c->tgt_off = off; c->tgt_pitch = pitch_px; c->tgt_bpp = bpp; c->tgt_w = w; c->tgt_h = h;
+        c->tgt_555 = (bpp == 2 && fDisp.depth == 3) ? 1u : 0u;
         c->sc_l = 0; c->sc_r = w - 1; c->sc_t = 0; c->sc_b = h - 1;      /* default scissor = the whole target */
         c->z_set = 0;
         r = kIOReturnSuccess;
@@ -135,7 +136,7 @@ IOReturn RageLTDevice::setTexture(uint32_t owner, uint32_t index, uint32_t off, 
 /* The kernel's own prologue: everything that decides WHERE the engine writes or reads. */
 uint32_t RageLTDevice::prologuePairs(const struct rage_ctx *c, uint32_t *o)
 {
-    uint32_t n = 0, k, dpw = c->tgt_bpp == 2 ? RAGE_PIXW_565 : 0x60060666u;
+    uint32_t n = 0, k, dpw = c->tgt_bpp == 2 ? (c->tgt_555 ? RAGE_PIXW_555 : RAGE_PIXW_565) : 0x60060666u;
     if (c->tex_fmt) dpw = (dpw & ~0xf0000000u) | (c->tex_fmt << 28);
     if (c->tex2_fmt) dpw = (dpw & ~0xf0u) | (c->tex2_fmt << 4);
 #define PR(r, v) do { o[n++] = (r); o[n++] = (v); } while (0)
@@ -240,6 +241,7 @@ IOReturn RageLTDevice::fillRect(uint32_t owner, int32_t x, int32_t y, int32_t w,
     if (x1 > (int32_t)c.sc_r + 1) x1 = (int32_t)c.sc_r + 1;
     if (y1 > (int32_t)c.sc_b + 1) y1 = (int32_t)c.sc_b + 1;
     if (x1 <= x || y1 <= y) { IOLockUnlock(fLock); return kIOReturnSuccess; }
+    if (c.tgt_555) color565 = ((color565 >> 1) & 0x7fe0u) | (color565 & 0x1fu);     /* RGB565 -> 1555: drop the green LSB, red/green move down one bit (the fill writes the raw 16 bits) */
     if (idleWait()) { IOLockUnlock(fLock); return kIOReturnTimeout; }
     rc = (IOReturn)eng_fill16(fRegs, c.tgt_off, c.tgt_pitch, (uint32_t)x, (uint32_t)y, (uint32_t)(x1 - x), (uint32_t)(y1 - y), color565 & 0xffffu,
                               (c.sc_r << 16) | c.sc_l, (c.sc_b << 16) | c.sc_t, 3u);

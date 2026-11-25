@@ -35,6 +35,10 @@ enum {
 #define RAGE_XFER_SWAP16 1u      /* VRAM_WRITE/READ flag: swap bytes inside every 16-bit unit */
 #define RAGE_XFER_SWAP32 2u      /* ... inside every 32-bit unit */
 
+/* RAGE_GL_INFO flags (4th output) */
+#define RAGE_INFO_ENGINE  1u     /* engine live */
+#define RAGE_INFO_DMA     2u     /* DMA submission active */
+#define RAGE_INFO_TGT555  4u     /* the scanout is ARGB1555 (Thousands of colours): colour targets are created as 1555, not 565 (read at SET_TARGET time; re-read after a mode change) */
 enum { RAGE_LOG_SEL_INFO = 0, RAGE_LOG_SEL_READ = 1, RAGE_LOG_SEL_MARK = 2, RAGE_LOG_SEL_COUNT = 3, RAGE_LOG_SEL_PANIC = 3 /* only with RAGE_DEBUG_PANIC */, RAGE_LOG_SEL_ENGTEST = 4 /* only with RAGE_DEBUG_ENGTEST */ };
 
 /* SEL_INFO: scalarI 0, scalarO 4 = { head, capacity, refused batches, feature bits } */

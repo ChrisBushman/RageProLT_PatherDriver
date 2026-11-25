@@ -30,7 +30,9 @@
       <key>IOPCIMatch</key>          <string>0x4c491002</string>
       <!-- A category distinct from stock's "IOAccelerator" lets this load NEXT TO the stock kext while developing.  The installer
            (Phase 6) removes stock ATIRagePro, so the final system has exactly one accelerator. -->
-      <key>IOMatchCategory</key>     <string>RageLTAccelerator</string>
+      <key>IOMatchCategory</key>     <string>IOAccelerator</string>
+      <!-- CGL reads this from the accelerator the framebuffer's IOAccelTypes names, and loads that bundle as the renderer -->
+      <key>IOGLBundleName</key>      <string>ATIRageProGLDriver</string>
       <key>IOProbeScore</key>        <integer>1000</integer>
     </dict>
   </dict>

@@ -51,7 +51,7 @@ bool RageLTDevice::fbPublished(IOService *svc)
     for (i = 0; i < fNumFB; i++) if (fFBs[i] == fb) have = true;
     if (!have && fNumFB < RAGE_MAX_FB) {
         IONotifier *n = fb->addFramebufferNotification(&fbEventTramp, this, 0);
-        if (n) { fFBs[fNumFB] = fb; fFBNotify[fNumFB] = n; fNumFB++; }
+        if (n) { fFBs[fNumFB] = fb; fFBNotify[fNumFB] = n; publishFramebuffer(fb, fNumFB); fNumFB++; }
         LOG("tracking mode changes of %s (%s)\n", fb->getName(), n ? "ok" : "FAILED");
     }
     IOLockUnlock(fLock);
@@ -137,7 +137,8 @@ IOReturn RageLTDevice::present(uint32_t owner, uint32_t sx, uint32_t sy, uint32_
     if (w > d.w - dx) w = d.w - dx;
     if (h > d.h - dy) h = d.h - dy;
     if (!w || !h) { IOLockUnlock(fLock); return kIOReturnSuccess; }
-    pixw = d.depth == 3 ? RAGE_PIXW_555 : RAGE_PIXW_565;
+    if ((c.tgt_555 != 0) != (d.depth == 3)) { IOLockUnlock(fLock); return kIOReturnNotReady; }   /* the mode changed depth under this target: the client must rebuild it */
+    pixw = d.depth == 3 ? RAGE_PIXW_555 : RAGE_PIXW_565;       /* same-format raw copy: the target was created in the scanout's format */
     if (idleWait()) { IOLockUnlock(fLock); return kIOReturnTimeout; }
     rc = (IOReturn)eng_blit(fRegs, pixw, c.tgt_off, c.tgt_pitch, d.base, d.pitch_px, sx, sy, dx, dy, w, h, ((d.w - 1u) << 16), ((d.h - 1u) << 16));
     if (rc) { IOLockUnlock(fLock); return kIOReturnTimeout; }

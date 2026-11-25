@@ -47,8 +47,9 @@ static unsigned px(int x, int y)
     rgb_readback2(&P->rb, o & ~3u, &w, 4, 1u);                  /* SWAP16: logical little-endian halfwords, first pixel in the high half */
     v = (o & 2) ? (w & 0xffffu) : (w >> 16);
     if (!v) return 0;                                           /* black = untouched (the old 32-bit target was cleared to 0, alpha included) */
-    r = (v >> 11) & 31u; g = (v >> 5) & 63u; b = v & 31u;
-    return 0xff000000u | (((r << 3) | (r >> 2)) << 16) | (((g << 2) | (g >> 4)) << 8) | ((b << 3) | (b >> 2));
+    if (P->rb.fmt555) { r = (v >> 10) & 31u; g = (v >> 5) & 31u; b = v & 31u; g = (g << 3) | (g >> 2); }       /* 15-bit scanout: the target is 1555 */
+    else { r = (v >> 11) & 31u; g = (v >> 5) & 63u; b = v & 31u; g = (g << 2) | (g >> 4); }
+    return 0xff000000u | (((r << 3) | (r >> 2)) << 16) | (g << 8) | ((b << 3) | (b >> 2));
 }
 static uint32_t to565(unsigned argb) { return ((((argb >> 16) & 0xffu) >> 3) << 11) | ((((argb >> 8) & 0xffu) >> 2) << 5) | (((argb) & 0xffu) >> 3); }
 static int ch(unsigned c, int sh) { return (int)((c >> sh) & 0xff); }
@@ -233,6 +234,32 @@ static void t_pixelops(void)
     memset(rd, 0, 4); mach64_ctl08(ctx, 12, 10, 1, 1, 0x1908u, 0x1401u, rd);
     CHECK("glBitmap: second set bit drawn", rd[0] > 240);
     rgb_fence(&P->rb);
+}
+/* a large gouraud triangle against a barycentric reference: colour interpolation must not wrap or lose range as the area grows */
+static int gb_edge(int ax, int ay, int bx, int by, int cx, int cy) { return (bx - ax) * (cy - ay) - (by - ay) * (cx - ax); }
+static void gb_run(int x0, int y0, int x1, int y1, int x2, int y2, const char *nm)
+{
+    int px_, py_, bad = 0, n = 0, worst = 0, area = gb_edge(x0, y0, x1, y1, x2, y2);
+    default_state(); sync(); clear_rt(0);
+    tri(x0, y0, 0xffff0000u, x1, y1, 0xff00ff00u, x2, y2, 0xff0000ffu, 0.0f); mach64_flush_batch(ctx); rgb_fence(&P->rb);
+    for (py_ = 0; py_ < H; py_ += 5) for (px_ = 0; px_ < W; px_ += 5) {
+        int w0 = gb_edge(x1, y1, x2, y2, px_, py_), w1 = gb_edge(x2, y2, x0, y0, px_, py_), w2 = gb_edge(x0, y0, x1, y1, px_, py_);
+        int in = area > 0 ? (w0 > 8 * area / 100 && w1 > 8 * area / 100 && w2 > 8 * area / 100) : (w0 < 8 * area / 100 && w1 < 8 * area / 100 && w2 < 8 * area / 100);
+        unsigned c; int er, eg, eb, e;
+        if (!in) continue;
+        c = px(px_, py_);
+        er = 255 * w0 / area; eg = 255 * w1 / area; eb = 255 * w2 / area;
+        e = abs(ch(c, 16) - er); if (abs(ch(c, 8) - eg) > e) e = abs(ch(c, 8) - eg); if (abs(ch(c, 0) - eb) > e) e = abs(ch(c, 0) - eb);
+        n++; if (e > worst) worst = e; if (e > 48) { if (bad < 4) printf("    (%s: at %d,%d got %02x%02x%02x want %02x%02x%02x)\n", nm, px_, py_, ch(c, 16), ch(c, 8), ch(c, 0), er, eg, eb); bad++; }
+    }
+    printf("    (%s: %d samples, worst channel error %d, %d beyond 48)\n", nm, n, worst, bad);
+    CHECK(nm, n > 20 && bad == 0);
+}
+static void t_gourbig(void)
+{
+    gb_run(60, 60, 140, 70, 90, 130, "gouraud 80x70 triangle");
+    gb_run(10, 10, 245, 40, 120, 240, "gouraud 235x230 triangle");
+    gb_run(240, 20, 20, 120, 150, 250, "gouraud large, reversed winding");
 }
 static void t_prims(void)
 {
@@ -686,6 +713,10 @@ static void t_tex_alpha(void)
     tquad(20, 20, 148, 148, 0.0f, 0.0f, 1.0f, 1.0f, 0xffffffffu);
     l = px(36, 84); r = px(132, 84);
     printf("    (RGBA blend: transparent half 0x%08x opaque half 0x%08x)\n", l, r);
+    { unsigned xx; printf("    (row y=84:"); for (xx = 24; xx < 148; xx += 12) printf(" %06x", px(xx, 84) & 0xffffff); printf(")\n"); }
+    default_state(); bindtex(t, GL_REPLACE_ENV); sync(); clear_rt(0x000000ffu);
+    tquad(20, 20, 148, 148, 0.0f, 0.0f, 1.0f, 1.0f, 0xffffffffu);
+    printf("    (no blend over blue: left 0x%08x right 0x%08x)\n", px(36, 84), px(132, 84));
     CHECK("RGBA texture + blend: transparent texel shows the background", isclr(l, 0, 0, 255));
     CHECK("RGBA texture + blend: opaque texel shows the texture",        isclr(r, 0, 255, 0));
     /* alpha test instead of blend */
@@ -1346,7 +1377,7 @@ static void free_tex(void *t) { if (!t) return; free((void *)(uintptr_t)*(uint32
 
 static const struct { const char *name; void (*fn)(void); } TESTS[] = {
     {"gouraud", t_gouraud}, {"flat", t_flat}, {"colormask", t_colormask}, {"depth", t_depth}, {"blend", t_blend},
-    {"alphatest", t_alphatest}, {"prims", t_prims}, {"pixelops", t_pixelops}, {"clear", t_clear}, {"prims2", t_prims2}, {"fog", t_fog}, {"stipple", t_stipple}, {"logicop", t_logicop}, {"tex_replace", t_tex_replace}, {"multitex", t_multitex}, {"dstalpha", t_dstalpha}, {"texfmt8", t_texfmt8}, {"texfmt", t_texfmt}, {"texfmt_fallback", t_texfmt_fallback}, {"texfmt_mt", t_texfmt_mt}, {"specular", t_specular}, {"multitex_min", t_multitex_min}, {"tex_alpha", t_tex_alpha}, {"tex_wrap", t_tex_wrap}, {"tex_filter", t_tex_filter}, {"tex_alpha_edge", t_tex_alpha_edge}, {"tex_alpha_decal_probe", t_tex_alpha_decal_probe}, {"tex_alpha_bilinear", t_tex_alpha_bilinear}, {"tex_churn", t_tex_churn}, {"tex_highptr", t_tex_highptr}, {"tex_mip", t_tex_mip}, {"tex_mip_nonsq", t_tex_mip_nonsq}, {"tex_bit8", t_tex_bit8}, {"tex_lodbias", t_tex_lodbias}, {"tex_mip_prims", t_tex_mip_prims}, {"tex_mip_fog", t_tex_mip_fog}, {"tex_mip_gouraud", t_tex_mip_gouraud}, {"tex_hwmip", t_tex_hwmip}, {"tex_minlin", t_tex_minlin}, {"multictx", t_multictx}, 
+    {"alphatest", t_alphatest}, {"prims", t_prims}, {"pixelops", t_pixelops}, {"gourbig", t_gourbig}, {"clear", t_clear}, {"prims2", t_prims2}, {"fog", t_fog}, {"stipple", t_stipple}, {"logicop", t_logicop}, {"tex_replace", t_tex_replace}, {"multitex", t_multitex}, {"dstalpha", t_dstalpha}, {"texfmt8", t_texfmt8}, {"texfmt", t_texfmt}, {"texfmt_fallback", t_texfmt_fallback}, {"texfmt_mt", t_texfmt_mt}, {"specular", t_specular}, {"multitex_min", t_multitex_min}, {"tex_alpha", t_tex_alpha}, {"tex_wrap", t_tex_wrap}, {"tex_filter", t_tex_filter}, {"tex_alpha_edge", t_tex_alpha_edge}, {"tex_alpha_decal_probe", t_tex_alpha_decal_probe}, {"tex_alpha_bilinear", t_tex_alpha_bilinear}, {"tex_churn", t_tex_churn}, {"tex_highptr", t_tex_highptr}, {"tex_mip", t_tex_mip}, {"tex_mip_nonsq", t_tex_mip_nonsq}, {"tex_bit8", t_tex_bit8}, {"tex_lodbias", t_tex_lodbias}, {"tex_mip_prims", t_tex_mip_prims}, {"tex_mip_fog", t_tex_mip_fog}, {"tex_mip_gouraud", t_tex_mip_gouraud}, {"tex_hwmip", t_tex_hwmip}, {"tex_minlin", t_tex_minlin}, {"multictx", t_multictx}, 
 };
 
 int main(int argc, char **argv)

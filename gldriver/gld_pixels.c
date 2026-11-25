@@ -90,7 +90,14 @@ static int fmt_decode(unsigned format, unsigned type, int *is_bgr, int *has_a, i
     }
     return 1;
 }
-static uint16_t p565(unsigned R, unsigned G, unsigned B) { return (uint16_t)(((R >> 3) << 11) | ((G >> 2) << 5) | (B >> 3)); }
+/* the colour target is RGB565, or 1555 when the scanout is 15 bit (rb.fmt555) */
+static uint16_t pack16(const mach64_priv *p, unsigned R, unsigned G, unsigned B)
+{ return p->rb.fmt555 ? (uint16_t)(((R >> 3) << 10) | ((G >> 3) << 5) | (B >> 3)) : (uint16_t)(((R >> 3) << 11) | ((G >> 2) << 5) | (B >> 3)); }
+static void unpack16(const mach64_priv *p, unsigned v, unsigned *R, unsigned *G, unsigned *B)
+{
+    if (p->rb.fmt555) { unsigned r5 = (v >> 10) & 31, g5 = (v >> 5) & 31, b5 = v & 31; *R = (r5 << 3) | (r5 >> 2); *G = (g5 << 3) | (g5 >> 2); *B = (b5 << 3) | (b5 >> 2); }
+    else { unsigned r5 = (v >> 11) & 31, g6 = (v >> 5) & 63, b5 = v & 31; *R = (r5 << 3) | (r5 >> 2); *G = (g6 << 2) | (g6 >> 4); *B = (b5 << 3) | (b5 >> 2); }
+}
 
 /* glReadPixels: (rb_ctx = our gld_context, x, y, w, h, format, type, pixels) */
 int mach64_ctl08(void *rb_ctx, int x, int y, int w, int h, unsigned format, unsigned type, void *pixels)
@@ -140,8 +147,7 @@ int mach64_ctl08(void *rb_ctx, int x, int y, int w, int h, unsigned format, unsi
             for (col = 0; col < w; col++) {
                 uint16_t *s = win_px(&win, H, x + col, y + row, W);
                 unsigned R = 0, G = 0, B = 0, A = 0xffu;
-                if (s) { unsigned v = *s, r5 = (v >> 11) & 31, g6 = (v >> 5) & 63, b5 = v & 31;
-                         R = (r5 << 3) | (r5 >> 2); G = (g6 << 2) | (g6 >> 4); B = (b5 << 3) | (b5 >> 2); }
+                if (s) unpack16(p, *s, &R, &G, &B);
                 if (pk == 0) {
                     if (is_bgr) { o[0] = (unsigned char)B; o[1] = (unsigned char)G; o[2] = (unsigned char)R; }
                     else        { o[0] = (unsigned char)R; o[1] = (unsigned char)G; o[2] = (unsigned char)B; }
@@ -204,7 +210,7 @@ int mach64_ctl0c(gld_context *c, uint32_t a, uint32_t b, uint32_t d, uint32_t e,
             int xlo = iceil((wx0 < wx1 ? wx0 : wx1) - 0.5f), xhi = iceil((wx0 < wx1 ? wx1 : wx0) - 0.5f), wx;
             unsigned char R, G, B; uint16_t v;
             decode_pixel(srow + col * bpp_in, pk, is_bgr, has_a, u_swap, &R, &G, &B);
-            v = p565(R, G, B);
+            v = pack16(p, R, G, B);
             for (wy = ylo; wy < yhi; wy++) for (wx = xlo; wx < xhi; wx++) { uint16_t *o = win_px(&win, H, wx, wy, W); if (o) *o = v; }
         }
     }
@@ -246,7 +252,7 @@ int mach64_ctl14(gld_context *c, uint32_t a, uint32_t b, uint32_t d, uint32_t e,
     if (!p || !p->rb.col_off || !rp || !bm || w <= 0 || h <= 0) return 0;
     W = (int)p->rb.w; H = (int)p->rb.h;
     if (p->gc) { const float *rc = (const float *)(p->gc + 0x2e4);
-        v = p565((unsigned)rage_f2byte(gld_bits(rc[0])), (unsigned)rage_f2byte(gld_bits(rc[1])), (unsigned)rage_f2byte(gld_bits(rc[2]))); }
+        v = pack16(p, (unsigned)rage_f2byte(gld_bits(rc[0])), (unsigned)rage_f2byte(gld_bits(rc[1])), (unsigned)rage_f2byte(gld_bits(rc[2]))); }
     else v = 0xffffu;
     dx = (int)(rp[0] + 0.5f); dy = (int)(rp[1] + 0.5f);
     state_at(p->gc, 0x63f4, 0x63e0, 0x63ec, 0x63e8, 0x63f8, 0x63f9, &u_align, &u_rowlen, &u_skippix, &u_skiprows, &u_swap, &u_lsb);

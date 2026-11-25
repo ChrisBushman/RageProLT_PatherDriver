@@ -19,6 +19,7 @@ typedef struct {
     uint32_t features, flags;
     uint32_t dropped;             /* register writes of a stream the kernel owns and the bundle therefore did not forward (statistics) */
     uint32_t fence;               /* last submitted sequence */
+    int      fmt555;              /* colour target is ARGB1555 (the scanout is 15 bit), else RGB565; set by rgb_surface from the kernel */
     int      last_err;            /* last non-zero return of a submit (diagnostic) */
 } rgb_t;
 

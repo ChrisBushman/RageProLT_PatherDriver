@@ -658,8 +658,9 @@ int mach64_bind_texture(gld_context *ctx)
      * (A[31:24] R[23:16] G[15:8] B[7:0]) -- a cleared channel drops those bits so the
      * pipe leaves them untouched in the framebuffer. */
     {   uint32_t cm = mach64_gli_u32(ctx, 0x63b4);
-        /* RGB565 target (the only colour format this driver renders to): R[15:11] G[10:5] B[4:0]; no alpha channel in the buffer */
-        uint32_t wm = ((cm >> 24) & 0xffu ? 0xf800u : 0u) | ((cm >> 16) & 0xffu ? 0x07e0u : 0u) | ((cm >> 8) & 0xffu ? 0x001fu : 0u);
+        /* 16 bpp target: RGB565 R[15:11] G[10:5] B[4:0], or 1555 R[14:10] G[9:5] B[4:0] (rb.fmt555); no usable alpha channel in the buffer */
+        uint32_t wm = p->rb.fmt555 ? (0x8000u | ((cm >> 24) & 0xffu ? 0x7c00u : 0u) | ((cm >> 16) & 0xffu ? 0x03e0u : 0u) | ((cm >> 8) & 0xffu ? 0x001fu : 0u))
+                                   : (((cm >> 24) & 0xffu ? 0xf800u : 0u) | ((cm >> 16) & 0xffu ? 0x07e0u : 0u) | ((cm >> 8) & 0xffu ? 0x001fu : 0u));
         wm |= 0xffff0000u;
         if (st->dp_write_mask != wm) { st->dp_write_mask = wm; p->dirty |= MACH64_DIRTY_STATE; }
     }

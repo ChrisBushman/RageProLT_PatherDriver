@@ -90,7 +90,7 @@ IOReturn RageLTGLClient::userOut(uint32_t addr, const uint8_t *src, uint32_t len
 IOReturn RageLTGLClient::selInfo(uint32_t *gen, uint32_t *features, uint32_t *usableEnd, uint32_t *flags)
 {
     if (!fDev) return kIOReturnNotAttached;
-    *gen = fDev->modeGen(); *features = RAGE_FEATURE_BITS; *usableEnd = RAGE_VRAM_USABLE_END; *flags = (fDev->engineLive() ? 1u : 0u) | (fDev->dmaActive() ? 2u : 0u);
+    *gen = fDev->modeGen(); *features = RAGE_FEATURE_BITS; *usableEnd = RAGE_VRAM_USABLE_END; *flags = (fDev->engineLive() ? RAGE_INFO_ENGINE : 0u) | (fDev->dmaActive() ? RAGE_INFO_DMA : 0u) | (fDev->scanout555() ? RAGE_INFO_TGT555 : 0u);
     return kIOReturnSuccess;
 }
 IOReturn RageLTGLClient::selAlloc(uint32_t length, uint32_t align, uint32_t *offset)
