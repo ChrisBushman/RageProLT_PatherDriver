@@ -66,7 +66,7 @@ separate_specular_color, texture_mirror_clamp, compiled_vertex_array, abgr, bgra
 | EXT_texture_filter_anisotropic | accepted-only, not advertised | filter ignored |
 | ARB_point_sprite | tested | |
 | ARB_occlusion_query, ARB_vertex_program, APPLE_* (fence, flush_render, VAO), multi_draw_arrays, draw_range_elements, SGIS_generate_mipmap, ARB_window_pos | tested | GLEngine-side or driver-assisted |
-| ARB_fragment_program | **failing** | program format not decoded; GLEngine advertises ARB shader names in its fixed list, so they cannot be removed |
+| ARB_fragment_program | **failing** (accepted, not executed: draws with the primary colour) | static analysis (GLEngine 0x9d104..0x9e488): programs are parsed by the external PP library (PPParserParse) and compiled to a PPEmulatorProgram kept in the context; the driver never receives the text. Needs the PP stream chunk format decoded plus a CPU interpreter (fixed-point). GLEngine advertises ARB shader names in its fixed list, so they cannot be removed |
 | 3D textures | tested (CPU shaded) | descriptor +0xb4 = MAX_3D_TEXTURE_SIZE; nearest/trilinear, wrap S/T/R; level 0 only |
 | ARB_depth_texture / shadow | accepted-only (upload) | not implemented |
 | ARB_multisample | pixel format offered only | no multisampling |
