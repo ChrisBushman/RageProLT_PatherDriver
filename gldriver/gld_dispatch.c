@@ -76,6 +76,7 @@ int gldUpdateDispatch(gld_context *ctx, void *table, uint32_t flags)
     SET(0x64,            mach64_signal_fence);      /* gld_signalFence(ctx, fence) in the reference */
     SET(0x68,            mach64_begin_query);       /* gld_beginQuerySlot(ctx, query) */
     SET(0x6c,            mach64_end_query);
+    SET(0x74,            mach64_copy_tex_sub);     /* glCopyTexSubImage_impl in the reference (dispatch[0x1d]) */
 
     /* DOUBLE-BUFFER PRESENT lives in mach64_dispatch_render_ctl (slot 0x60), NOT here.
      * gldUpdateDispatch fires per state-change (~29-48x/frame in a real app), so presenting

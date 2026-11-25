@@ -1253,3 +1253,36 @@ int mach64_cpu_env(gld_context *ctx, m64_cpuenv *o)
     for (k = 0; k < 4; k++) { uint32_t q = fl_to_q8(mach64_gli_u32(ctx, 0x6738u + u + k * 4u)); o->ec[k] = (int)(q > 255u ? 255u : q); }
     return 1;
 }
+
+/* glCopyTexSubImage (dispatch slot 0x74; reference glCopyTexSubImage_impl(ctx, texobj, face, level, xoff, yoff, zoff, srcx, srcy, w, h)): copy a rectangle of the colour buffer into a
+ * level of the texture.  The rectangle is written into GLEngine's own image of that level (so the texture survives eviction and glGetTexImage) in its stored format, and the texture
+ * is queued for re-upload.  GL_RGB / GL_RGBA / GL_LUMINANCE with GL_UNSIGNED_BYTE levels; other formats are left alone. */
+int mach64_copy_tex_sub(gld_context *ctx, void *texobj, int face, uint32_t level, uint32_t xoff, uint32_t yoff, int zoff, uint32_t srcx, uint32_t srcy, int w, int h)
+{
+    mach64_priv *p = MACH64_PRIV(ctx); const unsigned char *t = (const unsigned char *)texobj, *s, *r; uint32_t state, lw, lh, fmt, type, bpp, dst; int H, i, j, fr0, nr; void *cbw;
+    (void)face; (void)zoff;
+    if (!p || !p->attached || !t || w <= 0 || h <= 0) return 0;
+    state = *(const uint32_t *)(t + 0x30);
+    if (state < 0x10000u || state > M64_UADDR_MAX) return 0;
+    s = (const unsigned char *)(uintptr_t)state; r = s + 0x9c + ((uint32_t)s[0x5e] + level) * 0x14;
+    lw = *(const uint16_t *)(r + 0); lh = *(const uint16_t *)(r + 2); fmt = *(const uint16_t *)(r + 0x0c); type = *(const uint16_t *)(r + 0x0e); dst = *(const uint32_t *)(r + 0x10);
+    if (!lw || !lh || dst < 0x10000u || dst > M64_UADDR_MAX || type != 0x1401u) return 0;
+    bpp = fmt == 0x1907u ? 3u : fmt == 0x1908u ? 4u : fmt == 0x1909u ? 1u : 0u;
+    if (!bpp) return 0;
+    if (xoff + (uint32_t)w > lw || yoff + (uint32_t)h > lh) return 0;
+    H = (int)p->rb.h;
+    mach64_flush_batch(ctx);
+    fr0 = H - (int)(srcy + (uint32_t)h); nr = h; if (fr0 < 0) { nr += fr0; fr0 = 0; }
+    if (fr0 + nr > H) nr = H - fr0;
+    if (nr <= 0 || !(cbw = mach64_cb_open(ctx, fr0, nr))) return 0;
+    for (j = 0; j < h; j++) for (i = 0; i < w; i++) {
+        int fbrow = H - 1 - (int)(srcy + (uint32_t)j); uint16_t *px = mach64_cb_px(cbw, fbrow, (int)(srcx + (uint32_t)i)); unsigned R, G, B; unsigned char *o;
+        if (!px) continue;
+        mach64_cb_unpack(ctx, *px, &R, &G, &B);
+        o = (unsigned char *)(uintptr_t)dst + ((size_t)(yoff + (uint32_t)j) * lw + xoff + (uint32_t)i) * bpp;
+        if (bpp == 1u) o[0] = (unsigned char)R; else { o[0] = (unsigned char)R; o[1] = (unsigned char)G; o[2] = (unsigned char)B; if (bpp == 4u) o[3] = 255; }
+    }
+    mach64_cb_close(ctx, cbw, 0);
+    mach64_texture_dirtied(texobj);
+    return 0;
+}

@@ -316,3 +316,17 @@ static void t_paletted(void)
     CHECK("paletted: a changed palette re-uploads the texture", isclr(px(16, 16), 0, 0, 255));
     default_state(); sync(); clear_rt(0);
 }
+
+/* glCopyTexSubImage (slot 0x74): a colour-buffer rectangle becomes part of an existing texture */
+static void t_copytexsub(void)
+{
+    static unsigned char base[64 * 64 * 3]; void *t = mktex(64, 64, 0x1907, base, (GL_REPEAT_ << 16) | GL_REPEAT_, 0x2600, 0x2600); int Hh = (int)P->rb.h;
+    default_state(); sync(); clear_rt(0);
+    tri(0, 0, 0xff00ff00u, 40, 0, 0xff00ff00u, 0, 40, 0xff00ff00u, 0.0f); tri(40, 0, 0xff00ff00u, 40, 40, 0xff00ff00u, 0, 40, 0xff00ff00u, 0.0f);
+    mach64_copy_tex_sub(ctx, t, 0, 0, 0, 0, 0, 0, (uint32_t)(Hh - 32), 32, 32);
+    default_state(); bindtex(t, GL_REPLACE_ENV); sync(); clear_rt(0);
+    tquad(0, 0, 128, 128, 0.0f, 0.0f, 1.0f, 1.0f, 0xffffffffu);
+    CHECK("copyTexSubImage: the copied rectangle (green) lands in the texture's first 32x32 texels", isclr(px(20, 20), 0, 255, 0) && isclr(px(50, 50), 0, 255, 0));
+    CHECK("copyTexSubImage: the rest of the texture is untouched (black)", isclr(px(100, 100), 0, 0, 0));
+    default_state(); sync(); clear_rt(0);
+}

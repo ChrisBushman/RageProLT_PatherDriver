@@ -189,6 +189,7 @@ void mach64_accum_clear(gld_context *);
 typedef struct { const uint32_t *img; int w, h, clamp_s, clamp_t, bil, has_a; uint32_t mode, rgbf, alf, src[3], asrc[3], op[3], aop[3]; int rscale, ascale, ec[4]; } m64_cpuenv;
 int mach64_cpu_env(gld_context *, m64_cpuenv *);
 int mach64_env_needs_cpu(uint32_t gli);
+int mach64_copy_tex_sub(gld_context *, void *texobj, int face, uint32_t level, uint32_t xoff, uint32_t yoff, int zoff, uint32_t srcx, uint32_t srcy, int w, int h);
 void *mach64_cb_open(gld_context *, int fr0, int nr);
 uint16_t *mach64_cb_px(void *h, int fbrow, int x);
 void mach64_cb_close(gld_context *, void *h, int write_back);

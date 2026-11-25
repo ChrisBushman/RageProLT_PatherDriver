@@ -403,7 +403,7 @@ static void t_copytexsub(void)
     glCopyTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 0, 0, 32, 32);
     if (glerr()) { report("glCopyTexSubImage2D", -1, "error"); return; }
     glClearColor(0, 0, 0, 0); glClear(GL_COLOR_BUFFER_BIT); tquad(0, 1, 0, 128);
-    report("glCopyTexSubImage2D", glerr() ? -1 : (near3(30, 90, 0, 255, 0, 30) && near3(100, 40, 0, 0, 0, 30)), 0); glDeleteTextures(1, &id);
+    report("glCopyTexSubImage2D", glerr() ? -1 : (near3(30, 30, 0, 255, 0, 30) && near3(30, 90, 0, 0, 0, 30) && near3(100, 40, 0, 0, 0, 30)), 0); glDeleteTextures(1, &id);
 }
 static void t_point_sprite(void)
 {
