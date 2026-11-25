@@ -73,7 +73,7 @@ void RageLTDevice::modeWillChange(void)
     uint32_t k;
     OSIncrementAtomic((SInt32 *)&fModeGen);                     /* odd: changing */
     IOLockLock(fLock);
-    if (fEngineLive) (void)eng_wait_idle(fRegs);                /* drain; a stuck engine is reset at the next engineEnable */
+    if (fEngineLive) (void)idleWait();                /* drain; a stuck engine is reset at the next engineEnable */
     for (k = 0; k < RAGE_MAX_CTX; k++) if (fCtx[k].owner) { fCtx[k].tgt_bpp = 0; fCtx[k].z_set = 0; }   /* every cached offset is stale after the framebuffer re-lays VRAM */
     if (fDispReserved) {
         rage_vram_unreserve(&fVram, fDisp.base);
@@ -138,7 +138,7 @@ IOReturn RageLTDevice::present(uint32_t owner, uint32_t sx, uint32_t sy, uint32_
     if (h > d.h - dy) h = d.h - dy;
     if (!w || !h) { IOLockUnlock(fLock); return kIOReturnSuccess; }
     pixw = d.depth == 3 ? RAGE_PIXW_555 : RAGE_PIXW_565;
-    if (eng_wait_idle(fRegs)) { IOLockUnlock(fLock); return kIOReturnTimeout; }
+    if (idleWait()) { IOLockUnlock(fLock); return kIOReturnTimeout; }
     rc = (IOReturn)eng_blit(fRegs, pixw, c.tgt_off, c.tgt_pitch, d.base, d.pitch_px, sx, sy, dx, dy, w, h, ((d.w - 1u) << 16), ((d.h - 1u) << 16));
     if (rc) { IOLockUnlock(fLock); return kIOReturnTimeout; }
     seq = ++fFenceSubmitted;
@@ -170,7 +170,7 @@ IOReturn RageLTDevice::vramCopyIn(uint32_t owner, uint32_t off, const uint8_t *s
     IOLockLock(fLock);
     if (rage_vram_owns(&fVram, off, len, owner)) {
         rc = kIOReturnSuccess;
-        if (fEngineLive && eng_wait_idle(fRegs)) rc = kIOReturnTimeout;      /* the CPU must not touch the aperture while the engine writes it */
+        if (fEngineLive && idleWait()) rc = kIOReturnTimeout;      /* the CPU must not touch the aperture while the engine writes it */
         else for (i = 0; i < len; i += 4) OSWriteLittleInt32((void *)vram, off + i, xfer_word(src + i, flags));
     }
     IOLockUnlock(fLock);
@@ -184,7 +184,7 @@ IOReturn RageLTDevice::vramCopyOut(uint32_t owner, uint32_t off, uint8_t *dst, u
     IOLockLock(fLock);
     if (rage_vram_owns(&fVram, off, len, owner)) {
         rc = kIOReturnSuccess;
-        if (fEngineLive && eng_wait_idle(fRegs)) rc = kIOReturnTimeout;
+        if (fEngineLive && idleWait()) rc = kIOReturnTimeout;
         else {
             for (i = 0; i < len; i += 4) unxfer_word(dst + i, OSReadLittleInt32((void *)vram, off + i), flags);
             if (len >= 4) (void)OSReadLittleInt32((void *)vram, off);
@@ -203,7 +203,7 @@ IOReturn RageLTDevice::scanoutCopyOut(uint32_t byteOff, uint8_t *dst, uint32_t l
     size = (uint64_t)fDisp.pitch_px * fDisp.h * fDisp.bpp;
     if (fDispReserved && byteOff + (uint64_t)len <= size && rage_vram_span_ok(fDisp.base + byteOff, len)) {
         rc = kIOReturnSuccess;
-        if (eng_wait_idle(fRegs)) rc = kIOReturnTimeout;
+        if (idleWait()) rc = kIOReturnTimeout;
         else for (i = 0; i < len; i += 4) unxfer_word(dst + i, OSReadLittleInt32((void *)vram, fDisp.base + byteOff + i), 0);
     }
     IOLockUnlock(fLock);

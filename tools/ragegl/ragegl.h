@@ -49,3 +49,4 @@ static inline kern_return_t ragegl_display(ragegl_t c, uint32_t *gen, uint32_t *
 static inline kern_return_t ragegl_scanout_read(ragegl_t c, uint32_t boff, void *p, uint32_t len)
 { return RGL_CALL(RAGE_GL_SCANOUT_READ, 3, 0, boff, (uint32_t)(uintptr_t)p, len); }
 #endif
+static inline kern_return_t ragegl_config(ragegl_t c, uint32_t key, uint32_t v) { return RGL_CALL(RAGE_GL_CONFIG, 2, 0, key, v); }

@@ -40,6 +40,7 @@ bool RageLTGLClient::start(IOService *provider)
     M(RAGE_GL_VRAM_WRITE,  selVramWrite,  kIOUCScalarIScalarO, 4, 0);
     M(RAGE_GL_VRAM_READ,   selVramRead,   kIOUCScalarIScalarO, 4, 0);
     M(RAGE_GL_DISPLAY,     selDisplay,    kIOUCScalarIScalarO, 0, 6);
+    M(RAGE_GL_CONFIG,      selConfig,     kIOUCScalarIScalarO, 2, 0);
     M(RAGE_GL_SCANOUT_READ, selScanoutRead, kIOUCScalarIScalarO, 3, 0);
 #undef M
     fDev->logEvent(RAGE_EV_CLIENT_OPEN, fOwner, RAGE_CLIENT_GL, 0, 0, 0, 0);
@@ -87,7 +88,7 @@ IOReturn RageLTGLClient::userOut(uint32_t addr, const uint8_t *src, uint32_t len
 IOReturn RageLTGLClient::selInfo(uint32_t *gen, uint32_t *features, uint32_t *usableEnd, uint32_t *flags)
 {
     if (!fDev) return kIOReturnNotAttached;
-    *gen = fDev->modeGen(); *features = RAGE_FEATURE_BITS; *usableEnd = RAGE_VRAM_USABLE_END; *flags = fDev->engineLive() ? 1u : 0u;
+    *gen = fDev->modeGen(); *features = RAGE_FEATURE_BITS; *usableEnd = RAGE_VRAM_USABLE_END; *flags = (fDev->engineLive() ? 1u : 0u) | (fDev->dmaActive() ? 2u : 0u);
     return kIOReturnSuccess;
 }
 IOReturn RageLTGLClient::selAlloc(uint32_t length, uint32_t align, uint32_t *offset)
@@ -123,7 +124,7 @@ IOReturn RageLTGLClient::selFence(uint32_t seq, uint32_t *completed)
 {
     IOReturn rc;
     if (!fDev) return kIOReturnNotAttached;
-    rc = fDev->waitFence(seq);
+    rc = fDev->fenceWait(seq);
     *completed = fDev->fenceCompleted();
     return rc;
 }
@@ -165,6 +166,14 @@ IOReturn RageLTGLClient::selVramRead(uint32_t off, uint32_t addr, uint32_t len, 
     }
     IOFree(buf, XFER_CHUNK);
     return rc;
+}
+
+IOReturn RageLTGLClient::selConfig(uint32_t key, uint32_t value)
+{
+    if (!fDev) return kIOReturnNotAttached;
+    if (key != 1) return kIOReturnBadArgument;
+    fDev->dmaConfig(key, value);
+    return kIOReturnSuccess;
 }
 
 IOReturn RageLTGLClient::selDisplay(uint32_t *gen, uint32_t *w, uint32_t *h, uint32_t *pitch, uint32_t *bpp, uint32_t *base)

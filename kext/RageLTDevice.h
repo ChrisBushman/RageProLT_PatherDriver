@@ -45,6 +45,12 @@ class RageLTDevice : public IOService
     IONotifier          *fFBNotify[RAGE_MAX_FB];
     uint32_t               fNumFB;
     uint32_t               fFenceSubmitted, fFenceCompleted;   /* PIO phase: completes before submit returns; DMA keeps the same counters */
+    /* RAGE_FEAT_DMA (RageLTDma.cpp) */
+    class IOBufferMemoryDescriptor *fDmaCmd, *fDmaRing;
+    IOMemoryMap         *fDmaCmdMap, *fDmaRingMap;
+    volatile uint8_t      *fDmaCmdKva, *fDmaRingKva, *fDmaRingKva0;
+    uint32_t               fDmaCmdBus, fDmaRingBus, fDmaNDesc, fDmaSaveBus;
+    bool                 fDmaOk, fDmaUse, fDmaPending;
     struct rage_log     *fLog;         /* event ring (RAGE_FEAT_PANIC_LOG), allocated at start */
     IOSimpleLock        *fLogLock;     /* short spin lock: logging must be safe from any context, including an interrupt filter */
 
@@ -83,8 +89,17 @@ public:
     IOReturn     modeRegsRead(void);                 /* reads the CRTC into fDisp */
     uint32_t       fenceSubmitted(void) const { return fFenceSubmitted; }
     uint32_t       fenceCompleted(void) const { return fFenceCompleted; }
+    IOReturn     fenceWait(uint32_t seq);            /* takes fLock; for clients */
     IOReturn     waitFence(uint32_t seq);            /* bounded; kIOReturnTimeout on a stuck engine (which is reset) */
 
+    bool         dmaInit(void);
+    void         dmaFree(void);
+    IOReturn     dmaWait(void);                      /* caller holds fLock */
+    IOReturn     dmaSubmit(const struct rage_ctx *c, const uint32_t *pairs, uint32_t npairs);
+    IOReturn     idleWait(void);                     /* drain DMA, then engine idle: before any CPU/PIO use of the engine or the aperture */
+    uint32_t       dmaMinimalTest(uint32_t variant);   /* DEBUG ONLY */
+    void         dmaConfig(uint32_t key, uint32_t value);
+    bool         dmaActive(void) const { return fDmaOk && fDmaUse; }
     /* pairs[2*i] = register byte offset, pairs[2*i+1] = value.  Validated as a whole by rage_batch_ok(); refused batches change nothing. */
     IOReturn     submitBatch(uint32_t owner, const uint32_t *pairs, uint32_t npairs);
 

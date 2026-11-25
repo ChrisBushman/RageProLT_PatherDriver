@@ -353,3 +353,29 @@ full state; TEX_n_OFF are not yet settable (texture binding selector comes with 
 | 1/x bits (vertex W, ONE_OVER_AREA) | float `fdivs` 31.1, exact by definition; B 256-seed+2 Newton 40.8 (max 1 ulp, 99.75% exact); C 256-seed interpolated+1 Newton 35.3 (max 1 ulp, 99.74% exact); D 2048x16-bit seed+1 Newton 29.6 (max **4 ulp**, 63.5% exact) | **single float divide.**  D is 5% faster but loses precision and uses a 4 KB table that competes for the 32 KB L1; B and C are slower than the divide on this CPU.  B and C stay in the header as bounded fallbacks. |
 | (int)(x*4) vertex X/Y from the float's bits | float multiply+convert 20.9 (input in memory); `rage_f2q` bit manipulation 12.0 | **`rage_f2q` (integer):** 42% faster, bit-exact vs `(int)(x*4.0f)` for all 2^32 patterns (saturating beyond 2^29).  If the value is already in a float register the float path is faster (15.2 vs 19.4), which is not the usual case for vertex arrays. |
 | colour float -> byte | float `(int)(c*255+0.5f)` 20.9; `rage_f2byte` 29.4 | **single float** (integer is slower); `rage_f2byte` differs from the float formula by at most 1 in 0.8% of inputs because it evaluates exactly. |
+
+### 11.16 DMA submission (RAGE_FEAT_DMA), G4 results (Nov 24)
+
+`kext/RageLTDma.cpp`.  The kernel owns a physically contiguous 72 KB command buffer and a 32 KB block from which a 16 KB-aligned descriptor table is cut; the stream is built from the *validated* pairs plus the kernel prologue
+(one ADRINDEX header + value per register), chained over 4092-byte descriptors (12-bit byte count), terminated by SRC_CNTL=0; kick = BUS_CNTL, BM_GUI_TABLE_CMD, SRC_CNTL, DST_HEIGHT_WIDTH=0 (the proven sequence).
+Submit returns without waiting; `idleWait()` (drain DMA, then engine idle) precedes every other engine use, CPU VRAM access, free and owner release; a second submit waits for the first (serial model).
+Completion = BM_GUI_TABLE at table end AND idle for 8 consecutive reads; a timeout resets the engine and abandons the work.  Bus-master mode is enabled only for the duration of a stream (BUS_CNTL restored).
+`RAGE_GL_CONFIG` key 1 selects PIO (0) or DMA (1) for diagnosis; DMA is the default when the buffers allocate.
+
+Findings that cost time (kept so they are not rediscovered):
+* **PCI bus mastering must be enabled** (`setBusMasterEnable(true)`); without it the engine loads BM_GUI_TABLE and never fetches (table stays at base, GUI_STAT 0x00800001).  Our first skeleton only enabled memory decode.
+* That failed attempt left the chip in a state in which later DMA attempts (even with the fix) still never fetched; engine reset (GEN_GUI_RESETB pulse) did not recover it, a **reboot did**.  After the reboot DMA worked straight away, also after our engine reset, so a reset is fine; the wedge came from kicking a stream with PCI mastering off.  Not reproduced on purpose (the cure is a reboot).
+* Command/ring memory is written through the kernel's cached address and flushed with `dcbf` + `sync` before the kick (uncached second mappings are not needed).
+* Debug `ENGTEST 0x1000000x` is the minimal two-register stream (bm_dma_test equivalent); the API suite reads VRAM only after `idleWait()` (CPU access to VRAM while DMA is in flight is exactly what must never happen).
+
+Results (same G4 boot, tools/ragegl): ragegl_test 27/27 with DMA and with PIO, repeated; killed client mid-flood leaves the driver healthy (next run 27/27, no ring errors); ENGTEST 2D 17/17, triangles 6/6, API 7/7, mode change 9/9.
+`ragegl_bench` (batch of K triangles, N batches, serial submit, fence at end; 1.25 GHz G4): 
+
+| batches x triangles | PIO us/triangle | DMA us/triangle |
+|---|---|---|
+| 500 x 20 | 16 | 4 |
+| 200 x 100 | 14 | 3 |
+| 2000 x 1 | 70 | 45 |
+| 20000 x 5 | 24 | 10 |
+
+DMA is 1.5x (single triangle batches) to 4.7x (large batches) faster in submission cost.  Open: texture upload by DMA (VRAM writes still use the CPU path), interrupt completion (O6).

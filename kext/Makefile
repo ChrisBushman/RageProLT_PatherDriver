@@ -15,7 +15,7 @@ KCXX := -static -mlong-branch -fno-rtti -fno-exceptions -fcheck-new -fno-builtin
 KCC  := -static -mlong-branch -fno-builtin $(KARCH) -O2 -Wall
 EXEC := ATIRageProLT
 BUNDLE := $(EXEC).kext
-OBJS := RageLTDevice.o RageLTLogClient.o RageLTSelfTest.o RageLTEngine.o RageLTMode.o RageLTGLClient.o kmod_glue.o
+OBJS := RageLTDevice.o RageLTLogClient.o RageLTSelfTest.o RageLTEngine.o RageLTMode.o RageLTDma.o RageLTGLClient.o kmod_glue.o
 
 .PHONY: syntax kext checkfp validate clean
 syntax:

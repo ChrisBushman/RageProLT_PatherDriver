@@ -44,6 +44,8 @@ bool RageLTDevice::start(IOService *provider)
     fDispReserved = false;
     { uint32_t k; for (k = 0; k < RAGE_MAX_CTX; k++) fCtx[k].owner = 0; }
     fFenceSubmitted = fFenceCompleted = 0;
+    fDmaCmd = fDmaRing = 0; fDmaOk = fDmaUse = fDmaPending = false;
+    (void)dmaInit();
     modeStart();
 
     logEvent(RAGE_EV_START, 0, RAGE_FEATURE_BITS, 0, 0, 0, 0);
@@ -56,6 +58,7 @@ bool RageLTDevice::start(IOService *provider)
 void RageLTDevice::stop(IOService *provider)
 {
     modeStop();
+    if (fEngineLive) { IOLockLock(fLock); (void)dmaWait(); IOLockUnlock(fLock); }
     fEngineLive = false;
     logEvent(RAGE_EV_STOP, 0, 0, 0, 0, 0, 0);
     super::stop(provider);
@@ -63,6 +66,7 @@ void RageLTDevice::stop(IOService *provider)
 
 void RageLTDevice::free(void)
 {
+    dmaFree();
     if (fMap) { fMap->release(); fMap = 0; }
     if (fFB)  { fFB->release();  fFB = 0; }
     if (fLock) { IOLockFree(fLock); fLock = 0; }
@@ -88,6 +92,7 @@ void RageLTDevice::releaseOwner(uint32_t owner)
 {
     uint32_t n;
     IOLockLock(fLock);
+    if (fEngineLive && fDmaPending) (void)dmaWait();            /* the engine may still be drawing into memory that is about to be reused */
     { struct rage_ctx *c = ctxFor(owner, false); if (c) c->owner = 0; }
     n = rage_vram_free_owner(&fVram, owner);
     IOLockUnlock(fLock);
@@ -108,6 +113,7 @@ IOReturn RageLTDevice::vramFree(uint32_t owner, uint32_t offset)
 {
     int rc;
     IOLockLock(fLock);
+    if (fEngineLive && fDmaPending) (void)dmaWait();
     rc = rage_vram_free(&fVram, offset, owner);
     IOLockUnlock(fLock);
     logEvent(RAGE_EV_VRAM_FREE, owner, offset, rc ? 1u : 0u, 0, 0, 0);

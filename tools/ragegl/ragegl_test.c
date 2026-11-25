@@ -8,10 +8,12 @@ static uint16_t rd16(const uint8_t *b, uint32_t o) { return (uint16_t)(b[o] | (b
 
 int main(int argc, char **argv)
 {
+    int dma = argc > 1 && !strcmp(argv[argc-1], "dma");
     ragegl_t c; uint32_t gen, feat, end, flags, off = 0, off2 = 0, i, w, h, pitch, bpp, base, done;
     uint8_t *img; kern_return_t kr; int scan = argc > 1 && !strcmp(argv[1], "scan");
     if (ragegl_open(&c)) { printf("cannot open the GL client\n"); return 99; }
-    CHECK("info", ragegl_info(c, &gen, &feat, &end, &flags) == 0 && end == 0x7ff800 && (flags & 1) && !(gen & 1));
+    if (dma) printf("      DMA submission %s\n", ragegl_config(c, 1, 1) == 0 ? "selected" : "NOT selectable");
+    CHECK("info", ragegl_info(c, &gen, &feat, &end, &flags) == 0 && end == 0x7ff800 && (flags & 1) && !(gen & 1) && (!dma || (flags & 2)));
     CHECK("display", ragegl_display(c, &gen, &w, &h, &pitch, &bpp, &base) == 0 && w >= 320 && h >= 200 && (bpp == 2 || bpp == 4));
     printf("      display %ux%u pitch %u bpp %u base 0x%x gen %u\n", w, h, pitch, bpp, base, gen);
     CHECK("alloc 512 KB", ragegl_alloc(c, 0x80000, 4096, &off) == 0 && off % 4096 == 0 && off + 0x80000 <= 0x770000);

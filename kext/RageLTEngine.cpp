@@ -35,7 +35,7 @@ IOReturn RageLTDevice::engineEnable(void)
     if (eng_reset(fRegs, 0)) { logEvent(RAGE_EV_ERROR, 0, 0xe0020000u, 0, 0, 0, 0); return kIOReturnNotReady; }
     eng_init_context(fRegs, 8);
     eng_wq(fRegs, 0x0304, 0);                                  /* SETUP_CNTL: plain integer coordinates (design 11.11) */
-    if (eng_wait_idle(fRegs)) return kIOReturnNotReady;
+    if (idleWait()) return kIOReturnNotReady;
     fEngineLive = true;
     logEvent(RAGE_EV_MARK, 0, 0xe0030000u, bus, gen, 0, 0);
     return kIOReturnSuccess;
@@ -121,10 +121,20 @@ static void eng_prologue(volatile uint8_t *regs, const struct rage_ctx *c)
     if (c->z_set) eng_wq(regs, MACH64_Z_OFF_PITCH, ((c->z_pitch / 8u) << 22) | (c->z_off >> 3));
 }
 
+IOReturn RageLTDevice::fenceWait(uint32_t seq)
+{
+    IOReturn rc;
+    IOLockLock(fLock);
+    rc = waitFence(seq);
+    IOLockUnlock(fLock);
+    return rc;
+}
+
 IOReturn RageLTDevice::waitFence(uint32_t seq)
 {
     if ((int32_t)(fFenceCompleted - seq) >= 0) return kIOReturnSuccess;
-    if (eng_wait_idle(fRegs)) {
+    if (fDmaPending && dmaWait()) return kIOReturnTimeout;
+    if (idleWait()) {
         logEvent(RAGE_EV_ERROR, 0, 0xe0060000u, seq, eng_rd(fRegs, MACH64_FIFO_STAT), eng_rd(fRegs, MACH64_GUI_STAT), 0);
         eng_reset(fRegs, 1);
         fFenceCompleted = fFenceSubmitted;                     /* the stuck work is abandoned */
@@ -146,7 +156,12 @@ IOReturn RageLTDevice::submitBatch(uint32_t owner, const uint32_t *pairs, uint32
     IOLockLock(fLock);
     { struct rage_ctx *p = ctxFor(owner, false); if (!p || !p->tgt_bpp) { IOLockUnlock(fLock); return kIOReturnNotReady; } c = *p; }
     logEvent(RAGE_EV_BATCH, owner, npairs, pairs[0], pairs[1], 0, 0);
-    if (eng_wait_idle(fRegs)) { IOLockUnlock(fLock); return kIOReturnTimeout; }        /* the previous batch is still in flight (DMA phase): block here only */
+    if (dmaActive() && npairs + 8u <= 8192u + 8u) {
+        rc = dmaSubmit(&c, pairs, npairs);
+        if (rc == kIOReturnSuccess) { ++fFenceSubmitted; IOLockUnlock(fLock); return rc; }   /* returns without waiting: the next engine operation drains */
+        IOLockUnlock(fLock); return rc;
+    }
+    if (idleWait()) { IOLockUnlock(fLock); return kIOReturnTimeout; }
     eng_prologue(fRegs, &c);
     for (i = 0; i < npairs; i++) {
         uint32_t reg = pairs[2 * i], val = pairs[2 * i + 1];
@@ -172,7 +187,7 @@ IOReturn RageLTDevice::fillRect(uint32_t owner, int32_t x, int32_t y, int32_t w,
     if (x1 > (int32_t)c.sc_r + 1) x1 = (int32_t)c.sc_r + 1;
     if (y1 > (int32_t)c.sc_b + 1) y1 = (int32_t)c.sc_b + 1;
     if (x1 <= x || y1 <= y) { IOLockUnlock(fLock); return kIOReturnSuccess; }
-    if (eng_wait_idle(fRegs)) { IOLockUnlock(fLock); return kIOReturnTimeout; }
+    if (idleWait()) { IOLockUnlock(fLock); return kIOReturnTimeout; }
     rc = (IOReturn)eng_fill16(fRegs, c.tgt_off, c.tgt_pitch, (uint32_t)x, (uint32_t)y, (uint32_t)(x1 - x), (uint32_t)(y1 - y), color565 & 0xffffu,
                               (c.sc_r << 16) | c.sc_l, (c.sc_b << 16) | c.sc_t, 3u);
     if (rc) { IOLockUnlock(fLock); return kIOReturnTimeout; }

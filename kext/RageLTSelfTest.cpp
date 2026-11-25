@@ -117,6 +117,7 @@ IOReturn RageLTDevice::engineSelfTest(uint32_t mask, uint32_t *passmask, uint32_
     logEvent(RAGE_EV_MARK, owner, 0xe0000002u, off0, BLOCK_BYTES, 0, 0);
 
 
+    if (mask & 0x10000000u) { if (!(mask & 1u)) engineEnable(); *passmask = dmaMinimalTest(mask & 1u); *inside = 0; *outside = 0; return kIOReturnSuccess; }
     if (mask & 0x20000000u) {                          /* ---- mode-change protocol (simulated will/did events; the G4 framebuffer never changes mode) ---- */
         uint32_t pass = 0, g0 = modeGen(), offA = off0, t2 = 0, base0 = fDisp.base; struct rage_display d0 = fDisp;
         uint32_t one[2] = { MACH64_DP_FRGD_CLR, 1 };
@@ -147,7 +148,7 @@ IOReturn RageLTDevice::engineSelfTest(uint32_t mask, uint32_t *passmask, uint32_
         a = owner; (void)a; (void)x0; (void)col;
         if (vramAlloc(ownB, BLOCK_BYTES, 4096, &offB)) { *status = 5; releaseOwner(ownB); releaseOwner(owner); return kIOReturnNoSpace; }
         (void)b2; offA = off0;
-#define SCAN(name, expect_fn) do { bad_outside = 0; for (o = 0; o < SURF_BYTES; o += 2) { uint32_t px = o >> 1, x = px % SURF_PX, y = px / SURF_PX; uint16_t got = vr16(vram, offA + o), ex; expect_fn; if (got != ex) bad_outside++; } logEvent(RAGE_EV_MARK, owner, 0xd0000000u | (name), bad_outside, 0, 0, 0); } while (0)
+#define SCAN(name, expect_fn) do { (void)idleWait(); bad_outside = 0; for (o = 0; o < SURF_BYTES; o += 2) { uint32_t px = o >> 1, x = px % SURF_PX, y = px / SURF_PX; uint16_t got = vr16(vram, offA + o), ex; expect_fn; if (got != ex) bad_outside++; } logEvent(RAGE_EV_MARK, owner, 0xd0000000u | (name), bad_outside, 0, 0, 0); } while (0)
         for (o = 0; o < BLOCK_BYTES; o += 4) vw32(vram, offA + o, 0xa5a5a5a5u);
         /* 0: a target the client does not own (offset 0 = scanout reservation) is refused; a target overrunning its block is refused; B cannot use A's block */
         if (setRenderTarget(owner, 0, 256, 2, 256, 256) != kIOReturnSuccess && setRenderTarget(owner, offA, 256, 2, 256, 2048) != kIOReturnSuccess &&

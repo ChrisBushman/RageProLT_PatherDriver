@@ -27,7 +27,8 @@ enum {
     RAGE_GL_VRAM_READ = 11,  /* in 4 {offset, user address, length, flags} */
     RAGE_GL_DISPLAY = 12,    /* in 0, out 6: mode_gen, width, height, pitch_px, bpp, scanout base */
     RAGE_GL_SCANOUT_READ = 13, /* debug builds only (RAGE_DEBUG_ENGTEST): in 3 {byte offset into the scanout block, user address, length} */
-    RAGE_GL_SEL_COUNT = 14
+    RAGE_GL_CONFIG = 14,       /* in 2 {key, value}: key 1 = use DMA submission (1) or PIO (0); a global switch, harmless to flip */
+    RAGE_GL_SEL_COUNT = 15
 };
 #define RAGE_XFER_SWAP16 1u      /* VRAM_WRITE/READ flag: swap bytes inside every 16-bit unit */
 #define RAGE_XFER_SWAP32 2u      /* ... inside every 32-bit unit */
