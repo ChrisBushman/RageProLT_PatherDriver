@@ -222,3 +222,25 @@ static void t_accum(void)
     CHECK("accum RETURN clamps at 255", ((px(60, 60) >> 16) & 255) == 255 || ((px(60, 60) >> 16) & 255) >= 248);
     default_state(); sync(); clear_rt(0);
 }
+
+/* Blending the chip cannot do, composited on the CPU: equations (SUBTRACT / REVERSE_SUBTRACT / MIN / MAX), constant-colour factors, SATURATE.
+ * Background grey (128,128,128); one big triangle of colour (r,g,b,a) over the probe pixel. */
+static unsigned cb_run(uint32_t eq, uint32_t sf, uint32_t df, unsigned argb, float cr, float cg, float cb_, float ca)
+{
+    default_state(); g32(0x6304, 0x01000000u); g32(0x62e8, (sf << 16) | df); g32(0x62ec, (sf << 16) | df); g32(0x6300, (eq << 16) | eq);
+    gf(0x62f0, cr); gf(0x62f4, cg); gf(0x62f8, cb_); gf(0x62fc, ca); sync(); clear_rt(0xff808080u);
+    tri(0, 0, argb, 200, 0, argb, 0, 200, argb, 0.0f);
+    return px(30, 30);
+}
+static void t_cblend(void)
+{
+    unsigned v;
+    v = cb_run(0x800au, 1, 1, 0xff402010u, 0, 0, 0, 0); CHECK("blend SUBTRACT: src - dst clamps at 0", isclr(v, 0, 0, 0));
+    v = cb_run(0x800bu, 1, 1, 0xff402010u, 0, 0, 0, 0); CHECK("blend REVERSE_SUBTRACT: dst - src = (64, 96, 112)", isclr(v, 64, 112, 112) || (((v >> 16) & 255) >= 58 && ((v >> 16) & 255) <= 70 && ((v >> 8) & 255) >= 100 && ((v >> 8) & 255) <= 118));
+    v = cb_run(0x8007u, 1, 1, 0xff402010u, 0, 0, 0, 0); CHECK("blend MIN picks the smaller per channel", ((v >> 16) & 255) <= 70 && (v & 255) <= 24);
+    v = cb_run(0x8008u, 1, 1, 0xffc04000u, 0, 0, 0, 0); CHECK("blend MAX picks the larger per channel", ((v >> 16) & 255) >= 184 && ((v >> 8) & 255) >= 120 && ((v >> 8) & 255) <= 136);
+    v = cb_run(0x8006u, 0x8001u, 0, 0xffffffffu, 0.5f, 0.25f, 0.0f, 1.0f); CHECK("blend CONSTANT_COLOR src factor: white * (0.5, 0.25, 0)", isclr(v, 128, 64, 0) || (((v >> 16) & 255) >= 120 && ((v >> 16) & 255) <= 136 && ((v >> 8) & 255) >= 56 && ((v >> 8) & 255) <= 72 && (v & 255) <= 8));
+    v = cb_run(0x8006u, 0, 0x8002u, 0xff000000u, 0.75f, 0.0f, 0.0f, 1.0f); CHECK("blend ONE_MINUS_CONSTANT_COLOR dst factor: grey * (0.25, 1, 1)", ((v >> 16) & 255) >= 28 && ((v >> 16) & 255) <= 36 && ((v >> 8) & 255) >= 124);
+    v = cb_run(0x8006u, 0x0308u, 1, 0x80ff0000u, 0, 0, 0, 0); CHECK("blend SRC_ALPHA_SATURATE (Ad = 1 -> factor 0): the destination stays", isclr(v, 128, 128, 128));
+    default_state(); sync(); clear_rt(0);
+}

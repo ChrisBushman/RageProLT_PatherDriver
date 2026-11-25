@@ -334,3 +334,29 @@ void mach64_ctl00(gld_context *c, uint32_t op, float value)
     }
     if (op == 0x102u) win_put(p, &win); else { free(win.buf); win.buf = 0; }
 }
+
+/* ---- CPU compositing support (gld_stencil.c): a window of colour-buffer rows read back, modified by the CPU rasteriser, and written back.  Rows are framebuffer rows (y down). ---- */
+void *mach64_cb_open(gld_context *c, int fr0, int nr)
+{
+    mach64_priv *p = MACH64_PRIV(c); pxwin *w;
+    if (!p || !p->rb.col_off || nr <= 0) return 0;
+    w = (pxwin *)malloc(sizeof *w); if (!w) return 0;
+    if (win_get(p, p->rb.col_off, fr0, nr, w)) { free(w); return 0; }
+    return w;
+}
+uint16_t *mach64_cb_px(void *h, int fbrow, int x)
+{
+    pxwin *w = (pxwin *)h;
+    if (fbrow < w->fr0 || fbrow >= w->fr0 + w->nr || x < 0) return 0;
+    return w->buf + (uint32_t)(fbrow - w->fr0) * w->pitch + (uint32_t)x;
+}
+void mach64_cb_close(gld_context *c, void *h, int write_back)
+{
+    mach64_priv *p = MACH64_PRIV(c); pxwin *w = (pxwin *)h;
+    if (!w) return;
+    if (write_back) win_put(p, w); else free(w->buf);
+    free(w);
+    if (write_back) p->dirty |= MACH64_DIRTY_STATE;
+}
+uint16_t mach64_cb_pack(gld_context *c, unsigned R, unsigned G, unsigned B) { return pack16(MACH64_PRIV(c), R, G, B); }
+void mach64_cb_unpack(gld_context *c, unsigned v, unsigned *R, unsigned *G, unsigned *B) { unpack16(MACH64_PRIV(c), v, R, G, B); }

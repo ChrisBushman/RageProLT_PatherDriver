@@ -186,6 +186,11 @@ void     mach64_dispatch_render_ctl(gld_context *, uint32_t, uint32_t, uint32_t,
 /* gld_pixels.c / control slots */
 void mach64_ctl00(gld_context *, uint32_t op, float value);   /* table[0x00] = glAccum (GL_ACCUM 0x100, LOAD 0x101, RETURN 0x102, MULT 0x103, ADD 0x104) */
 void mach64_accum_clear(gld_context *);
+void *mach64_cb_open(gld_context *, int fr0, int nr);
+uint16_t *mach64_cb_px(void *h, int fbrow, int x);
+void mach64_cb_close(gld_context *, void *h, int write_back);
+uint16_t mach64_cb_pack(gld_context *, unsigned R, unsigned G, unsigned B);
+void mach64_cb_unpack(gld_context *, unsigned v, unsigned *R, unsigned *G, unsigned *B);
 void mach64_accum_free(mach64_priv *);
 int  mach64_ctl0c(gld_context *, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t);
 int  mach64_ctl10(gld_context *, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t);

@@ -116,7 +116,7 @@ static void t_blend_srccolor_dst(void)
 static void t_blend_satur(void)
 {
     reset(0.5f, 0.5f, 0.5f); glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA_SATURATE, GL_ONE); quad(10, 10, 100, 100, 1, 0.5f, 0.25f, 0.5f);
-    report("blend: SRC_ALPHA_SATURATE", glerr() ? -1 : near3(50, 50, 255, 128, 96, 40), 0);       /* f=min(a,1-ad)=min(.5,1)... dst alpha 0 -> f=0.5: rgb*0.5+dst => (.5+.5,.25+.5,.125+.5) */
+    report("blend: SRC_ALPHA_SATURATE", glerr() ? -1 : near3(50, 50, 128, 128, 128, 24), 0);       /* the target has no destination alpha (Ad = 1): f = min(As, 1 - Ad) = 0, result = destination */
 }
 
 /* ---- primitives ---------------------------------------------------------- */

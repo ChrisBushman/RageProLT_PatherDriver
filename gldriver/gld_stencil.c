@@ -47,6 +47,7 @@ typedef struct {
     uint32_t stride, rows;
     zs_face face[2];
     int fen[2], two, front_ccw, depth_en, dfunc, dmask, m1_ref, m1_func, m1_op;
+    int cb;                       /* blending the chip cannot do (subtract / min / max equations, constant-colour or saturate factors): untextured triangles are composited on the CPU */
     int rn; zrect r[MAXRECT];
 } zs_state;
 
@@ -256,9 +257,13 @@ void mach64_zs_sync(gld_context *ctx, uint32_t gli)
     z->dfunc = (int)(*(const uint32_t *)(uintptr_t)(gli + 0x633c) >> 16); if (z->dfunc < 0x200 || z->dfunc > 0x207) z->dfunc = 0x201;
     z->dmask = (*(const uint32_t *)(uintptr_t)(gli + 0x63b8) & 0x01000000u) != 0;
     face_read(&z->face[0], gli, 0); face_read(&z->face[1], gli, 1);
-    if (z->fen[0] || (z->two && z->fen[1]) || p->query) {
+    {   uint32_t bl = *(const uint32_t *)(uintptr_t)(gli + 0x6304), eq = *(const uint32_t *)(uintptr_t)(gli + 0x6300) >> 16;
+        uint32_t fs = *(const uint32_t *)(uintptr_t)(gli + 0x62e8), sf = fs >> 16, df = fs & 0xffffu;
+        z->cb = (bl & 0x01000000u) && (eq == 0x800au || eq == 0x800bu || eq == 0x8007u || eq == 0x8008u || sf == 0x308u || (sf >= 0x8001u && sf <= 0x8004u) || (df >= 0x8001u && df <= 0x8004u) || df == 0x308u);
+    }
+    if (z->fen[0] || (z->two && z->fen[1]) || p->query || z->cb) {
         mode = 2;
-        if (!p->query && !z->depth_en && !z->two && z->fen[0] && p->rb.z_off && mode1_ok(&z->face[0], &ref, &zf, &wop)) mode = 1;
+        if (!p->query && !z->cb && !z->depth_en && !z->two && z->fen[0] && p->rb.z_off && mode1_ok(&z->face[0], &ref, &zf, &wop)) mode = 1;
     }
     p->zs_mode = mode;
     if (mode == 1) {
@@ -317,13 +322,66 @@ static void rect_run(gld_context *ctx, zs_state *z, int y, int x0, int x1, const
     z->r[z->rn].x0 = x0; z->r[z->rn].x1 = x1; z->r[z->rn].y0 = y; z->r[z->rn].y1 = y; z->rn++;
 }
 
+
+/* ---- CPU compositing: the blend unit for the equations/factors the chip lacks.  8-bit integer maths; the destination has no alpha (Ad = 1). ---- */
+typedef struct { uint32_t sf, df, eq; int cc[4]; } cb_state;
+static int mul255(int a, int b) { int t = a * b + 128; return (t + (t >> 8)) >> 8; }
+static int bfac(uint32_t f, int ch, const int *cs, int as, const int *cd, const int *cc)
+{
+    switch (f) {
+    case 0x0000u: return 0;
+    case 0x0001u: return 255;
+    case 0x0300u: return cs[ch];
+    case 0x0301u: return 255 - cs[ch];
+    case 0x0302u: return as;
+    case 0x0303u: return 255 - as;
+    case 0x0304u: return 255;                    /* destination alpha is 1 */
+    case 0x0305u: return 0;
+    case 0x0306u: return cd[ch];
+    case 0x0307u: return 255 - cd[ch];
+    case 0x0308u: return 0;                      /* min(As, 1 - Ad) with Ad = 1 */
+    case 0x8001u: return cc[ch];
+    case 0x8002u: return 255 - cc[ch];
+    case 0x8003u: return cc[3];
+    case 0x8004u: return 255 - cc[3];
+    default:      return 255;
+    }
+}
+static void cb_load(gld_context *ctx, cb_state *c)
+{
+    uint32_t fs = mach64_gli_u32(ctx, 0x62e8); int i;
+    c->sf = fs >> 16; c->df = fs & 0xffffu; c->eq = mach64_gli_u32(ctx, 0x6300) >> 16;
+    for (i = 0; i < 4; i++) {
+        uint32_t u = mach64_gli_u32(ctx, 0x62f0u + (uint32_t)i * 4u); float f; __builtin_memcpy(&f, &u, 4);
+        c->cc[i] = f <= 0.0f ? 0 : f >= 1.0f ? 255 : (int)(f * 255.0f + 0.5f);
+    }
+}
+static uint16_t cb_blend(gld_context *ctx, const cb_state *c, uint32_t srcargb, uint16_t dst)
+{
+    int cs[3], cd[3], as = (int)(srcargb >> 24), r[3], ch; unsigned R, G, B;
+    mach64_cb_unpack(ctx, dst, &R, &G, &B);
+    cs[0] = (int)((srcargb >> 16) & 255u); cs[1] = (int)((srcargb >> 8) & 255u); cs[2] = (int)(srcargb & 255u);
+    cd[0] = (int)R; cd[1] = (int)G; cd[2] = (int)B;
+    for (ch = 0; ch < 3; ch++) {
+        int v;
+        if (c->eq == 0x8007u) v = cs[ch] < cd[ch] ? cs[ch] : cd[ch];
+        else if (c->eq == 0x8008u) v = cs[ch] > cd[ch] ? cs[ch] : cd[ch];
+        else {
+            int s = mul255(cs[ch], bfac(c->sf, ch, cs, as, cd, c->cc)), d = mul255(cd[ch], bfac(c->df, ch, cs, as, cd, c->cc));
+            v = c->eq == 0x800au ? s - d : c->eq == 0x800bu ? d - s : s + d;
+        }
+        r[ch] = v < 0 ? 0 : v > 255 ? 255 : v;
+    }
+    return mach64_cb_pack(ctx, (unsigned)r[0], (unsigned)r[1], (unsigned)r[2]);
+}
+
 int mach64_zs_cpu_draw(gld_context *ctx, const m64_vertex *va, const m64_vertex *vb, const m64_vertex *vc)
 {
     mach64_priv *p = MACH64_PRIV(ctx); zs_state *z = (zs_state *)p->zs;
     int64_t x[3], y[3], zq[3], area, A[3], B[3], E[3], gx, gy, zrow, zacc, dz1, dz2, dx1, dx2, dy1, dy2;
     int notinc[3], i, minx, maxx, miny, maxy, W, Hh, py, px, front, fi, flushed = 0, all_draw;
     uint32_t cov = 0, pass = 0; const zs_face *f; int sten_on, colour_on;
-    uint8_t *sb; uint16_t *db; int depth_en;
+    uint8_t *sb; uint16_t *db; int depth_en; void *cbw = 0; cb_state cbs; const m64_vertex *vq[3]; int swapped = 0, cb_any = 0;
     if (!z || !z->pl[PL_S].buf) return 0;
     W = (int)p->fb_w; Hh = (int)p->fb_h;
     x[0] = (int16_t)((uint32_t)va->x_y >> 16); y[0] = (int16_t)((uint32_t)va->x_y & 0xffffu); zq[0] = (uint32_t)va->z >> 15;
@@ -337,7 +395,7 @@ int mach64_zs_cpu_draw(gld_context *ctx, const m64_vertex *va, const m64_vertex 
     depth_en = z->depth_en; sb = (uint8_t *)z->pl[PL_S].buf; db = depth_en ? (uint16_t *)z->pl[PL_D].buf : 0;
     if (depth_en && !db) return 0;
     if (area < 0) {                                                            /* orient so the area is positive */
-        int64_t tx = x[1], ty = y[1], tz = zq[1]; x[1] = x[2]; y[1] = y[2]; zq[1] = zq[2]; x[2] = tx; y[2] = ty; zq[2] = tz; area = -area;
+        int64_t tx = x[1], ty = y[1], tz = zq[1]; swapped = 1; x[1] = x[2]; y[1] = y[2]; zq[1] = zq[2]; x[2] = tx; y[2] = ty; zq[2] = tz; area = -area;
                                                                                 /* (the emitter normalises the hardware winding itself: it gets the original vertices) */
     }
     for (i = 0; i < 3; i++) {
@@ -352,6 +410,10 @@ int mach64_zs_cpu_draw(gld_context *ctx, const m64_vertex *va, const m64_vertex 
         minx = (int)(mnx >> 2); maxx = (int)(mxx >> 2); miny = (int)(mny >> 2); maxy = (int)(mxy >> 2);
         if (minx < 0) minx = 0; if (miny < 0) miny = 0; if (maxx > W - 1) maxx = W - 1; if (maxy > Hh - 1) maxy = Hh - 1; }
     z->rn = 0;
+    if (z->cb && !p->hw.textured && maxy >= miny) {
+        mach64_flush_batch(ctx); cbw = mach64_cb_open(ctx, miny, maxy - miny + 1); cb_load(ctx, &cbs);
+        { const m64_vertex *t = vb; vq[0] = va; vq[1] = (swapped ? vc : vb); vq[2] = (swapped ? t : vc); }
+    }
     for (py = miny; py <= maxy; py++) {
         int64_t qy = 4 * (int64_t)py + 2, qx0 = 4 * (int64_t)minx + 2; int run = -1, seen = 0;
         for (i = 0; i < 3; i++) E[i] = A[i] * (qx0 - x[(i)]) + B[i] * (qy - y[i]) - notinc[i];
@@ -370,7 +432,18 @@ int mach64_zs_cpu_draw(gld_context *ctx, const m64_vertex *va, const m64_vertex 
                 if (sp && zp) {
                     if (depth_en && z->dmask) db[idx] = (uint16_t)zi;
                     pass++;
-                    if (colour_on && run < 0) run = px;
+                    if (cbw && colour_on) {                                        /* composite this pixel */
+                        uint16_t *dp = mach64_cb_px(cbw, py, px);
+                        if (dp) {
+                            int64_t w0 = E[1] + notinc[1], w1 = E[2] + notinc[2], w2 = E[0] + notinc[0]; uint32_t out = 0; int sh;
+                            if (w0 < 0) w0 = 0; if (w1 < 0) w1 = 0; if (w2 < 0) w2 = 0;
+                            for (sh = 0; sh < 32; sh += 8) {
+                                int64_t v = (w0 * (int64_t)((vq[0]->argb >> sh) & 255u) + w1 * (int64_t)((vq[1]->argb >> sh) & 255u) + w2 * (int64_t)((vq[2]->argb >> sh) & 255u) + area / 2) / area;
+                                if (v > 255) v = 255; out |= (uint32_t)v << sh;
+                            }
+                            *dp = cb_blend(ctx, &cbs, out, *dp); cb_any = 1;
+                        }
+                    } else if (colour_on && run < 0) run = px;
                 } else if (run >= 0) { rect_run(ctx, z, py, run, px - 1, va, vb, vc, &flushed); run = -1; }
             } else {
                 if (seen) { if (run >= 0) { rect_run(ctx, z, py, run, px - 1, va, vb, vc, &flushed); run = -1; } break; }
@@ -379,6 +452,7 @@ int mach64_zs_cpu_draw(gld_context *ctx, const m64_vertex *va, const m64_vertex 
         }
         if (run >= 0) rect_run(ctx, z, py, run, px - 1, va, vb, vc, &flushed);
     }
+    if (cbw) { mach64_cb_close(ctx, cbw, cb_any); z->rn = 0; if (depth_en && z->dmask && pass) { z->pl[PL_D].hw_uni = 0; z->pl[PL_D].hw_cpu = 0; } if (p->query) mach64_query_add(ctx, pass); return 1; }
     if (depth_en && z->dmask && pass) { z->pl[PL_D].hw_uni = 0; z->pl[PL_D].hw_cpu = 0; }
     if (p->query) mach64_query_add(ctx, pass);
     all_draw = (!flushed && cov && pass == cov);
