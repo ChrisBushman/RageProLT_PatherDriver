@@ -16,12 +16,13 @@ B       = build
 
 all: hosttest
 
-hosttest: $(B)/test_triangle $(B)/guard_test $(B)/log_test $(B)/vram_span_test $(B)/cgl_attribs_test
+hosttest: $(B)/test_triangle $(B)/guard_test $(B)/log_test $(B)/vram_span_test $(B)/cgl_attribs_test $(B)/vmath_test
 	./$(B)/test_triangle
 	./$(B)/guard_test
 	./$(B)/log_test
 	./$(B)/vram_span_test
 	./$(B)/cgl_attribs_test
+	./$(B)/vmath_test
 
 $(B)/test_triangle: hosttest/test_triangle.c $(COMMON)/mach64_emit.c $(COMMON)/mach64_emit.h $(COMMON)/mach64_regs.h
 	@mkdir -p $(B)
@@ -30,6 +31,10 @@ $(B)/test_triangle: hosttest/test_triangle.c $(COMMON)/mach64_emit.c $(COMMON)/m
 $(B)/guard_test: tests/guard_test.c $(COMMON)/rage_guard.h $(COMMON)/rage_vram.h $(COMMON)/rage_types.h $(COMMON)/mach64_regs.h
 	@mkdir -p $(B)
 	$(CC) $(CFLAGS) -I$(COMMON) -o $@ tests/guard_test.c
+
+$(B)/vmath_test: tests/vmath_test.c $(COMMON)/rage_vmath.h $(COMMON)/rage_rcp_tables.h
+	@mkdir -p $(B)
+	$(CC) $(CFLAGS) -I$(COMMON) -o $@ tests/vmath_test.c -lm
 
 $(B)/log_test: tests/log_test.c $(COMMON)/rage_log.h $(COMMON)/rage_types.h
 	@mkdir -p $(B)

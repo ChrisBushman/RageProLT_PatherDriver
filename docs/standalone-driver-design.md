@@ -342,3 +342,14 @@ full state; TEX_n_OFF are not yet settable (texture binding selector comes with 
 * **Hardware results**: `tools/ragegl/ragegl_test` (user space through IOConnect) 27/27 on the G4 incl. refusals (unowned target, overrun, scanout write, unaligned, bad flags, scissor register in a batch),
   exact contained fill, triangle through the batch path (27355 px vs ~27350 expected), present read back from the scan-out (6000/6000), 5 repeated runs and a killed client: IOMalloc unchanged, owner released.
   ENGTEST: mode-change 9/9, engine API 7/7, triangles 6/6, 2D 17/17.
+
+### 11.15 Vertex math: precision bounds and implementation choice (Nov 24)
+
+`common/rage_vmath.h` (integer code on IEEE-single bit patterns), `tests/vmath_test.c` (exhaustive; part of `make`), `tests/vmath_bench.c` (isolated microbenchmark, run on the G4 MDD, 7450 @ 1.25 GHz, compiled
+`-mcpu=750`, three runs identical to 0.1 ns; **no G3 is available, so a G3 re-measurement is open**).  Per the agreed method each implementation is measured in isolation and chosen by speed among those whose precision is acceptable; no per-frame cost is estimated.
+
+| Function | Candidates (ns/op, bound) | Choice |
+|---|---|---|
+| 1/x bits (vertex W, ONE_OVER_AREA) | float `fdivs` 31.1, exact by definition; B 256-seed+2 Newton 40.8 (max 1 ulp, 99.75% exact); C 256-seed interpolated+1 Newton 35.3 (max 1 ulp, 99.74% exact); D 2048x16-bit seed+1 Newton 29.6 (max **4 ulp**, 63.5% exact) | **single float divide.**  D is 5% faster but loses precision and uses a 4 KB table that competes for the 32 KB L1; B and C are slower than the divide on this CPU.  B and C stay in the header as bounded fallbacks. |
+| (int)(x*4) vertex X/Y from the float's bits | float multiply+convert 20.9 (input in memory); `rage_f2q` bit manipulation 12.0 | **`rage_f2q` (integer):** 42% faster, bit-exact vs `(int)(x*4.0f)` for all 2^32 patterns (saturating beyond 2^29).  If the value is already in a float register the float path is faster (15.2 vs 19.4), which is not the usual case for vertex arrays. |
+| colour float -> byte | float `(int)(c*255+0.5f)` 20.9; `rage_f2byte` 29.4 | **single float** (integer is slower); `rage_f2byte` differs from the float formula by at most 1 in 0.8% of inputs because it evaluates exactly. |
