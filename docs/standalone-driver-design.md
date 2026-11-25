@@ -165,7 +165,7 @@ Any live G4 run follows the standing rules: explicit safe arguments, never `mach
 | O3 | What does stock already provide for sleep/wake, overlay, scaler, DVD (affects the flags' defaults)? | Symbol and selector inventory of stock `ATIRagePro` and `ATIRageProGA`. |
 | O4 | Byte-order/aperture question (§3.6). | Offline first (what Apple's framebuffer does on the Lombard may be readable from its binary), then one proposed bounded G4 experiment. |
 | O5 | Does Panther's xnu-517 offer a panic callback usable from a kext? | Kernel headers for 10.3.9 and symbol check on the G4. |
-| O6 | Interrupt line wiring for the chip and whether stock uses it. | Stock kext symbols; OF device tree on the G4. |
+| O6 | Interrupt line wiring for the chip and whether stock uses it. | **Answered Nov 25:** line wired (OpenPIC, level), stock does not use it, but the chip raises no interrupt for GUI-master completion (BUSMASTER_EOL_INT never sets on that list, measured); completion stays polled. See re-notes/dma-async-queue.md. |
 | O7 | Installation: how stock `ATIRagePro.kext` is set aside (moved to a backup dir, kext caches rebuilt, revertable) so there is never a window with two accelerators matching. | Existing `install-*.sh` plus `swap.sh` patterns on the G4. |
 
 ## 9. Risks

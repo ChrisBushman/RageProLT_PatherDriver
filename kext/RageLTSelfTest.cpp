@@ -117,7 +117,7 @@ IOReturn RageLTDevice::engineSelfTest(uint32_t mask, uint32_t *passmask, uint32_
     logEvent(RAGE_EV_MARK, owner, 0xe0000002u, off0, BLOCK_BYTES, 0, 0);
 
 
-    if (mask & 0x10000000u) { if (!(mask & 1u)) engineEnable(); *passmask = dmaMinimalTest(mask & 1u); *inside = 0; *outside = 0; return kIOReturnSuccess; }
+    if (mask & 0x10000000u) { if (!(mask & 1u)) engineEnable(); *passmask = dmaMinimalTest(mask & 3u); *inside = 0; *outside = 0; return kIOReturnSuccess; }
     if (mask & 0x20000000u) {                          /* ---- mode-change protocol (simulated will/did events; the G4 framebuffer never changes mode) ---- */
         uint32_t pass = 0, g0 = modeGen(), offA = off0, t2 = 0, base0 = fDisp.base; struct rage_display d0 = fDisp;
         uint32_t one[2] = { MACH64_DP_FRGD_CLR, 1 };

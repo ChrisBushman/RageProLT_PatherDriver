@@ -153,9 +153,12 @@ IOReturn RageLTDevice::dmaSubmit(const struct rage_ctx *c, const uint32_t *pairs
 /* DEBUG: the minimal proven stream (bm_dma_test): DMA two pattern registers.  variant bit0: skip eng_reset-style prep; returns 1 on success. */
 uint32_t RageLTDevice::dmaMinimalTest(uint32_t variant)
 {
-    volatile uint32_t *w = (volatile uint32_t *)fDmaCmdKva; uint32_t sb, r0, r1, t0, t1, spins;
-    (void)variant;
-    if (!fDmaOk || (!fEngineLive && !variant)) return 0xffff0000u;
+    volatile uint32_t *w = (volatile uint32_t *)fDmaCmdKva; uint32_t sb, r0, r1, t0, t1, spins, ci0 = 0, ciK = 0, ciD = 0, ciE = 0;
+    /* variant bit1: EOL interrupt probe, stage A (docs/re-notes/dma-async-queue.md): polling only, NO IRQ registered.  Does BUSMASTER_EOL_INT (CRTC_INT_CNTL bit 25) set when this
+     * GUI-master list ends?  The register reads status at the bit positions where writes acknowledge, so a write keeps ONLY the enable bits (1,3,7,9,12,14,16,18,20,22,24,26,29)
+     * plus the one acknowledge bit we mean (25). */
+    const uint32_t ci_en = (1u<<1)|(1u<<3)|(1u<<7)|(1u<<9)|(1u<<12)|(1u<<14)|(1u<<16)|(1u<<18)|(1u<<20)|(1u<<22)|(1u<<24)|(1u<<26)|(1u<<29);
+    if (!fDmaOk || (!fEngineLive && !(variant & 1u))) return 0xffff0000u;
     IOLockLock(fLock); (void)dmaWait();
     OSWriteLittleInt32((void *)w, 0, MACH64_ADRINDEX(0x680) | (1u << 16)); OSWriteLittleInt32((void *)w, 4, 0x22222222u); OSWriteLittleInt32((void *)w, 8, 0xaaaaaaaau);
     OSWriteLittleInt32((void *)w, 12, MACH64_ADRINDEX(MACH64_SRC_CNTL)); OSWriteLittleInt32((void *)w, 16, 0);
@@ -165,18 +168,22 @@ uint32_t RageLTDevice::dmaMinimalTest(uint32_t variant)
     eng_wq(fRegs, MACH64_SRC_CNTL, 0); eng_wq(fRegs, 0x680, 0x11111111u); eng_wq(fRegs, 0x684, 0x11111111u);
     (void)eng_wait_idle(fRegs);
     sb = eng_rd(fRegs, MACH64_BUS_CNTL); t0 = eng_rd(fRegs, MACH64_BM_GUI_TABLE);
+    if (variant & 2u) { ci0 = eng_rd(fRegs, MACH64_CRTC_INT_CNTL); eng_wr(fRegs, MACH64_CRTC_INT_CNTL, (ci0 & ci_en) | (1u << 25) | (1u << 24)); ciE = eng_rd(fRegs, MACH64_CRTC_INT_CNTL); }   /* ack any stale EOL, enable it */
     eng_wr(fRegs, MACH64_BUS_CNTL, (sb & ~MACH64_BUS_MASTER_DIS) | MACH64_BUS_EXT_REG_EN);
     eng_wq(fRegs, MACH64_BM_GUI_TABLE_CMD, fDmaRingBus);
     eng_wq(fRegs, MACH64_SRC_CNTL, MACH64_SRC_BM_ENABLE | MACH64_SRC_BM_SYNC | MACH64_SRC_BM_OP_SYSTEM_TO_REG);
     eng_wq(fRegs, MACH64_DST_HEIGHT_WIDTH, 0);
     for (spins = 0; spins < 200000; spins++) if (eng_rd(fRegs, MACH64_BM_GUI_TABLE) != t0) break;
     t1 = eng_rd(fRegs, MACH64_BM_GUI_TABLE);
+    if (variant & 2u) ciK = eng_rd(fRegs, MACH64_CRTC_INT_CNTL);
     (void)eng_wait_idle(fRegs);
+    if (variant & 2u) { ciD = eng_rd(fRegs, MACH64_CRTC_INT_CNTL); eng_wr(fRegs, MACH64_CRTC_INT_CNTL, (ci0 & ci_en & ~(1u << 24)) | (1u << 25)); }   /* disable EOL, ack it: back to the state we found */
     r0 = eng_rd(fRegs, 0x680); r1 = eng_rd(fRegs, 0x684);
     logEvent(RAGE_EV_MARK, 0, 0xd0040000u, t0, t1, r0, r1);
+    if (variant & 2u) logEvent(RAGE_EV_MARK, 0, 0xd0050000u, ci0, ciE, ciK, ciD);      /* CRTC_INT_CNTL: found, after enable+ack, right after the walk moved, after idle */
     eng_wq(fRegs, MACH64_SRC_CNTL, 0); eng_wr(fRegs, MACH64_BUS_CNTL, sb);
     IOLockUnlock(fLock);
-    return (r0 == 0x22222222u && r1 == 0xaaaaaaaau ? 1u : 0u) | (t1 != t0 ? 2u : 0u);
+    return (r0 == 0x22222222u && r1 == 0xaaaaaaaau ? 1u : 0u) | (t1 != t0 ? 2u : 0u) | ((variant & 2u) && (ciD & (1u << 25)) ? 4u : 0u);
 }
 #endif
 #else
