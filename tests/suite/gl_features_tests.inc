@@ -297,3 +297,22 @@ static void t_s3tc(void)
     CHECK("DXT5: colour block decodes like DXT1", isclr(px(16, 16), 255, 0, 0) && isclr(px(48, 16), 0, 0, 255));
     default_state(); sync(); clear_rt(0);
 }
+
+/* EXT_paletted_texture: colour-index texels expanded through GLEngine's palette (state+0x98 pointer, palette format in state+0x56) at upload */
+static void t_paletted(void)
+{
+    static unsigned char idx[16], pal[256 * 3]; unsigned char *st; void *t; int i;
+    for (i = 0; i < 16; i++) idx[i] = (unsigned char)(i & 1);
+    memset(pal, 0, sizeof pal); pal[0] = 255; pal[4] = 255;                           /* entry 0 red, entry 1 green */
+    t = mktex(4, 4, 0x1900, idx, (GL_REPEAT_ << 16) | GL_REPEAT_, 0x2600, 0x2600);
+    st = (unsigned char *)(uintptr_t)*(uint32_t *)((unsigned char *)t + 0x30);
+    *(uint32_t *)(st + 0x98) = (uint32_t)(uintptr_t)pal; *(uint16_t *)(st + 0x56) = 0x8051;
+    default_state(); bindtex(t, GL_REPLACE_ENV); sync(); clear_rt(0);
+    tquad(0, 0, 128, 128, 0.0f, 0.0f, 1.0f, 1.0f, 0xffffffffu);
+    CHECK("paletted: index 0 -> palette red, index 1 -> palette green", isclr(px(16, 16), 255, 0, 0) && isclr(px(48, 16), 0, 255, 0));
+    pal[0] = 0; pal[2] = 255;                                                          /* the palette changes: entry 0 becomes blue; same indices -> must re-upload */
+    default_state(); bindtex(t, GL_REPLACE_ENV); mach64_texture_dirtied(t); sync(); clear_rt(0);
+    tquad(0, 0, 128, 128, 0.0f, 0.0f, 1.0f, 1.0f, 0xffffffffu);
+    CHECK("paletted: a changed palette re-uploads the texture", isclr(px(16, 16), 0, 0, 255));
+    default_state(); sync(); clear_rt(0);
+}

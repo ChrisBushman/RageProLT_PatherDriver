@@ -269,7 +269,7 @@ static uint32_t tex_src_bytes(uint32_t w, uint32_t h, uint16_t fmt, uint16_t typ
     uint32_t bpp;
     if (fmt >= 0x83F0u && fmt <= 0x83F3u) return ((w + 3u) / 4u) * ((h + 3u) / 4u) * (fmt == 0x83F0u || fmt == 0x83F1u ? 8u : 16u);     /* S3TC blocks */
     if (type == 0x8363u || type == 0x8033u || type == 0x8034u) bpp = 2;
-    else switch (fmt) { case 0x1908u: bpp = 4; break; case 0x1909u: case 0x1906u: case 0x8049u: bpp = 1; break; case 0x190Au: case 0x85B9u: bpp = 2; break; default: bpp = 3; }
+    else switch (fmt) { case 0x1900u: bpp = 1; break; case 0x1908u: bpp = 4; break; case 0x1909u: case 0x1906u: case 0x8049u: bpp = 1; break; case 0x190Au: case 0x85B9u: bpp = 2; break; default: bpp = 3; }
     return w * h * bpp;
 }
 /* S3TC (DXT1/3/5) block decode to RGBA bytes (R,G,B,A order = GL_RGBA / UNSIGNED_BYTE).  Integer maths. */
@@ -326,6 +326,15 @@ static void tex_border_pixel(uint16_t fmt, uint16_t type, const float *c, unsign
     default: o[0] = (unsigned char)r; o[1] = (unsigned char)g; o[2] = (unsigned char)b; break;
     }
 }
+/* EXT_paletted_texture: GLEngine keeps the palette (glColorTableEXT) as the bytes the app gave, pointed to by state+0x98, its internal format in the low half of state+0x54
+ * (0x8051 RGB8 -> 3 bytes per entry, 0x8058 RGBA8 -> 4).  Returns the entry size, 0 if unsupported. */
+static uint32_t pal_info(const unsigned char *s, const unsigned char **pal)
+{
+    uint32_t pp = *(const uint32_t *)(s + 0x98), f = *(const uint16_t *)(s + 0x56);
+    if (pp < 0x10000u || pp > M64_UADDR_MAX) return 0;
+    *pal = (const unsigned char *)(uintptr_t)pp;
+    return f == 0x8051u ? 3u : f == 0x8058u ? 4u : 0u;
+}
 static int mach64_upload(gld_context *ctx, void *texobj)
 {
     mach64_priv *p = MACH64_PRIV(ctx);
@@ -367,6 +376,7 @@ static int mach64_upload(gld_context *ctx, void *texobj)
                 uint32_t nb = tex_src_bytes(lvl[k].w, lvl[k].h, (uint16_t)lvl[k].fmt, (uint16_t)lvl[k].type), a1, a2;
                 tex_hash((const unsigned char *)(uintptr_t)lvl[k].src, nb, &a1, &a2); h1 = (h1 * 31u) ^ a1; h2 = (h2 * 31u) ^ a2; hl += nb;
             }
+            if (lvl[0].fmt == 0x1900u) { const unsigned char *pl; uint32_t be = pal_info(s, &pl), a1, a2; if (be) { tex_hash(pl, 256u * be, &a1, &a2); h1 ^= a1 * 31u; h2 ^= a2; } }
             h1 ^= *(const uint32_t *)(s + 0x10) * 0x9e3779b1u; h1 ^= (*(const uint32_t *)(s + 0x1c) ^ (*(const uint32_t *)(s + 0x20) << 3) ^ (*(const uint32_t *)(s + 0x24) << 6) ^ (*(const uint32_t *)(s + 0x28) << 9)) * 0x85ebca6bu;   /* the wrap modes and border colour shape the stored image */
             TEX_LOCK(); ex = slot_find(tex_key(texobj));
             if (ex && ex->rsize && ex->owner == g_cur && ex->hlen == hl && ex->h1 == h1 && ex->h2 == h2 && ex->w == lvl[0].w && ex->h == lvl[0].h && ex->nlevels == nlevels) {
@@ -378,6 +388,17 @@ static int mach64_upload(gld_context *ctx, void *texobj)
         }
     }
 
+    if (lvl[0].fmt == 0x1900u && lvl[0].type == 0x1401u) {            /* colour-index levels: expand through the palette to RGB / RGBA bytes */
+        const unsigned char *pl; uint32_t be = pal_info(s, &pl);
+        if (be) {
+            for (L = 0; L < nlevels; L++) {
+                uint32_t n = lvl[L].w * lvl[L].h, i, k; const unsigned char *ix = (const unsigned char *)(uintptr_t)lvl[L].src; unsigned char *d = (unsigned char *)malloc((size_t)n * be);
+                if (!d) { int q; for (q = 0; q < 12; q++) free(dec_bufs[q]); return 0; }
+                for (i = 0; i < n; i++) for (k = 0; k < be; k++) d[i * be + k] = pl[(uint32_t)ix[i] * be + k];
+                lvl[L].src = (uint32_t)(uintptr_t)d; lvl[L].fmt = be == 3u ? 0x1907u : 0x1908u; dec_bufs[L] = d;
+            }
+        }
+    }
     for (L = 0; L < nlevels; L++) {          /* compressed (S3TC) levels: decode to RGBA bytes; the rest of the upload sees an ordinary GL_RGBA image */
         if (lvl[L].fmt >= 0x83F0u && lvl[L].fmt <= 0x83F3u) {
             unsigned char *d = s3tc_decode((const unsigned char *)(uintptr_t)lvl[L].src, lvl[L].w, lvl[L].h, lvl[L].fmt);
