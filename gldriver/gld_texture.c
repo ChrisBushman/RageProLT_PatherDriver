@@ -28,7 +28,7 @@ typedef struct {
     uint32_t mip_off[12];
     int      nlevels;
     uint32_t clamp_s, clamp_t;
-    uint32_t mirror_s, mirror_t;           /* GL_MIRRORED_REPEAT: the stored image is the original followed by its mirror (twice the size); coordinates are halved */
+    float    wscale[2], wbias[2];          /* S/T coordinate map (s' = s * scale + bias) for wrap modes the chip lacks (mirrored repeat, mirror clamp, clamp to border) */
     uint32_t bilinear_mag, bilinear_min;   /* GL_LINEAR mag / linear-within-level min filter */
     uint32_t min_filter;                   /* GL_TEXTURE_MIN_FILTER enum */
     uint32_t mipmapped;                    /* MIN filter is one of the four *_MIPMAP_* modes and >1 level is loaded */
@@ -269,6 +269,24 @@ static uint32_t tex_src_bytes(uint32_t w, uint32_t h, uint16_t fmt, uint16_t typ
     else switch (fmt) { case 0x1908u: bpp = 4; break; case 0x1909u: case 0x1906u: case 0x8049u: bpp = 1; break; case 0x190Au: case 0x85B9u: bpp = 2; break; default: bpp = 3; }
     return w * h * bpp;
 }
+/* one texel of the border colour in the source image's own format (UNSIGNED_BYTE RGB/RGBA/LUMINANCE/ALPHA/LUMINANCE_ALPHA/INTENSITY or a packed 16-bit type) */
+static void tex_border_pixel(uint16_t fmt, uint16_t type, const float *c, unsigned char *o)
+{
+    uint32_t r, g, b, a, l; float cl[4]; int i;
+    for (i = 0; i < 4; i++) cl[i] = c[i] < 0.0f ? 0.0f : c[i] > 1.0f ? 1.0f : c[i];
+    r = (uint32_t)(cl[0] * 255.0f + 0.5f); g = (uint32_t)(cl[1] * 255.0f + 0.5f); b = (uint32_t)(cl[2] * 255.0f + 0.5f); a = (uint32_t)(cl[3] * 255.0f + 0.5f); l = r;
+    if (type == 0x8363u) { uint32_t v = ((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3); o[0] = (unsigned char)(v >> 8); o[1] = (unsigned char)v; return; }       /* big-endian host: the short as stored */
+    if (type == 0x8033u) { uint32_t v = ((r >> 4) << 12) | ((g >> 4) << 8) | ((b >> 4) << 4) | (a >> 4); o[0] = (unsigned char)(v >> 8); o[1] = (unsigned char)v; return; }
+    if (type == 0x8034u) { uint32_t v = ((r >> 3) << 11) | ((g >> 3) << 6) | ((b >> 3) << 1) | (a >> 7); o[0] = (unsigned char)(v >> 8); o[1] = (unsigned char)v; return; }
+    switch (fmt) {
+    case 0x1908u: o[0] = (unsigned char)r; o[1] = (unsigned char)g; o[2] = (unsigned char)b; o[3] = (unsigned char)a; break;
+    case 0x1909u: o[0] = (unsigned char)l; break;
+    case 0x1906u: o[0] = (unsigned char)a; break;
+    case 0x8049u: o[0] = (unsigned char)a; break;
+    case 0x190Au: case 0x85B9u: o[0] = (unsigned char)l; o[1] = (unsigned char)a; break;
+    default: o[0] = (unsigned char)r; o[1] = (unsigned char)g; o[2] = (unsigned char)b; break;
+    }
+}
 static int mach64_upload(gld_context *ctx, void *texobj)
 {
     mach64_priv *p = MACH64_PRIV(ctx);
@@ -280,7 +298,7 @@ static int mach64_upload(gld_context *ctx, void *texobj)
     mach64_tex_slot *slot;
     int nlevels = 0, L, pre_used = 0;
     uint32_t tex_new_h1 = 0, tex_new_h2 = 0, tex_new_hl = 0;   /* hash of the image being uploaded (stored in the slot on success) */
-    int mir_s = 0, mir_t = 0; unsigned char *mir_bufs[12] = { 0 };
+    int wmode_s = 0, wmode_t = 0; float wscale_s = 1.0f, wscale_t = 1.0f, wbias_s = 0.0f, wbias_t = 0.0f; unsigned char *mir_bufs[12] = { 0 };
 
     if (!t) return 0;
     state = *(const uint32_t *)(t + 0x30);
@@ -310,7 +328,7 @@ static int mach64_upload(gld_context *ctx, void *texobj)
                 uint32_t nb = tex_src_bytes(lvl[k].w, lvl[k].h, (uint16_t)lvl[k].fmt, (uint16_t)lvl[k].type), a1, a2;
                 tex_hash((const unsigned char *)(uintptr_t)lvl[k].src, nb, &a1, &a2); h1 = (h1 * 31u) ^ a1; h2 = (h2 * 31u) ^ a2; hl += nb;
             }
-            h1 ^= *(const uint32_t *)(s + 0x10) * 0x9e3779b1u;       /* the wrap modes shape the stored image (mirrored repeat) */
+            h1 ^= *(const uint32_t *)(s + 0x10) * 0x9e3779b1u; h1 ^= (*(const uint32_t *)(s + 0x1c) ^ (*(const uint32_t *)(s + 0x20) << 3) ^ (*(const uint32_t *)(s + 0x24) << 6) ^ (*(const uint32_t *)(s + 0x28) << 9)) * 0x85ebca6bu;   /* the wrap modes and border colour shape the stored image */
             TEX_LOCK(); ex = slot_find(tex_key(texobj));
             if (ex && ex->rsize && ex->owner == g_cur && ex->hlen == hl && ex->h1 == h1 && ex->h2 == h2 && ex->w == lvl[0].w && ex->h == lvl[0].h && ex->nlevels == nlevels) {
                 ex->texobj = texobj; ex->tick = ++g_tick; TEX_UNLOCK();
@@ -321,21 +339,51 @@ static int mach64_upload(gld_context *ctx, void *texobj)
         }
     }
 
-    /* GL_MIRRORED_REPEAT (0x8370): the chip only repeats or clamps, so store the image followed by its mirror image along that axis (REPEAT on the doubled
-     * texture, coordinates halved at draw time) -- exact for every filter.  Skipped (plain repeat) when the doubled size would exceed 1024. */
-    mir_s = mir_t = 0;
-    {   uint32_t wrap = *(const uint32_t *)(s + 0x10);
-        mir_s = ((wrap >> 16) == 0x8370u) && lvl[0].w * 2u <= 1024u; mir_t = ((wrap & 0xffffu) == 0x8370u) && lvl[0].h * 2u <= 1024u;
-        if (mir_s || mir_t) {
+    /* Wrap modes the chip lacks (it repeats or clamps only): the stored image is rebuilt so plain REPEAT/CLAMP gives the GL result, and the coordinates are mapped by
+     * a per-axis scale and bias at draw time (mach64_tex_mscale/mbias).
+     *   GL_MIRRORED_REPEAT: [image | mirror], REPEAT, s' = s / 2
+     *   GL_MIRROR_CLAMP_EXT: [mirror | image], CLAMP, s' = s / 2 + 1/2
+     *   GL_CLAMP_TO_BORDER_ARB: the image inside a ring of border colour (padded to a power of two), CLAMP, s' = (s * w + 1) / W   (single level only)
+     * Skipped (plain repeat / edge clamp) when the stored size would exceed 1024. */
+    wmode_s = wmode_t = 0;
+    {   uint32_t wrap = *(const uint32_t *)(s + 0x10), ws = wrap >> 16, wt = wrap & 0xffffu;
+        wmode_s = ws == 0x8370u ? 1 : ws == 0x8742u ? 3 : ws == 0x812du ? 2 : 0; wmode_t = wt == 0x8370u ? 1 : wt == 0x8742u ? 3 : wt == 0x812du ? 2 : 0;
+        if (nlevels > 1 && (wmode_s == 2 || wmode_t == 2)) { if (wmode_s == 2) wmode_s = 0; if (wmode_t == 2) wmode_t = 0; }
+        if ((wmode_s || wmode_t)) {
+            uint32_t W0 = lvl[0].w, H0 = lvl[0].h, nw0 = W0, nh0 = H0;
+            if (wmode_s == 1 || wmode_s == 3) nw0 = W0 * 2u; else if (wmode_s == 2) { nw0 = 4u; while (nw0 < W0 + 2u) nw0 <<= 1; }
+            if (wmode_t == 1 || wmode_t == 3) nh0 = H0 * 2u; else if (wmode_t == 2) { nh0 = 4u; while (nh0 < H0 + 2u) nh0 <<= 1; }
+            if (nw0 > 1024u || nh0 > 1024u) wmode_s = wmode_t = 0;
+        }
+        if (wmode_s || wmode_t) {
+            float bcf[4]; unsigned char bpix[8]; uint32_t k;
+            for (k = 0; k < 4; k++) { uint32_t b = *(const uint32_t *)(s + 0x1c + k * 4); memcpy(&bcf[k], &b, 4); }
             for (L = 0; L < nlevels; L++) {
-                uint32_t bpp = tex_src_bytes(1, 1, (uint16_t)lvl[L].fmt, (uint16_t)lvl[L].type), w = lvl[L].w, h = lvl[L].h, nw = mir_s ? w * 2u : w, nh = mir_t ? h * 2u : h, x, y;
-                const unsigned char *src = (const unsigned char *)(uintptr_t)lvl[L].src; unsigned char *dst = (unsigned char *)malloc((size_t)nw * nh * bpp);
-                if (!dst) { mir_s = mir_t = 0; break; }
+                uint32_t bpp = tex_src_bytes(1, 1, (uint16_t)lvl[L].fmt, (uint16_t)lvl[L].type), w = lvl[L].w, h = lvl[L].h, nw = w, nh = h, x, y;
+                const unsigned char *src = (const unsigned char *)(uintptr_t)lvl[L].src; unsigned char *dst;
+                if (wmode_s == 1 || wmode_s == 3) nw = w * 2u; else if (wmode_s == 2) { nw = 4u; while (nw < w + 2u) nw <<= 1; }
+                if (wmode_t == 1 || wmode_t == 3) nh = h * 2u; else if (wmode_t == 2) { nh = 4u; while (nh < h + 2u) nh <<= 1; }
+                tex_border_pixel((uint16_t)lvl[L].fmt, (uint16_t)lvl[L].type, bcf, bpix);
+                dst = (unsigned char *)malloc((size_t)nw * nh * bpp);
+                if (!dst) { wmode_s = wmode_t = 0; break; }
                 for (y = 0; y < nh; y++) {
-                    uint32_t sy = (mir_t && y >= h) ? (2u * h - 1u - y) : y;
-                    for (x = 0; x < nw; x++) { uint32_t sx = (mir_s && x >= w) ? (2u * w - 1u - x) : x; memcpy(dst + ((size_t)y * nw + x) * bpp, src + ((size_t)sy * w + sx) * bpp, bpp); }
+                    int64_t sy = y; int by = 0;
+                    if (wmode_t == 1) sy = y >= h ? (int64_t)(2u * h - 1u - y) : (int64_t)y;
+                    else if (wmode_t == 3) sy = y < h ? (int64_t)(h - 1u - y) : (int64_t)(y - h);
+                    else if (wmode_t == 2) { sy = (int64_t)y - 1; by = (sy < 0 || sy >= (int64_t)h); }
+                    for (x = 0; x < nw; x++) {
+                        int64_t sx = x; int bx = 0;
+                        if (wmode_s == 1) sx = x >= w ? (int64_t)(2u * w - 1u - x) : (int64_t)x;
+                        else if (wmode_s == 3) sx = x < w ? (int64_t)(w - 1u - x) : (int64_t)(x - w);
+                        else if (wmode_s == 2) { sx = (int64_t)x - 1; bx = (sx < 0 || sx >= (int64_t)w); }
+                        if (bx || by) memcpy(dst + ((size_t)y * nw + x) * bpp, bpix, bpp);
+                        else memcpy(dst + ((size_t)y * nw + x) * bpp, src + ((size_t)sy * w + (size_t)sx) * bpp, bpp);
+                    }
                 }
+                wscale_s = wmode_s == 1 || wmode_s == 3 ? 0.5f : wmode_s == 2 ? (float)w / (float)nw : 1.0f; wbias_s = wmode_s == 3 ? 0.5f : wmode_s == 2 ? 1.0f / (float)nw : 0.0f;
+                wscale_t = wmode_t == 1 || wmode_t == 3 ? 0.5f : wmode_t == 2 ? (float)h / (float)nh : 1.0f; wbias_t = wmode_t == 3 ? 0.5f : wmode_t == 2 ? 1.0f / (float)nh : 0.0f;
                 lvl[L].w = nw; lvl[L].h = nh; lvl[L].src = (uint32_t)(uintptr_t)dst; mir_bufs[L] = dst;
+                if (L == 0 && wmode_s == 0 && wmode_t == 0) break;
             }
         }
     }
@@ -388,9 +436,9 @@ static int mach64_upload(gld_context *ctx, void *texobj)
         uint16_t magf = *(const uint16_t *)(s + 0x18);   /* GL_TEXTURE_MAG_FILTER (u16) */
         slot->clamp_s = ((wrap >> 16) != 0x2901u);
         slot->clamp_t = ((wrap & 0xffffu) != 0x2901u);
-        slot->mirror_s = (uint32_t)mir_s; slot->mirror_t = (uint32_t)mir_t;
-        if (mir_s) slot->clamp_s = 0;
-        if (mir_t) slot->clamp_t = 0;
+        slot->wscale[0] = wscale_s; slot->wscale[1] = wscale_t; slot->wbias[0] = wbias_s; slot->wbias[1] = wbias_t;
+        if (wmode_s == 1) slot->clamp_s = 0; else if (wmode_s == 2 || wmode_s == 3) slot->clamp_s = 1;
+        if (wmode_t == 1) slot->clamp_t = 0; else if (wmode_t == 2 || wmode_t == 3) slot->clamp_t = 1;
         /* GL filter enums (state-object offsets: 0x2600 NEAREST,
          * 0x2601 LINEAR, 0x2700..0x2703 the mipmap variants (odd low bit = LINEAR within a level).
          * mag GL_LINEAR -> hardware bilinear (SCALE_3D_CNTL BILINEAR_TEX_EN bit25, HW-verified).
@@ -509,7 +557,7 @@ static uint32_t mach64_blend_dst(uint32_t glf)
  * multiple contexts without per-context storage (unlike the pixel-store gc, which a later pixel op
  * reads and so had to be made per-context). */
 uint32_t mach64_tex_vofs[2] = { 0x80u, 0u };   /* see gld.h */
-float mach64_tex_mscale[2] = { 1.0f, 1.0f };      /* per-draw S/T coordinate scale of the bound texture (0.5 on a mirrored-repeat axis) */
+float mach64_tex_mscale[2] = { 1.0f, 1.0f }, mach64_tex_mbias[2] = { 0.0f, 0.0f };      /* per-draw S/T coordinate map of the bound texture (see mach64_upload) */
 int mach64_spec_mode = 0;
 int mach64_env_add = 0;       /* GL_TEXTURE_ENV_MODE GL_ADD on this draw: primary colour rides the specular add, the diffuse colour becomes white */
 int mach64_fog_on = 0;                    /* consumed by mach64_read_vertex       */
@@ -770,7 +818,7 @@ int mach64_bind_texture(gld_context *ctx)
      * gli+0x15748+u*0x14 (all recovered with tools/mach64_mtexscan: the software context's gli, diffed while unit 1 was enabled / bound).
      * Both units enabled with textures bound -> ONE-pass compositing (primary = unit 0, secondary = unit 1); only unit 1 enabled -> it simply
      * becomes the primary map (its coordinates are read from the unit-1 vertex fields). */
-    mach64_tex_vofs[0] = 0x80u; mach64_tex_vofs[1] = 0u; mach64_tex_mscale[0] = mach64_tex_mscale[1] = 1.0f;
+    mach64_tex_vofs[0] = 0x80u; mach64_tex_vofs[1] = 0u; mach64_tex_mscale[0] = mach64_tex_mscale[1] = 1.0f; mach64_tex_mbias[0] = mach64_tex_mbias[1] = 0.0f;
     {   mach64_tex_slot *ub[2]; int u;
         for (u = 0; u < 2; u++) {
             uint32_t en = mach64_gli_u32(ctx, GLI_TEX2D_ENABLE + (uint32_t)u * GLI_UNIT_STRIDE);
@@ -811,7 +859,7 @@ int mach64_bind_texture(gld_context *ctx)
         else if (ub[1]) { bound = ub[1]; punit = 1; }
         if (bound2) mach64_tex_vofs[1] = 0x90u;
         mach64_tex_vofs[0] = 0x80u + (uint32_t)punit * 0x10u;
-        if (bound) { mach64_tex_mscale[0] = bound->mirror_s ? 0.5f : 1.0f; mach64_tex_mscale[1] = bound->mirror_t ? 0.5f : 1.0f; }
+        if (bound) { mach64_tex_mscale[0] = bound->wscale[0]; mach64_tex_mscale[1] = bound->wscale[1]; mach64_tex_mbias[0] = bound->wbias[0]; mach64_tex_mbias[1] = bound->wbias[1]; }
     }
     tex_on = bound != 0;
 

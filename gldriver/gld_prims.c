@@ -83,8 +83,8 @@ void mach64_read_vertex(const void *vp, m64_vertex *o, float fb_h)
      * pack_vertex already put W = 1/w (from +0x0c) into o->w for the engine's divide. */
     {   float sw = *(const float *)(v + mach64_tex_vofs[0]);        /* S/w (unit 0: +0x80) */
         float tw = *(const float *)(v + mach64_tex_vofs[0] + 4);    /* T/w */
-        float rs = sw * rw * mach64_tex_mscale[0];    /* w == 1/w_clip (from +0x0c) -> raw S = (S/w)/w; one reciprocal per vertex instead of a divide per coordinate */
-        float rt = tw * rw * mach64_tex_mscale[1];
+        float rs = sw * rw * mach64_tex_mscale[0] + mach64_tex_mbias[0];    /* w == 1/w_clip (from +0x0c) -> raw S = (S/w)/w; one reciprocal per vertex instead of a divide per coordinate */
+        float rt = tw * rw * mach64_tex_mscale[1] + mach64_tex_mbias[1];
         __builtin_memcpy(&o->s, &rs, 4);
         __builtin_memcpy(&o->t, &rt, 4);
     }
@@ -136,7 +136,7 @@ static void pack_at(const void *vp, float gx, float gy, float fb_h, m64_vertex *
      * vertex for all 4 quad corners (uniform texcoord across the point); draw_line passes each
      * endpoint (the scaler interpolates the texture along the line). */
     {   float sw = *(const float *)(v + mach64_tex_vofs[0]), tw = *(const float *)(v + mach64_tex_vofs[0] + 4);
-        float rs = ((w != 0.0f) ? sw / w : sw) * mach64_tex_mscale[0], rt = ((w != 0.0f) ? tw / w : tw) * mach64_tex_mscale[1];
+        float rs = ((w != 0.0f) ? sw / w : sw) * mach64_tex_mscale[0] + mach64_tex_mbias[0], rt = ((w != 0.0f) ? tw / w : tw) * mach64_tex_mscale[1] + mach64_tex_mbias[1];
         /* Half-texel inset for a texcoord in [0,1] (same fix emit_tri does for triangles):
          * remap so the edge samples texel CENTRES [0.5/w..(w-0.5)/w] instead of the boundary
          * -- kills the mach64 REPEAT wrap-around line at s/t=0 (the last column bleeding onto

@@ -186,3 +186,21 @@ static void t_mirror(void)
     CHECK("mirrored repeat in T: the second period is the image upside down", isclr(px(36, 36), 255, 0, 0) && isclr(px(36, 68), 0, 0, 255) && isclr(px(36, 84), 0, 0, 255) && isclr(px(36, 132), 255, 0, 0));
     default_state(); sync(); clear_rt(0);
 }
+
+/* GL_MIRROR_CLAMP_EXT (0x8742) and GL_CLAMP_TO_BORDER (0x812d): stored as [mirror|image] / image-in-a-border-ring, coordinates mapped per axis. */
+static void t_wrapmodes(void)
+{
+    unsigned char *d = quadtex(); void *t;
+    t = mktex(8, 8, 0x1907, d, (0x8742u << 16) | 0x2901u, 0x2600, 0x2600);
+    default_state(); bindtex(t, GL_REPLACE_ENV); sync(); clear_rt(0);
+    tquad(20, 20, 148, 84, -1.0f, 0.0f, 1.0f, 1.0f, 0xffffffffu);                         /* s -1..1: the mirrored image, then the image */
+    CHECK("mirror clamp: s in [-1,0) is the image mirrored (green, red)", isclr(px(36, 36), 0, 255, 0) && isclr(px(84, 36), 255, 0, 0));
+    CHECK("mirror clamp: s in [0,1] is the image (red, green)", isclr(px(100, 36), 255, 0, 0) && isclr(px(132, 36), 0, 255, 0));
+    t = mktex(8, 8, 0x1907, d, (0x812du << 16) | 0x812du, 0x2600, 0x2600);
+    default_state(); bindtex(t, GL_REPLACE_ENV); sync(); clear_rt(0);
+    tquad(20, 20, 148, 148, -0.5f, -0.5f, 1.5f, 1.5f, 0xffffffffu);                       /* border colour (default 0,0,0) around the image */
+    printf("    (border: corner %08x centre-left %08x)\n", px(24, 24), px(60, 60));
+    CHECK("clamp to border: outside the image shows the border colour (black)", isclr(px(24, 24), 0, 0, 0) && isclr(px(144, 144), 0, 0, 0));
+    CHECK("clamp to border: inside the image shows the texels", isclr(px(60, 60), 255, 0, 0) && isclr(px(108, 108), 255, 255, 255) && isclr(px(108, 60), 0, 255, 0));
+    default_state(); sync(); clear_rt(0);
+}
