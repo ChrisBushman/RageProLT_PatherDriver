@@ -191,6 +191,9 @@ IOReturn RageLTDevice::vramCopyOut(uint32_t owner, uint32_t off, uint8_t *dst, u
         rc = kIOReturnSuccess;
         if (fEngineLive && idleWait()) rc = kIOReturnTimeout;
         else {
+            /* The engine's destination pixel cache reaches the aperture view only after a CPU write to VRAM (measured Nov 20: without it a readback shows the
+             * previous frame).  Rewrite a word the engine never writes, NOT the data being read (rewriting a word the engine still caches would lose it). */
+            if (fScratch) { uint32_t t = OSReadLittleInt32((void *)vram, fScratch); OSWriteLittleInt32((void *)vram, fScratch, t); __asm__ volatile("sync" ::: "memory"); (void)OSReadLittleInt32((void *)vram, fScratch); (void)idleWait(); }
             for (i = 0; i < len; i += 4) unxfer_word(dst + i, OSReadLittleInt32((void *)vram, off + i), flags);
             if (len >= 4) (void)OSReadLittleInt32((void *)vram, off);
         }

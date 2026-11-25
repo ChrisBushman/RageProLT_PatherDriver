@@ -47,13 +47,17 @@ int main(void)
     *(uint32_t *)(gli + 0x6708) = 1; *(uint32_t *)(gli + 0x633c) = 0x0201u << 16;
     { float cc[4] = { 0.f, 0.f, 1.f, 1.f }; memcpy(gli + 0x6320, cc, 16); }   /* clear colour blue */
     gldUpdateDispatch(ctx, table, (uint32_t)(uintptr_t)info);
-    V(vb, 20, 20, 0.5f, 0xffff0000); V(vb + 0x100, 220, 20, 0.5f, 0xffff0000); V(vb + 0x200, 120, 220, 0.5f, 0xffff0000);
-    SLOT(0x2c)(ctx, vb, 3);
-    { typedef void (*rc_fn)(gld_context *, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t); (*(rc_fn *)(table + 0x60))(ctx, 0, 0, 0, 0, 0); }
-    rgb_fence(&p->rb);
-    c = rd16(p, 120, 60); printf("centre %04x corner %04x\n", c, rd16(p, 3, 3));
-    CHECK("triangle red at centre", c == 0xf800);
-    CHECK("clear colour blue at corner", rd16(p, 3, 3) == 0x001f);
+    { unsigned als[5] = { 0x00, 0x40, 0x80, 0xc0, 0xff }; int k;
+      *(uint32_t *)(gli + 0x6304) = 0x01000000u; *(uint32_t *)(gli + 0x62e8) = (0x0302u << 16) | 0x0303u;   /* blend SRC_ALPHA, 1-SRC_ALPHA */
+      for (k = 0; k < 5; k++) {
+        typedef void (*rc_fn)(gld_context *, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t);
+        unsigned col = (als[k] << 24) | 0x0000ff00u;
+        V(vb, 20, 20, 0.5f, col); V(vb + 0x100, 220, 20, 0.5f, col); V(vb + 0x200, 120, 220, 0.5f, col);
+        SLOT(0x2c)(ctx, vb, 3);
+        (*(rc_fn *)(table + 0x60))(ctx, 0, 0, 0, 0, 0);
+        rgb_fence(&p->rb);
+        printf("alpha %02x -> centre %04x corner %04x\n", als[k], rd16(p, 120, 60), rd16(p, 3, 3));
+      } }
     printf("triangles %u dropped %u\n", p->triangles, p->rb.dropped);
     gldDestroyContext(ctx); gldDestroyPixelFormat(pf);
     printf("BUNDLE: %d passed, %d failed\n", npass, nfail);

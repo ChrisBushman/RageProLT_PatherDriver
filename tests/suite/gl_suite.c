@@ -174,7 +174,9 @@ static void t_blend(void)
     unsigned c;
     default_state(); g32(0x6304, 0x01000000u); g32(0x62e8, (0x0302u << 16) | 0x0303u); gf(0x6320, 0.0f); gf(0x6324, 0.0f); gf(0x6328, 1.0f); gf(0x632c, 1.0f); sync();   /* glClearColor(0,0,1,1): blue background, applied by the frame's deferred glClear */
     tri(20, 16, 0x8000ff00u, 140, 16, 0x8000ff00u, 80, 130, 0x8000ff00u, 0.0f);                                       /* green a=0.5 */
-    c = px(80, 50);
+    c = px(80, 50); printf("    (blend pixel 0x%08x corner 0x%08x)\n", c, px(3, 3));
+    { int gx, gy; for (gy = 8; gy < 140; gy += 20) { printf("    row %3d:", gy); for (gx = 8; gx < 160; gx += 20) printf(" %06x", px(gx, gy) & 0xffffff); printf("\n"); } printf("    batch n=%u tri=%u dirty=%u\n", (unsigned)P->batch.n, P->triangles, P->dirty); { int xx, yy; for (yy = 49; yy <= 51; yy++) { printf("    y%d:", yy); for (xx = 76; xx < 86; xx++) printf(" %04x", px(xx, yy) & 0xffffff); printf("\n"); } } }
+    { unsigned al; for (al = 0; al <= 0xff; al += 0x40) { tri(20, 16, (al << 24) | 0xff00u, 140, 16, (al << 24) | 0xff00u, 80, 130, (al << 24) | 0xff00u, 0.0f); printf("    (alpha %02x -> 0x%08x)\n", al, px(80, 50)); } }
     CHECK("blend SRC_ALPHA/ONE_MINUS_SRC_ALPHA: green+blue mix", ch(c, 8) > 90 && ch(c, 8) < 170 && ch(c, 0) > 90 && ch(c, 0) < 170);
     default_state(); gf(0x6320, 0.0f); gf(0x6324, 0.0f); gf(0x6328, 1.0f); gf(0x632c, 1.0f); sync();
     tri(20, 16, 0x8000ff00u, 140, 16, 0x8000ff00u, 80, 130, 0x8000ff00u, 0.0f);

@@ -38,6 +38,7 @@ bool RageLTDevice::start(IOService *provider)
     rage_log_init(fLog);
 #endif
     rage_vram_init(&fVram);
+    fScratch = 0x770000u;          /* first word of the reserved top block (never engine-written): rewritten with its own value to flush the engine cache */
     fNextOwner = 1;
     fEngineLive = false;
     fRefused = 0;

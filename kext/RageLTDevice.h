@@ -52,6 +52,7 @@ class RageLTDevice : public IOService
     volatile uint8_t      *fDmaCmdKva, *fDmaRingKva, *fDmaRingKva0;
     uint32_t               fDmaCmdBus, fDmaRingBus, fDmaNDesc, fDmaSaveBus;
     bool                 fDmaOk, fDmaUse, fDmaPending;
+    uint32_t               fScratch;     /* a word the engine never writes: rewriting it with its own value (CPU) flushes the engine pixel cache before a CPU read of VRAM */
     struct rage_log     *fLog;         /* event ring (RAGE_FEAT_PANIC_LOG), allocated at start */
     IOSimpleLock        *fLogLock;     /* short spin lock: logging must be safe from any context, including an interrupt filter */
 
