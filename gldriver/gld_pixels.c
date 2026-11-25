@@ -104,12 +104,65 @@ static void unpack16(const mach64_priv *p, unsigned v, unsigned *R, unsigned *G,
 }
 
 /* glReadPixels: (rb_ctx = our gld_context, x, y, w, h, format, type, pixels) */
+/* Pixel transfer (glPixelTransfer scale/bias, the colour matrix).  GLEngine keeps the state in the gli (static analysis of glPixelTransferf, GLEngine 0x29830..0x298f0, and
+ * glMatrixMode 0x22088 / 0x94aa8): scales R,G,B,A at +0x6400/+0x6408/+0x6410/+0x6418, biases at +0x63fc/+0x6404/+0x640c/+0x6414, a "not at default" bit per parameter in
+ * the word at +0x6628 (0x10..0x80 scales, 0x100..0x800 biases), and the current colour matrix (matrix mode 2) at +0x4e60 + 2 * 64, column-major floats.  The floats are
+ * converted once per call; the per-pixel work is integer: scale Q8, bias in 8-bit units Q8, matrix Q16. */
+typedef struct { int active, sq[4], bq[4], cm_on, cm[16], pm_on, psq[4], pbq[4], map_on, mn[4]; unsigned char mp[4][4096]; } pxt_state;
+static int pxt_q(float f, int one, int lim) { float v = f * (float)one; if (v > (float)lim) v = (float)lim; else if (v < -(float)lim) v = -(float)lim; return (int)v; }
+static void pxt_load(const unsigned char *gc, pxt_state *t)
+{
+    static const unsigned so[4] = { 0x6400, 0x6408, 0x6410, 0x6418 }, bo[4] = { 0x63fc, 0x6404, 0x640c, 0x6414 }; int i;
+    t->active = 0; t->cm_on = 0; t->pm_on = 0; t->map_on = 0;
+    for (i = 0; i < 4; i++) { t->sq[i] = 256; t->bq[i] = 0; t->psq[i] = 256; t->pbq[i] = 0; }
+    if (!gc) return;
+    if (*(const uint32_t *)(gc + 0x6628) & 0xff0u) {
+        t->active = 1;
+        for (i = 0; i < 4; i++) { t->sq[i] = pxt_q(*(const float *)(gc + so[i]), 256, 1 << 17); t->bq[i] = pxt_q(*(const float *)(gc + bo[i]), 255 * 256, 1 << 24); }
+    }
+    if (*(const uint32_t *)(gc + 0x6628) & 1u) {                /* GL_MAP_COLOR: glPixelMapfv R/G/B/A_TO_x tables, pointers at +0x6470.. (float 0..1), sizes at +0x649c.. (GLEngine 0x26fd8..0x271a0) */
+        static const unsigned mpo[4] = { 0x6470, 0x6474, 0x6478, 0x647c }, mno[4] = { 0x649c, 0x64a0, 0x64a4, 0x64a8 };
+        for (i = 0; i < 4; i++) {
+            const float *tab = (const float *)(uintptr_t)*(const uint32_t *)(gc + mpo[i]); int n = *(const int *)(gc + mno[i]), k;
+            if (!tab || n < 1 || n > 4096) { t->mn[i] = 0; continue; }
+            t->mn[i] = n; for (k = 0; k < n; k++) t->mp[i][k] = (unsigned char)pxt_clamp((int)(tab[k] * 255.0f + 0.5f));
+        }
+        t->active = 1; t->map_on = 1;
+    }
+    if (*(const uint32_t *)(gc + 0x6628) & 0xff0000u) {         /* GL_POST_COLOR_MATRIX_*_SCALE/BIAS (glPixelTransferf cases 0x80b4..0x80bb) */
+        static const unsigned pso[4] = { 0x6570, 0x6580, 0x6578, 0x6588 }, pbo[4] = { 0x6574, 0x657c, 0x6584, 0x658c };
+        t->active = 1; t->pm_on = 1;
+        for (i = 0; i < 4; i++) { t->psq[i] = pxt_q(*(const float *)(gc + pso[i]), 256, 1 << 17); t->pbq[i] = pxt_q(*(const float *)(gc + pbo[i]), 255 * 256, 1 << 24); }
+    }
+    {   const float *m = (const float *)(gc + 0x4e60 + 2 * 64); static const float id[16] = { 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 };
+        for (i = 0; i < 16; i++) if (m[i] != id[i]) { t->cm_on = 1; break; }
+        if (t->cm_on) for (i = 0; i < 16; i++) t->cm[i] = pxt_q(m[i], 65536, 1 << 20);
+    }
+    if (t->cm_on) t->active = 1;
+}
+static inline int pxt_clamp(int v) { return v < 0 ? 0 : v > 255 ? 255 : v; }
+static void pxt_apply(const pxt_state *t, unsigned char *R, unsigned char *G, unsigned char *B, int A)
+{
+    int c[4], k;
+    c[0] = *R; c[1] = *G; c[2] = *B; c[3] = A;
+    for (k = 0; k < 4; k++) if (t->sq[k] != 256 || t->bq[k]) c[k] = pxt_clamp((c[k] * t->sq[k] + t->bq[k] + 128) >> 8);
+    if (t->map_on) for (k = 0; k < 4; k++) if (t->mn[k] > 1) c[k] = t->mp[k][(c[k] * (t->mn[k] - 1) * 257 + 32768) >> 16]; else if (t->mn[k] == 1) c[k] = t->mp[k][0];
+    if (t->cm_on) {
+        int o[3];
+        for (k = 0; k < 3; k++) o[k] = pxt_clamp((c[0] * t->cm[k] + c[1] * t->cm[4 + k] + c[2] * t->cm[8 + k] + c[3] * t->cm[12 + k] + 32768) >> 16);
+        c[0] = o[0]; c[1] = o[1]; c[2] = o[2];
+    }
+    if (t->pm_on) for (k = 0; k < 3; k++) c[k] = pxt_clamp((c[k] * t->psq[k] + t->pbq[k] + 128) >> 8);
+    *R = (unsigned char)c[0]; *G = (unsigned char)c[1]; *B = (unsigned char)c[2];
+}
+
 int mach64_ctl08(void *rb_ctx, int x, int y, int w, int h, unsigned format, unsigned type, void *pixels)
 {
     gld_context *c = (gld_context *)rb_ctx; mach64_priv *p = c ? MACH64_PRIV(c) : 0;
     int W, H, fr0, nr, p_align, p_rowlen, p_skippix, p_skiprows, p_swap, p_lsb, l, row_stride, row, col, is_depth = (format == 0x1902u);
-    pxwin win; unsigned char *base = (unsigned char *)pixels;
+    pxwin win; unsigned char *base = (unsigned char *)pixels; pxt_state pxt;
     if (!p || !pixels || w <= 0 || h <= 0 || !mach64_mode_check(c) || !p->rb.col_off) return 0;
+    pxt_load(p->gc, &pxt);
     W = (int)p->rb.w; H = (int)p->rb.h;
     state_at(p->gc, 0x63d8, 0x63c4, 0x63d0, 0x63cc, 0x63dc, 0, &p_align, &p_rowlen, &p_skippix, &p_skiprows, &p_swap, &p_lsb);
     l = p_rowlen > 0 ? p_rowlen : w;
@@ -153,6 +206,7 @@ int mach64_ctl08(void *rb_ctx, int x, int y, int w, int h, unsigned format, unsi
                 uint16_t *s = win_px(&win, H, x + col, y + row, W);
                 unsigned R = 0, G = 0, B = 0, A = 0xffu;
                 if (s) unpack16(p, *s, &R, &G, &B);
+                if (s && pxt.active) { unsigned char r8 = (unsigned char)R, g8 = (unsigned char)G, b8 = (unsigned char)B; pxt_apply(&pxt, &r8, &g8, &b8, 255); R = r8; G = g8; B = b8; }
                 if (pk == 0) {
                     if (is_bgr) { o[0] = (unsigned char)B; o[1] = (unsigned char)G; o[2] = (unsigned char)R; }
                     else        { o[0] = (unsigned char)R; o[1] = (unsigned char)G; o[2] = (unsigned char)B; }
@@ -185,15 +239,16 @@ static void decode_pixel(const unsigned char *s, int pk, int is_bgr, int has_a, 
     }
 }
 
+
 /* glDrawPixels: (raster_dst float*{x,y,z}, width, height, format, type, pixels) */
 int mach64_ctl0c(gld_context *c, uint32_t a, uint32_t b, uint32_t d, uint32_t e, uint32_t f, uint32_t g)
 {
     mach64_priv *p = c ? MACH64_PRIV(c) : 0;
     const float *rp = (const float *)(uintptr_t)a; const unsigned char *src = (const unsigned char *)(uintptr_t)g;
     int w = (int)b, h = (int)d, is_bgr, has_a, pk, bpp_in, elem, dx, dy, W, H, row, col, align, rowstride, u_rowlen, u_skippix, u_skiprows, u_swap, u_lsb, l;
-    int fr0, nr, ylo_all, yhi_all; float zx = 1.0f, zy = 1.0f; pxwin win;
+    int fr0, nr, ylo_all, yhi_all; float zx = 1.0f, zy = 1.0f; pxwin win; pxt_state pxt;
     if (!p || !p->rb.col_off || !rp || !src || w <= 0 || h <= 0 || !fmt_decode(e, f, &is_bgr, &has_a, &pk)) return 0;
-    W = (int)p->rb.w; H = (int)p->rb.h;
+    W = (int)p->rb.w; H = (int)p->rb.h; pxt_load(p->gc, &pxt);
     bpp_in = (pk || has_a) ? 4 : 3; elem = pk ? 4 : 1;
     dx = (int)(rp[0] + 0.5f); dy = (int)(rp[1] + 0.5f);
     state_at(p->gc, 0x63f4, 0x63e0, 0x63ec, 0x63e8, 0x63f8, 0x63f9, &align, &u_rowlen, &u_skippix, &u_skiprows, &u_swap, &u_lsb);
@@ -215,6 +270,7 @@ int mach64_ctl0c(gld_context *c, uint32_t a, uint32_t b, uint32_t d, uint32_t e,
             int xlo = iceil((wx0 < wx1 ? wx0 : wx1) - 0.5f), xhi = iceil((wx0 < wx1 ? wx1 : wx0) - 0.5f), wx;
             unsigned char R, G, B; uint16_t v;
             decode_pixel(srow + col * bpp_in, pk, is_bgr, has_a, u_swap, &R, &G, &B);
+            if (pxt.active) pxt_apply(&pxt, &R, &G, &B, (!pk && has_a) ? (int)srow[col * bpp_in + 3] : 255);
             v = pack16(p, R, G, B);
             for (wy = ylo; wy < yhi; wy++) for (wx = xlo; wx < xhi; wx++) { uint16_t *o = win_px(&win, H, wx, wy, W); if (o) *o = v; }
         }
@@ -228,19 +284,29 @@ int mach64_ctl0c(gld_context *c, uint32_t a, uint32_t b, uint32_t d, uint32_t e,
 int mach64_ctl10(gld_context *c, uint32_t a, uint32_t b, uint32_t d, uint32_t e, uint32_t f, uint32_t g)
 {
     mach64_priv *p = c ? MACH64_PRIV(c) : 0;
-    const float *rp = (const float *)(uintptr_t)a;
-    int sx = (int)b, sy = (int)d, w = (int)e, h = (int)f, dx, dy, W, H, row, col, sfr0, snr, dfr0, dnr; pxwin src, dst;
+    const float *rp = (const float *)(uintptr_t)a; pxt_state pxt; float zx = 1.0f, zy = 1.0f;
+    int sx = (int)b, sy = (int)d, w = (int)e, h = (int)f, dx, dy, W, H, row, col, sfr0, snr, dfr0, dnr, ylo_all, yhi_all; pxwin src, dst;
     (void)g;
     if (!p || !p->rb.col_off || !rp || w <= 0 || h <= 0) return 0;
-    W = (int)p->rb.w; H = (int)p->rb.h;
+    W = (int)p->rb.w; H = (int)p->rb.h; pxt_load(p->gc, &pxt);
     dx = (int)(rp[0] + 0.5f); dy = (int)(rp[1] + 0.5f);
+    if (p->gc) { float rzx = *(const float *)(p->gc + 0x63bc), rzy = *(const float *)(p->gc + 0x63c0); if (rzx != 0.0f) zx = rzx; if (rzy != 0.0f) zy = rzy; }     /* glPixelZoom applies to CopyPixels too */
+    { float y0 = (float)dy, y1 = (float)dy + (float)h * zy; ylo_all = iceil((y0 < y1 ? y0 : y1) - 0.5f); yhi_all = iceil((y0 < y1 ? y1 : y0) - 0.5f); }
     mach64_frame_start(c); mach64_flush_batch(c);
-    if (!win_rows_for(H, sy, sy + h, &sfr0, &snr) || !win_rows_for(H, dy, dy + h, &dfr0, &dnr)) return 0;
+    if (!win_rows_for(H, sy, sy + h, &sfr0, &snr) || !win_rows_for(H, ylo_all, yhi_all, &dfr0, &dnr)) return 0;
     if (win_get(p, p->rb.col_off, sfr0, snr, &src)) return 0;
     if (win_get(p, p->rb.col_off, dfr0, dnr, &dst)) { free(src.buf); return 0; }
-    for (row = 0; row < h; row++) for (col = 0; col < w; col++) {
-        uint16_t *s = win_px(&src, H, sx + col, sy + row, W), *o = win_px(&dst, H, dx + col, dy + row, W);
-        if (s && o) *o = *s;
+    for (row = 0; row < h; row++) {
+        float wy0 = (float)dy + (float)row * zy, wy1 = (float)dy + (float)(row + 1) * zy;
+        int ylo = iceil((wy0 < wy1 ? wy0 : wy1) - 0.5f), yhi = iceil((wy0 < wy1 ? wy1 : wy0) - 0.5f), wy;
+        for (col = 0; col < w; col++) {
+            uint16_t *s = win_px(&src, H, sx + col, sy + row, W), v; float wx0 = (float)dx + (float)col * zx, wx1 = (float)dx + (float)(col + 1) * zx;
+            int xlo = iceil((wx0 < wx1 ? wx0 : wx1) - 0.5f), xhi = iceil((wx0 < wx1 ? wx1 : wx0) - 0.5f), wx;
+            if (!s) continue;
+            v = *s;
+            if (pxt.active) { unsigned R, G, B; unsigned char r8, g8, b8; unpack16(p, v, &R, &G, &B); r8 = (unsigned char)R; g8 = (unsigned char)G; b8 = (unsigned char)B; pxt_apply(&pxt, &r8, &g8, &b8, 255); v = pack16(p, r8, g8, b8); }
+            for (wy = ylo; wy < yhi; wy++) for (wx = xlo; wx < xhi; wx++) { uint16_t *o = win_px(&dst, H, wx, wy, W); if (o) *o = v; }
+        }
     }
     free(src.buf);
     win_put(p, &dst);

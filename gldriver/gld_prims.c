@@ -431,7 +431,7 @@ static void emit_tri_rv(gld_context *ctx, const m64_vertex *r0, const m64_vertex
                                    0.5f * ((ds1 - ds0) * (dt2 - dt0) - (ds2 - ds0) * (dt1 - dt0)));
     }
     if (p->hw.textured && p->tex_w > 0 && p->tex_h > 0) {
-        if (m64_uv_within(q0->s, q1->s, q2->s, q0->t, q1->t, q2->t)) {      /* non-tiling: inset to texel centres */
+        if (!mach64_tex_noinset && m64_uv_within(q0->s, q1->s, q2->s, q0->t, q1->t, q2->t)) {      /* non-tiling: inset to texel centres */
             float ss, bs, ts, bt; m64_inset(p->tex_w, &ss, &bs); m64_inset(p->tex_h, &ts, &bt);
             OWN();
             set_s(&v0, vst(v0.s)*ss+bs); set_s(&v1, vst(v1.s)*ss+bs); set_s(&v2, vst(v2.s)*ss+bs);
