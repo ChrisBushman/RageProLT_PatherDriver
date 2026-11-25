@@ -442,3 +442,33 @@ Planes. Stencil and depth each have their truth in one place: uniform (a fresh c
 Known limit: fragments discarded by the alpha test or a texture's alpha still update the stencil buffer (the CPU does not see texels); glClear with a partial stencil mask clears the whole plane.
 
 Tests (`tests/suite/gl_stencil_tests.inc`, 48 checks): every op from clamp/wrap edge values; every compare function x references x value masks against known stencil values with colour read-back; value/write mask x op combinations; sfail/dpfail/dppass with a live depth test and the depth plane compared; a two-sided z-fail shadow volume plus lit pass; front/back by winding, glFrontFace(CW), points and lines; watertightness of INCR over a fan and a quad (nothing hit twice or missed); chip-vs-CPU raster agreement; a 360-draw random state machine over all modes against a C model of the GL pipeline (stencil and depth planes); depth persistence across mode excursions; clear semantics; scissor-rectangle fragmentation (800 rectangles) and colour mask off.
+
+## GL features beyond the triangle path (found with tools/ragegl/gl_probe.c and the gli diff tracer)
+
+**How GLEngine decides what to advertise.** `glGetString(GL_EXTENSIONS)` (GLEngine 0x39188) prints 24 fixed names, then walks a 72-bit mask at
+descriptor+0x104 (the descriptor is `gli[0x789c]`, filled by `rage_fill_descriptor`) and appends one name per set bit. Bit -> name:
+0 ARB_imaging, 1 ARB_point_parameters, 2 ARB_texture_env_crossbar, 3 ARB_texture_border_clamp, 4 ARB_multitexture, 5 ARB_texture_env_add, 6 ARB_texture_cube_map,
+7 ARB_texture_env_dot3, 8 ARB_multisample, 9 ARB_texture_env_combine, 10 ARB_texture_compression, 11 ARB_texture_mirrored_repeat, 12 ARB_shadow, 13 ARB_depth_texture,
+14 ARB_shadow_ambient, 15 ARB_fragment_program, 16 ARB_occlusion_query, 17 ARB_point_sprite, 18 ARB_shading_language_100, 19 ARB_texture_non_power_of_two,
+20 ARB_vertex_buffer_object, 21 EXT_compiled_vertex_array, 22 EXT_texture_rectangle, 23 EXT_texture_env_add, 24 EXT_blend_color, 25 EXT_blend_minmax,
+26 EXT_blend_subtract, 27 EXT_texture_lod_bias, 28 EXT_abgr, 29 EXT_bgra, 30 EXT_stencil_wrap, 31 EXT_texture_filter_anisotropic, 32 EXT_paletted_texture,
+33 EXT_shared_texture_palette, 34 EXT_separate_specular_color, 35 EXT_secondary_color, 36 EXT_blend_func_separate, 37 EXT_shadow_funcs, 38 EXT_stencil_two_side,
+39 EXT_depth_bounds_test, 40 EXT_texture_compression_s3tc, 41 EXT_blend_equation_separate, 42 EXT_texture_mirror_clamp, 43 APPLE_ycbcr_422, 44 APPLE_vertex_array_range,
+45 APPLE_texture_range, 46 APPLE_float_pixels, 47 APPLE_pixel_buffer, 48 NV_point_sprite, 49-54 NV_register_combiners(2)/texture_shader(1-3)/blend_square, 55 NV_fog_distance,
+56 NV_depth_clamp, 57 NV_multisample_filter_hint, 58 ATI_point_cull_mode, 59 ATI_texture_mirror_once, 60 ATI_text_fragment_shader, 61 ATI_blend_equation_separate,
+62 ATI_blend_weighted_minmax, 63 ATI_texture_env_combine3, 64 ATI_separate_stencil, 65 ATI_array_rev_comps_in_4_bytes, 66/68 ATI(X)_pn_triangles, 67 ATI_texture_compression_3dc,
+69 SGIS_texture_edge_clamp, 70 SGIS_texture_lod, 71 SGI_color_matrix.
+The driver sets only the bits for features it delivers (5, 16, 23, 27, 30, 34, 36, 38, 69).
+
+**glClear** reaches the driver through dispatch slot 0x04 (`mach64_flush`, a2 = the GL_*_BUFFER_BIT mask); GLEngine's `glClear` (0x4530) flushes its dirty state words and
+tail-calls `ctx[0x78ac]`. The old assumption (a clear flag in gli+0x308) lost clears and read a stale clear colour. Other slots, from the X1900 reference's
+`gldUpdateDispatch`: 0x64 signal fence, 0x68 begin query, 0x6c end query, 0x74 copy-tex-sub-image, 0x78 tex-sub-image, 0x7c generate-mipmap (not used).
+
+**gli words found by diffing** (`RAGE_GLIDIFF=file` logs every changed gli word at each frame start): polygon mode 0x66e4 (front enum << 16 | back enum), front face 0x66e8,
+polygon offset factor/units 0x66dc/0x66e0 (+0x66f0 bit 16 = fill enable), line stipple factor 0x6398 / pattern << 16 at 0x639c / enable 0x63a0 bit 24, GL_LINE_SMOOTH 0x63a0 bit 16,
+GL_POINT_SMOOTH 0x6650 bit 24, blend equation 0x6300 (rgb << 16 | alpha), blend constant colour 0x62f0..0x62fc, texture env combine function 0x6750 (rgb << 16 | alpha),
+texture wrap word at texture state +0x10.
+
+**Implemented here:** glPolygonMode (edges/vertices through the line/point paths), polygon offset (fill), line stipple, antialiased points and lines (alpha-ramp geometry for the
+usual SRC_ALPHA blend), GL_ADD texture env (primary colour rides the chip's specular add), occlusion queries (the CPU rasteriser counts passing samples while a query is
+active), APPLE fences (the engine is serialised through `rgb_fence`), stencil wrap / two-sided stencil, separate specular colour, texture LOD bias, CLAMP_TO_EDGE.

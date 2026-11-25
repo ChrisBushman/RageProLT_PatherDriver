@@ -537,6 +537,14 @@ static void t_accum(void)
     { char n[64]; snprintf(n, sizeof n, "%d,%d,%d (want 128,128,128)", r, g, b); report("accumulation buffer (LOAD, ACCUM, RETURN)", glerr() ? -1 : near3(50, 50, 128, 128, 128, 30), n); }
 }
 
+static void t_accum2(void)
+{
+    int r, g, b; char n[96];
+    reset(0, 0, 0); quad(0, 0, 128, 128, 0.5f, 0.25f, 0.0f, 1); glAccum(GL_LOAD, 1.0f); glClear(GL_COLOR_BUFFER_BIT); glAccum(GL_RETURN, 1.0f); px(50, 50, &r, &g, &b);
+    snprintf(n, sizeof n, "LOAD then RETURN: %d,%d,%d (want 128,64,0)", r, g, b); report("accum: LOAD + RETURN", glerr() ? -1 : near3(50, 50, 128, 64, 0, 20), n);
+    reset(0, 0, 0); glClearAccum(0.25f, 0.25f, 0.25f, 0); glClear(GL_ACCUM_BUFFER_BIT); glAccum(GL_RETURN, 1.0f); px(50, 50, &r, &g, &b);
+    snprintf(n, sizeof n, "ClearAccum 0.25 then RETURN: %d,%d,%d (want 64,64,64)", r, g, b); report("accum: glClearAccum + RETURN", glerr() ? -1 : near3(50, 50, 64, 64, 64, 20), n);
+}
 typedef void (*tfn)(void);
 static const struct { const char *name; tfn fn; const char *ext; } TESTS[] = {
     { "clearcolor", t_clearcolor, 0 }, { "blend_subtract", t_blend_subtract, "GL_EXT_blend_subtract" }, { "blend_revsub", t_blend_revsub, "GL_EXT_blend_subtract" }, { "blend_min", t_blend_min, "GL_EXT_blend_minmax" },
@@ -555,7 +563,7 @@ static const struct { const char *name; tfn fn; const char *ext; } TESTS[] = {
     { "lighting", t_lighting, 0 }, { "fog_coord", t_fog_coord, "GL_EXT_fog_coord" }, { "secondary_color", t_secondary_color, "GL_EXT_secondary_color" },
     { "stencil", t_stencil_basic, 0 }, { "stencil_twoside", t_stencil_twoside, "GL_EXT_stencil_two_side" },
     { "occlusion", t_occlusion, "GL_ARB_occlusion_query" }, { "vertex_program", t_vertex_program, "GL_ARB_vertex_program" }, { "fragment_program", t_fragment_program, "GL_ARB_fragment_program" },
-    { "depth_clamp", t_depth_clamp_bounds, "GL_NV_depth_clamp" }, { "accum", t_accum, 0 },
+    { "depth_clamp", t_depth_clamp_bounds, "GL_NV_depth_clamp" }, { "accum", t_accum, 0 }, { "accum2", t_accum2, 0 },
     { "fence", t_fence, "GL_APPLE_fence" }, { "flush_render", t_flush_render, "GL_APPLE_flush_render" }, { "vao", t_vao, "GL_APPLE_vertex_array_object" }, { "multidraw", t_multidraw, "GL_EXT_multi_draw_arrays" },
     { "range_elements", t_range_elements, "GL_EXT_draw_range_elements" }, { "genmip", t_genmip, "GL_SGIS_generate_mipmap" }, { "windowpos", t_windowpos, "GL_ARB_window_pos" },
 };
