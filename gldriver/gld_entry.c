@@ -25,6 +25,30 @@
 /* Test hook: a headless harness has no window system, so it names the drawable size here before attaching (0 = ask the display / CGS). */
 unsigned g_gld_force_w, g_gld_force_h;
 
+/* GLEngine's capability descriptor for our (hardware) renderer (gli[0x789c]) arrives all zero: viewport clamp, GL_MAX_TEXTURE_SIZE, GL_MAX_TEXTURE_UNITS...
+ * An app that creates textures BEFORE its drawable is attached (every NSOpenGLView screen saver: Flurry) calls glTexImage2D while the max texture size is
+ * still 0, so GLEngine silently drops the image (the driver's level records stay empty -> the texture draws as flat colour).  So fill it as soon as the
+ * driver sees the context: gldCreateTexture / gldModifyTexture run before any image, and the back-pointer gli[0x7898] == ctx is valid by then.
+ * gli base = ctx[0x10] - 0x3610 (measured; checked by the back-pointer). */
+static void rage_fill_descriptor(gld_context *ctx)
+{
+    unsigned char *c = (unsigned char *)ctx; uint32_t a8, g, descp;
+    if (!c) return;
+    a8 = *(uint32_t *)(c + 0x10);
+    if (a8 < 0x13610u || a8 > M64_UADDR_MAX) return;
+    g = a8 - 0x3610u;
+    if (*(uint32_t *)(uintptr_t)(g + 0x7898) != (uint32_t)(uintptr_t)ctx) return;
+    descp = *(uint32_t *)(uintptr_t)(g + 0x789c);
+    if (descp > 0x10000 && descp <= M64_UADDR_MAX) {
+        uint32_t *dd = (uint32_t *)(uintptr_t)descp;
+        if (*(uint16_t *)(uintptr_t)(descp + 0xb2) == 1024) return;           /* already done */
+        dd[0x00/4] = 0x00000004; dd[0x04/4] = 0x4e7fffff; dd[0x08/4] = 0x00000003;
+        dd[0x0c/4] = 0x00000800; dd[0x10/4] = 0x00000800; dd[0x1c/4] = 0x01000000;
+        dd[0x24/4] = 0x00000008; dd[0x28/4] = 0x00000008; dd[0x2c/4] = 0x00000008; dd[0x34/4] = 0x00000020;
+        *(uint16_t *)(uintptr_t)(descp + 0xb2) = 1024;
+        *(uint16_t *)(uintptr_t)(descp + 0xac) = 2;
+    }
+}
 int gldAttachDrawable(gld_context *ctx, int type, void *drawable, uint32_t flags)
 {
     mach64_priv *pv;
@@ -52,6 +76,10 @@ int gldAttachDrawable(gld_context *ctx, int type, void *drawable, uint32_t flags
             /* a window: the descriptor carries CGS ids, the true content rectangle comes from CGS (resolved once; the position drifts per call) */
             width = (uint32_t)ww; height = (uint32_t)wh; pv->win_mode = 1; pv->win_x = (uint32_t)wx; pv->win_y = (uint32_t)wy;
             pv->cgs_win = d[1]; pv->cgs_surf = d[2];
+        } else if (mach64_cgs_off_display()) {
+            /* The window exists but lies on ANOTHER display (a screen saver / app on the GeForce's screen whose context CGL gave us).  Drawing it into our
+             * scanout interleaves two animations (flicker) at the wrong scale; refuse so GLEngine uses another renderer for it. */
+            return 0x2715;
         } else if (!rgb_display(&pv->rb, &dw, &dh, &dbpp) && dw && dh) { width = dw; height = dh; }   /* full screen */
         if (!width || !height) return 0x2715;
         pv->fb_w = width; pv->fb_h = height;
@@ -249,6 +277,7 @@ int gldDestroyShared(void *shared)
  * gldCreateTexture, ati128gld 0x6838) so GLEngine sets up texturing. */
 void gldCreateTexture(void *ctx, void **out, void *shared)
 {
+    rage_fill_descriptor((gld_context *)ctx);
     unsigned char *t = (unsigned char *)calloc(1, 0x40);
     (void)ctx;
     if (t) {
@@ -268,7 +297,7 @@ int gldDeleteTextureLevel(void *ctx, void *t, uint32_t lvl)
 { (void)ctx; return 0; }
 int gldModifyTexture(void *ctx, void *t, uint32_t a3)
 {
-    (void)ctx;
+    rage_fill_descriptor((gld_context *)ctx);
     mach64_texture_bound(t);                /* this texture is now the current one */
     if (a3 & 0x80)                          /* image dirty: upload at next draw    */
         mach64_texture_dirtied(t);

@@ -111,6 +111,7 @@ int mach64_build_surface(gld_context *ctx)
     p->mode_gen = p->rb.gen;
     p->attached = 1;
     p->frame_new = 1;
+    p->init_clear = 1;
     p->dirty |= MACH64_DIRTY_STATE;
     return 0;
 }
@@ -175,7 +176,11 @@ void mach64_frame_start(gld_context *ctx)
     mach64_priv *p = MACH64_PRIV(ctx);
     if (p->frame_new) {
         if (!mach64_mode_check(ctx)) return;
-        colour_clear(ctx);
+        /* GLEngine sends the driver no clear call; glClear only sets bit 4 of gli+0x308 until the frame's swap (measured: set by glClear with any mask
+         * incl. 0, absent when the app never clears, per frame).  Apps that accumulate (Flurry fades the last frame with a quad) must keep the colour
+         * buffer, so clear it only when the app asked to (or once for a new, undefined surface). */
+        if (p->init_clear || (mach64_gli_u32(ctx, 0x308) & 0x10u)) colour_clear(ctx);
+        p->init_clear = 0;
         p->z_clear_pending = 1;
         p->frame_new = 0;
     }

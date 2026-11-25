@@ -110,6 +110,7 @@ typedef struct {
     uint32_t   win_mode;           /* 1 = a window (present at win_x,win_y), 0 = full screen */
     uint32_t   cgs_win, cgs_surf;
     uint32_t   frame_new;          /* 1 => the colour/Z clear of this frame is still owed */
+    uint32_t   init_clear;         /* 1 => the colour buffer has never been defined (new surface): clear it once even if the app does not glClear */
     uint32_t   z_clear_pending;
     uint32_t   mode_gen;           /* display generation the surface was built for */
     uint32_t   attached;           /* a surface exists */

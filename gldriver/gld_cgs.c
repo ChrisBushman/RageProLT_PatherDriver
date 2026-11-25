@@ -70,6 +70,7 @@ static int to_display_local(int *ox, int *oy, int w, int h)
 int mach64_cgs_resolve_bounds(uint32_t window_id, uint32_t surface_id, int allow_enum,
                               int *ox, int *oy, int *ow, int *oh)
 {
+    g_off_display = 0;                          /* set again by to_display_local if THIS window is on another display */
     CGSConnectionID cid = _CGSDefaultConnection();
     CGSWindowID wins[256]; int nwin = 0, i, j;
     g_off_display = 0;

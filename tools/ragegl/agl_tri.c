@@ -67,7 +67,7 @@ int main(void)
     for (i = 0; i < nfr; i++) {
         float a = getenv("AGL_STATIC") ? 20.0f : (float)i * 2.0f;                   /* degrees/frame */
         glClearColor(0.10f, 0.10f, 0.15f, 1.0f);     /* dark slate background */
-        glClear(GL_COLOR_BUFFER_BIT);
+        if (!getenv("AGL_NOCLEAR") && !(getenv("AGL_CLEARONCE") && i > 0)) glClear(getenv("AGL_CLEARMASK") ? (GLbitfield)strtoul(getenv("AGL_CLEARMASK"), 0, 16) : GL_COLOR_BUFFER_BIT);
 
         glLoadIdentity();
         glRotatef(a, 0.0f, 0.0f, 1.0f);              /* spin about Z */

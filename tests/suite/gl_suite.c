@@ -98,6 +98,7 @@ typedef void (*rc_fn)(gld_context *, uint32_t, uint32_t, uint32_t, uint32_t, uin
 static void endframe(void)
 {
     rc_fn f = *(rc_fn *)(table + 0x60); if (f) f(ctx, 0, 0, 0, 0, 0);
+    g32(0x308, 0x10);         /* GLEngine sets this bit when the app calls glClear and resets it at the swap; the suite's frames all clear, so re-arm it */
     rgb_fence(&P->rb);        /* the kernel serialises: the next kernel call (readback) waits for the engine anyway; the fence also covers the present */
 }
 static int g_endframe = 1;   /* 0 = leave the frame open so several primitives share one frame (one clear, one Z buffer) */
