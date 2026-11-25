@@ -343,3 +343,20 @@ static void t_pointsprite(void)
     CHECK("point sprite: s increases left to right", (isclr(a, 255, 0, 0) || isclr(a, 0, 0, 255)) && (isclr(b, 0, 255, 0) || isclr(b, 255, 255, 255)));
     g32(0x6650, 0u); g32(0x6658, 0u); default_state(); sync(); clear_rt(0);
 }
+
+/* non-power-of-two textures: padded (clamp axes) or stretched (repeat axes) to the next power of two, coordinates mapped */
+static void t_npot(void)
+{
+    static unsigned char d[6 * 5 * 3]; int x, y; void *t;
+    for (y = 0; y < 5; y++) for (x = 0; x < 6; x++) { unsigned char *q = d + (y * 6 + x) * 3; q[0] = x < 3 ? 255 : 0; q[1] = x < 3 ? 0 : 255; q[2] = 0; }
+    t = mktex(6, 5, 0x1907, d, (0x812fu << 16) | 0x812fu, 0x2600, 0x2600);                /* CLAMP_TO_EDGE: padded to 8x8, s' = s * 6/8 */
+    default_state(); bindtex(t, GL_REPLACE_ENV); sync(); clear_rt(0);
+    tquad(20, 20, 148, 148, 0.0f, 0.0f, 1.0f, 1.0f, 0xffffffffu);
+    CHECK("NPOT 6x5 clamp: the left half is red, the right half green (padding invisible)", isclr(px(50, 60), 255, 0, 0) && isclr(px(120, 60), 0, 255, 0) && isclr(px(120, 140), 0, 255, 0));
+    CHECK("NPOT 6x5 clamp: the colour boundary is at the middle (s = 0.5)", isclr(px(80, 60), 255, 0, 0) && isclr(px(88, 60), 0, 255, 0));
+    t = mktex(6, 5, 0x1907, d, (GL_REPEAT_ << 16) | GL_REPEAT_, 0x2600, 0x2600);          /* REPEAT: stretched to 8x8 */
+    default_state(); bindtex(t, GL_REPLACE_ENV); sync(); clear_rt(0);
+    tquad(20, 20, 148, 148, 0.0f, 0.0f, 1.0f, 1.0f, 0xffffffffu);
+    CHECK("NPOT 6x5 repeat: left red, right green", isclr(px(50, 60), 255, 0, 0) && isclr(px(120, 60), 0, 255, 0));
+    default_state(); sync(); clear_rt(0);
+}

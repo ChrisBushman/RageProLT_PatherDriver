@@ -176,6 +176,7 @@ void mach64_texture_deleted(void *texobj)
 }
 
 static mach64_tex_slot *g_cpu_slot; static uint32_t g_cpu_unit; static int g_cpu_multi;
+static uint32_t potge(uint32_t v) { uint32_t r = 1; while (r < v) r <<= 1; return r; }
 static uint32_t ilog2u(uint32_t v) { uint32_t r = 0; while (v > 1) { v >>= 1; r++; } return r; }
 
 /* Convert texel `i` of `src` (in GLEngine's base fmt/type) to native ARGB8888. */
@@ -414,15 +415,19 @@ static int mach64_upload(gld_context *ctx, void *texobj)
      *   GL_MIRRORED_REPEAT: [image | mirror], REPEAT, s' = s / 2
      *   GL_MIRROR_CLAMP_EXT: [mirror | image], CLAMP, s' = s / 2 + 1/2
      *   GL_CLAMP_TO_BORDER_ARB: the image inside a ring of border colour (padded to a power of two), CLAMP, s' = (s * w + 1) / W   (single level only)
+     *   non-power-of-two sizes (ARB_texture_non_power_of_two): the chip needs power-of-two images.  CLAMP axes: the image padded to the next power of two with its edge texels, CLAMP,
+     *   s' = s * w / W; REPEAT (and any mirror/border mode) axes: the image stretched to the next power of two (nearest), plain REPEAT.
      * Skipped (plain repeat / edge clamp) when the stored size would exceed 1024. */
     wmode_s = wmode_t = 0;
     {   uint32_t wrap = *(const uint32_t *)(s + 0x10), ws = wrap >> 16, wt = wrap & 0xffffu;
         wmode_s = ws == 0x8370u ? 1 : ws == 0x8742u ? 3 : ws == 0x812du ? 2 : 0; wmode_t = wt == 0x8370u ? 1 : wt == 0x8742u ? 3 : wt == 0x812du ? 2 : 0;
+        if (lvl[0].w & (lvl[0].w - 1u)) wmode_s = (wmode_s || ws == 0x2901u) ? 5 : 4;
+        if (lvl[0].h & (lvl[0].h - 1u)) wmode_t = (wmode_t || wt == 0x2901u) ? 5 : 4;
         if (nlevels > 1 && (wmode_s == 2 || wmode_t == 2)) { if (wmode_s == 2) wmode_s = 0; if (wmode_t == 2) wmode_t = 0; }
         if ((wmode_s || wmode_t)) {
             uint32_t W0 = lvl[0].w, H0 = lvl[0].h, nw0 = W0, nh0 = H0;
-            if (wmode_s == 1 || wmode_s == 3) nw0 = W0 * 2u; else if (wmode_s == 2) { nw0 = 4u; while (nw0 < W0 + 2u) nw0 <<= 1; }
-            if (wmode_t == 1 || wmode_t == 3) nh0 = H0 * 2u; else if (wmode_t == 2) { nh0 = 4u; while (nh0 < H0 + 2u) nh0 <<= 1; }
+            if (wmode_s == 1 || wmode_s == 3) nw0 = W0 * 2u; else if (wmode_s == 2) { nw0 = 4u; while (nw0 < W0 + 2u) nw0 <<= 1; } else if (wmode_s >= 4) nw0 = potge(W0);
+            if (wmode_t == 1 || wmode_t == 3) nh0 = H0 * 2u; else if (wmode_t == 2) { nh0 = 4u; while (nh0 < H0 + 2u) nh0 <<= 1; } else if (wmode_t >= 4) nh0 = potge(H0);
             if (nw0 > 1024u || nh0 > 1024u) wmode_s = wmode_t = 0;
         }
         if (wmode_s || wmode_t) {
@@ -431,8 +436,8 @@ static int mach64_upload(gld_context *ctx, void *texobj)
             for (L = 0; L < nlevels; L++) {
                 uint32_t bpp = tex_src_bytes(1, 1, (uint16_t)lvl[L].fmt, (uint16_t)lvl[L].type), w = lvl[L].w, h = lvl[L].h, nw = w, nh = h, x, y;
                 const unsigned char *src = (const unsigned char *)(uintptr_t)lvl[L].src; unsigned char *dst;
-                if (wmode_s == 1 || wmode_s == 3) nw = w * 2u; else if (wmode_s == 2) { nw = 4u; while (nw < w + 2u) nw <<= 1; }
-                if (wmode_t == 1 || wmode_t == 3) nh = h * 2u; else if (wmode_t == 2) { nh = 4u; while (nh < h + 2u) nh <<= 1; }
+                if (wmode_s == 1 || wmode_s == 3) nw = w * 2u; else if (wmode_s == 2) { nw = 4u; while (nw < w + 2u) nw <<= 1; } else if (wmode_s >= 4) nw = potge(w);
+                if (wmode_t == 1 || wmode_t == 3) nh = h * 2u; else if (wmode_t == 2) { nh = 4u; while (nh < h + 2u) nh <<= 1; } else if (wmode_t >= 4) nh = potge(h);
                 tex_border_pixel((uint16_t)lvl[L].fmt, (uint16_t)lvl[L].type, bcf, bpix);
                 dst = (unsigned char *)malloc((size_t)nw * nh * bpp);
                 if (!dst) { wmode_s = wmode_t = 0; break; }
@@ -441,17 +446,23 @@ static int mach64_upload(gld_context *ctx, void *texobj)
                     if (wmode_t == 1) sy = y >= h ? (int64_t)(2u * h - 1u - y) : (int64_t)y;
                     else if (wmode_t == 3) sy = y < h ? (int64_t)(h - 1u - y) : (int64_t)(y - h);
                     else if (wmode_t == 2) { sy = (int64_t)y - 1; by = (sy < 0 || sy >= (int64_t)h); }
+                    else if (wmode_t == 4) sy = y < h ? (int64_t)y : (int64_t)(h - 1u);
+                    else if (wmode_t == 5) sy = (int64_t)(((uint64_t)y * h) / nh);
                     for (x = 0; x < nw; x++) {
                         int64_t sx = x; int bx = 0;
                         if (wmode_s == 1) sx = x >= w ? (int64_t)(2u * w - 1u - x) : (int64_t)x;
                         else if (wmode_s == 3) sx = x < w ? (int64_t)(w - 1u - x) : (int64_t)(x - w);
                         else if (wmode_s == 2) { sx = (int64_t)x - 1; bx = (sx < 0 || sx >= (int64_t)w); }
+                        else if (wmode_s == 4) sx = x < w ? (int64_t)x : (int64_t)(w - 1u);
+                        else if (wmode_s == 5) sx = (int64_t)(((uint64_t)x * w) / nw);
                         if (bx || by) memcpy(dst + ((size_t)y * nw + x) * bpp, bpix, bpp);
                         else memcpy(dst + ((size_t)y * nw + x) * bpp, src + ((size_t)sy * w + (size_t)sx) * bpp, bpp);
                     }
                 }
-                wscale_s = wmode_s == 1 || wmode_s == 3 ? 0.5f : wmode_s == 2 ? (float)w / (float)nw : 1.0f; wbias_s = wmode_s == 3 ? 0.5f : wmode_s == 2 ? 1.0f / (float)nw : 0.0f;
-                wscale_t = wmode_t == 1 || wmode_t == 3 ? 0.5f : wmode_t == 2 ? (float)h / (float)nh : 1.0f; wbias_t = wmode_t == 3 ? 0.5f : wmode_t == 2 ? 1.0f / (float)nh : 0.0f;
+                if (L == 0) {
+                wscale_s = wmode_s == 1 || wmode_s == 3 ? 0.5f : (wmode_s == 2 || wmode_s == 4) ? (float)w / (float)nw : 1.0f; wbias_s = wmode_s == 3 ? 0.5f : wmode_s == 2 ? 1.0f / (float)nw : 0.0f;
+                wscale_t = wmode_t == 1 || wmode_t == 3 ? 0.5f : (wmode_t == 2 || wmode_t == 4) ? (float)h / (float)nh : 1.0f; wbias_t = wmode_t == 3 ? 0.5f : wmode_t == 2 ? 1.0f / (float)nh : 0.0f;
+                }
                 lvl[L].w = nw; lvl[L].h = nh; lvl[L].src = (uint32_t)(uintptr_t)dst; mir_bufs[L] = dst;
                 if (L == 0 && wmode_s == 0 && wmode_t == 0) break;
             }
@@ -508,8 +519,8 @@ static int mach64_upload(gld_context *ctx, void *texobj)
         slot->clamp_s = ((wrap >> 16) != 0x2901u);
         slot->clamp_t = ((wrap & 0xffffu) != 0x2901u);
         slot->wscale[0] = wscale_s; slot->wscale[1] = wscale_t; slot->wbias[0] = wbias_s; slot->wbias[1] = wbias_t;
-        if (wmode_s == 1) slot->clamp_s = 0; else if (wmode_s == 2 || wmode_s == 3) slot->clamp_s = 1;
-        if (wmode_t == 1) slot->clamp_t = 0; else if (wmode_t == 2 || wmode_t == 3) slot->clamp_t = 1;
+        if (wmode_s == 1 || wmode_s == 5) slot->clamp_s = 0; else if (wmode_s == 2 || wmode_s == 3 || wmode_s == 4) slot->clamp_s = 1;
+        if (wmode_t == 1 || wmode_t == 5) slot->clamp_t = 0; else if (wmode_t == 2 || wmode_t == 3 || wmode_t == 4) slot->clamp_t = 1;
         /* GL filter enums (state-object offsets: 0x2600 NEAREST,
          * 0x2601 LINEAR, 0x2700..0x2703 the mipmap variants (odd low bit = LINEAR within a level).
          * mag GL_LINEAR -> hardware bilinear (SCALE_3D_CNTL BILINEAR_TEX_EN bit25, HW-verified).
