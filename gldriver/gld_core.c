@@ -61,34 +61,61 @@ float mach64_zforce = -1.0f;
 
 /* GL depth state -> Z_CNTL.  gli+0x6340 bit24 = GL_DEPTH_TEST, +0x633c >> 16 = glDepthFunc, +0x63b8 bit24 = glDepthMask.
  *
- * STENCIL.  The chip has no stencil planes.  Chess clips its board reflection with one (write the board outline with ALWAYS/REPLACE, then draw the reflected pieces
- * with EQUAL 1), always with the depth test off, so the Z buffer is free and stands in for a 1-bit stencil: cleared to far (stencil 0); a stencil-write draw stores a
- * constant near depth (stencil 1); a stencil-test draw passes only where that near depth is stored (constant fragment depth just short of far, GREATER).  Only this
- * pattern (depth test off, ALWAYS+REPLACE / EQUAL+KEEP) is emulated; any other stencil use is ignored as before.  gli words (tools/mach64_stencilscan):
- * +0x6734 enable, +0x6714 = func<<16 | sfail op, +0x6718 = dpfail<<16 | dppass op.  Z is wiped when the emulation starts and when it ends. */
-#define STENCIL_ZSET   0.25f
-#define STENCIL_ZTEST  0.90f
+ * STENCIL.  The chip has no stencil planes.  GLEngine's per-face stencil state (static analysis of glStencilFunc at GLEngine 0x38528 and glGetIntegerv; the face is
+ * gli[0x4612 + 0x10000], 0 = front; every field below is at face*0x10 + the offset): +0x670c value mask, +0x6710 reference (clamped to (1 << desc[0x38]) - 1, see
+ * rage_fill_descriptor), +0x6714 func (halfword), +0x6716 sfail, +0x6718 dpfail, +0x671a dppass (halfwords); write mask gli[0x63ac + face*4], clear value gli[0x6334],
+ * enable = bit `face` of gli[0x6734].
+ *
+ * With the depth test off the Z buffer is free and holds the stencil value s (0..255) as z = s * 257.  A stencil-tested draw gives every vertex the constant depth
+ * ref * 257 and Z-tests it with the GL function (frag FUNC stored, the same orientation as GL's ref FUNC stencil); the pass op is applied by the Z write (z = ref for
+ * REPLACE, z = 0 for ZERO when nothing is compared; KEEP: no write).  Exact for: any func, value mask and write mask 0xff, ops KEEP/REPLACE (and ZERO with ALWAYS or
+ * ref 0), sfail KEEP (or any op when the func is ALWAYS).  Everything else (INCR/DECR/INVERT, partial masks, depth test with stencil) needs the CPU-side stencil
+ * buffer (docs/standalone-driver-design.md, stencil) and is ignored here until that lands.  Z is filled with the clear value when the emulation starts and wiped to
+ * far when it ends. */
+#define GL_KEEP_    0x1e00u
+#define GL_REPLACE_ 0x1e01u
+#define GL_ZERO_    0x0000u
+static uint32_t stencil_decode(gld_context *ctx, uint32_t gli, uint32_t *ref, uint32_t *zfunc, uint32_t *writeop)
+{
+    uint32_t face = (uint32_t)*(const unsigned char *)(uintptr_t)(gli + 0x10000u + 0x4612u) & 1u, fb = gli + 0x6700u + face * 0x10u;
+    uint32_t en = (*(const uint32_t *)(uintptr_t)(gli + 0x6734) >> face) & 1u, func, sf, dpp, r, vm, wm;
+    (void)ctx;
+    if (!en) return 0;
+    func = *(const uint16_t *)(uintptr_t)(fb + 0x14); sf = *(const uint16_t *)(uintptr_t)(fb + 0x16); dpp = *(const uint16_t *)(uintptr_t)(fb + 0x1a);
+    r = *(const uint32_t *)(uintptr_t)(fb + 0x10) & 0xffu; vm = *(const uint32_t *)(uintptr_t)(fb + 0x0c) & 0xffu; wm = *(const uint32_t *)(uintptr_t)(gli + 0x63acu + face * 4u) & 0xffu;
+    if (func < 0x0200u || func > 0x0207u || vm != 0xffu || wm != 0xffu) return 0;
+    if (func != 0x0207u && sf != GL_KEEP_) return 0;                        /* a failing fragment would have to write */
+    if (func == 0x0207u && sf != GL_KEEP_ && sf != GL_REPLACE_ && sf != GL_ZERO_) return 0;
+    if (dpp == GL_ZERO_ && func != 0x0207u && r != 0) return 0;
+    if (dpp != GL_KEEP_ && dpp != GL_REPLACE_ && dpp != GL_ZERO_) return 0;
+    *ref = r; *zfunc = func; *writeop = dpp;
+    return 1;
+}
 void mach64_sync_depth_from_gli(gld_context *ctx)
 {
     mach64_priv *p = MACH64_PRIV(ctx);
-    uint32_t gli = gli_find(ctx), z = 0, smode = 0;
+    uint32_t gli = gli_find(ctx), z = 0, smode = 0, sref = 0, sfunc = 0, sop = 0;
     if (!gli) return;
-    if ((*(const uint32_t *)(uintptr_t)(gli + 0x6734) & 1u) && !((*(const uint32_t *)(uintptr_t)(gli + 0x6340)) & 0x01000000u) && p->rb.z_off) {
-        uint32_t f = *(const uint32_t *)(uintptr_t)(gli + 0x6714), o = *(const uint32_t *)(uintptr_t)(gli + 0x6718);
-        if ((f >> 16) == 0x0207u && (o & 0xffffu) == 0x1e01u) smode = 1;                                   /* ALWAYS, pass op REPLACE */
-        else if ((f >> 16) == 0x0202u && (f & 0xffffu) == 0x1e00u && (o & 0xffffu) == 0x1e00u) smode = 2;  /* EQUAL, ops KEEP */
-    }
+    if (!((*(const uint32_t *)(uintptr_t)(gli + 0x6340)) & 0x01000000u) && p->rb.z_off && stencil_decode(ctx, gli, &sref, &sfunc, &sop)) smode = 1;
     if (smode != p->stencil_mode) {
-        if ((smode == 1 && p->stencil_mode == 0) || smode == 0) {            /* entering (stencil starts clear) or leaving (restore a clean Z) */
+        if (smode == 0 || p->stencil_mode == 0) {                           /* entering (stencil = clear value) or leaving (restore a clean Z) */
+            uint32_t v = smode ? ((*(const uint32_t *)(uintptr_t)(gli + 0x6334) & 0xffu) * 257u) : 0xffffu;
             mach64_flush_batch(ctx);
-            rgb_clear_z(&p->rb, 0xffffu);
+            rgb_clear_z(&p->rb, v);
             p->dirty |= MACH64_DIRTY_STATE;
         }
         p->stencil_mode = smode;
     }
-    mach64_zforce = smode == 1 ? STENCIL_ZSET : smode == 2 ? STENCIL_ZTEST : -1.0f;
-    if (smode == 1) { if (p->hw.z_cntl != (MACH64_Z_EN | MACH64_Z_TEST_ALWAYS | MACH64_Z_MASK_EN)) { p->hw.z_cntl = MACH64_Z_EN | MACH64_Z_TEST_ALWAYS | MACH64_Z_MASK_EN; p->dirty |= MACH64_DIRTY_STATE; } return; }
-    if (smode == 2) { if (p->hw.z_cntl != (MACH64_Z_EN | MACH64_Z_TEST_GREATER)) { p->hw.z_cntl = MACH64_Z_EN | MACH64_Z_TEST_GREATER; p->dirty |= MACH64_DIRTY_STATE; } return; }
+    if (smode) {
+        uint32_t wr = (sop == GL_KEEP_) ? 0u : MACH64_Z_MASK_EN, zc;
+        static const uint32_t zt[8] = { MACH64_Z_TEST_NEVER, MACH64_Z_TEST_LESS, MACH64_Z_TEST_EQUAL, MACH64_Z_TEST_LEQUAL, MACH64_Z_TEST_GREATER, MACH64_Z_TEST_NOTEQUAL, MACH64_Z_TEST_GEQUAL, MACH64_Z_TEST_ALWAYS };
+        float zf = (sop == GL_ZERO_ && sfunc == 0x0207u) ? 0.0f : (float)sref / 255.0f;
+        zc = MACH64_Z_EN | zt[sfunc - 0x0200u] | wr;
+        mach64_zforce = zf;
+        if (p->hw.z_cntl != zc) { p->hw.z_cntl = zc; p->dirty |= MACH64_DIRTY_STATE; }
+        return;
+    }
+    mach64_zforce = -1.0f;
     if ((*(const uint32_t *)(uintptr_t)(gli + 0x6340)) & 0x01000000u) {
         uint32_t func = (*(const uint32_t *)(uintptr_t)(gli + 0x633c)) >> 16;
         uint32_t mask = (*(const uint32_t *)(uintptr_t)(gli + 0x63b8)) & 0x01000000u;

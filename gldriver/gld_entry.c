@@ -45,6 +45,7 @@ static void rage_fill_descriptor(gld_context *ctx)
         dd[0x00/4] = 0x00000004; dd[0x04/4] = 0x4e7fffff; dd[0x08/4] = 0x00000003;
         dd[0x0c/4] = 0x00000800; dd[0x10/4] = 0x00000800; dd[0x1c/4] = 0x01000000;
         dd[0x24/4] = 0x00000008; dd[0x28/4] = 0x00000008; dd[0x2c/4] = 0x00000008; dd[0x34/4] = 0x00000020;
+        dd[0x38/4] = 0x00000008;                  /* stencil bits: GLEngine glStencilFunc clamps the reference to (1 << dd[0x38]) - 1 (static analysis of GLEngine 0x38528): with 0 every reference was stored as 0 */
         *(uint16_t *)(uintptr_t)(descp + 0xb2) = 1024;
         *(uint16_t *)(uintptr_t)(descp + 0xac) = 2;
     }

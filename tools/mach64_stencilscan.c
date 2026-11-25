@@ -45,7 +45,7 @@ int main(void)
       }
       if (!hits) { printf("no gli found\n"); return 2; } }
 
-    { static unsigned a[0x6000], b[0x6000]; GLuint tex[3]; unsigned char px[8*8*4]; const int N = 0x6000; int n;
+    { static unsigned a[0x9000], b[0x9000]; GLuint tex[3]; unsigned char px[8*8*4]; const int N = 0x9000; int n;
       memset(px, 0x80, sizeof px);
       printf("MAX_TEXTURE_UNITS: "); { GLint mu = 0; glGetIntegerv(GL_MAX_TEXTURE_UNITS_ARB, &mu); printf("%d\n", (int)mu); }
       printf("EXT multitexture: %s\n", strstr((const char *)glGetString(GL_EXTENSIONS), "GL_ARB_multitexture") ? "yes" : "NO");
@@ -56,6 +56,14 @@ int main(void)
       glEnable(GL_STENCIL_TEST); glFinish(); DIFF("enable STENCIL_TEST");
       glStencilFunc(GL_EQUAL, 1, 0xff); glFinish(); DIFF("StencilFunc EQUAL ref1 mask ff");
       glStencilFunc(GL_ALWAYS, 1, 0xff); glFinish(); DIFF("StencilFunc ALWAYS ref1 mask ff");
+      glStencilFunc(GL_ALWAYS, 0x55, 0xff); glFinish(); DIFF("StencilFunc ALWAYS ref 0x55 mask ff");
+      glStencilFunc(GL_LESS, 0x55, 0xff); glFinish(); DIFF("StencilFunc LESS ref 0x55 mask ff");
+      glStencilFunc(GL_NOTEQUAL, 0x55, 0xff); glFinish(); DIFF("StencilFunc NOTEQUAL ref 0x55 mask ff");
+      glStencilFunc(GL_NEVER, 0x55, 0xff); glFinish(); DIFF("StencilFunc NEVER");
+      glStencilFunc(GL_GEQUAL, 0x55, 0xff); glFinish(); DIFF("StencilFunc GEQUAL");
+      glStencilFunc(GL_GREATER, 0x55, 0xff); glFinish(); DIFF("StencilFunc GREATER");
+      glStencilFunc(GL_LEQUAL, 0x55, 0xff); glFinish(); DIFF("StencilFunc LEQUAL");
+      glStencilOp(GL_ZERO, GL_INCR_WRAP, GL_DECR_WRAP); glFinish(); DIFF("StencilOp ZERO INCR_WRAP DECR_WRAP");
       glStencilFunc(GL_EQUAL, 3, 0x0f); glFinish(); DIFF("StencilFunc EQUAL ref3 mask 0f");
       glStencilOp(GL_KEEP, GL_KEEP, GL_REPLACE); glFinish(); DIFF("StencilOp KEEP KEEP REPLACE");
       glStencilOp(GL_KEEP, GL_KEEP, GL_KEEP); glFinish(); DIFF("StencilOp KEEP KEEP KEEP");
@@ -69,6 +77,23 @@ int main(void)
       glDepthMask(GL_TRUE); glFinish(); DIFF("DepthMask on");
       glEnable(GL_BLEND); glFinish(); DIFF("enable BLEND");
       glDisable(GL_BLEND); glFinish(); DIFF("disable BLEND");
+      /* where does the stencil REFERENCE live?  snapshot every pointer target reachable from the context at ref 7 and ref 9 */
+      { static unsigned *s1[MAXC], *s2[MAXC]; int ci; glEnable(GL_STENCIL_TEST); glStencilFunc(GL_EQUAL, 7, 0xff); glBegin(GL_TRIANGLES); glVertex2f(0,0); glVertex2f(.1f,0); glVertex2f(0,.1f); glEnd(); glFinish();
+        for (ci = 0; ci < ncand; ci++) { s1[ci] = malloc(0x2000); if (!rd(cand[ci], s1[ci], 0x2000)) { free(s1[ci]); s1[ci] = 0; } }
+        glStencilFunc(GL_EQUAL, 9, 0xff); glBegin(GL_TRIANGLES); glVertex2f(0,0); glVertex2f(.1f,0); glVertex2f(0,.1f); glEnd(); glFinish();
+        for (ci = 0; ci < ncand; ci++) { if (!s1[ci]) continue; s2[ci] = malloc(0x2000); if (!rd(cand[ci], s2[ci], 0x2000)) continue;
+            for (n = 0; n < 0x800; n++) if (s1[ci][n] != s2[ci][n]) printf("REF 7->9: base 0x%lx +0x%04x: 0x%08x -> 0x%08x%s\n", cand[ci], n * 4, s1[ci][n], s2[ci][n], cand[ci] == root ? "  (gli)" : ""); } }
+      /* deeper: every pointer found in the gli (all 0x9000 words) and in the first 0x400 words of those targets */
+      { static unsigned long c2[60000]; static unsigned *t1[60000]; int n2 = 0, ci, kk; unsigned gbuf[0x9000];
+        rd(root, gbuf, sizeof gbuf);
+        for (kk = 0; kk < 0x9000; kk++) { unsigned long q = gbuf[kk]; unsigned tmp; if (q > 0x10000 && !(q & 3) && q < 0xffff0000ul && rd32(q, &tmp) && n2 < 60000) c2[n2++] = q; }
+        { int n3 = n2; for (ci = 0; ci < n3; ci++) { unsigned blk[0x400]; if (!rd(c2[ci], blk, sizeof blk)) continue; for (kk = 0; kk < 0x400; kk++) { unsigned long q = blk[kk]; unsigned tmp; if (q > 0x10000 && !(q & 3) && q < 0xffff0000ul && rd32(q, &tmp) && n2 < 60000) c2[n2++] = q; } } }
+        glStencilFunc(GL_EQUAL, 7, 0xff); glBegin(GL_TRIANGLES); glVertex2f(0,0); glVertex2f(.1f,0); glVertex2f(0,.1f); glEnd(); glFinish();
+        for (ci = 0; ci < n2; ci++) { t1[ci] = malloc(0x400); if (!rd(c2[ci], t1[ci], 0x400)) { free(t1[ci]); t1[ci] = 0; } }
+        glStencilFunc(GL_EQUAL, 9, 0xff); glBegin(GL_TRIANGLES); glVertex2f(0,0); glVertex2f(.1f,0); glVertex2f(0,.1f); glEnd(); glFinish();
+        for (ci = 0; ci < n2; ci++) { unsigned t2[0x100]; if (!t1[ci] || !rd(c2[ci], t2, 0x400)) continue;
+            for (n = 0; n < 0x100; n++) if (t1[ci][n] != t2[n]) { unsigned o = t1[ci][n], w = t2[n];
+                if (w == 9 || w == 0x09090909u || w == 0x09000000u || w == 0x00090000u || w == 0x41100000u || w == 0x3d121212u || (o == 7 && w == 9)) printf("REF2 7->9: 0x%lx +0x%x: 0x%08x -> 0x%08x\n", c2[ci], n * 4, o, w); } } }
       printf("glError=0x%x\n", glGetError()); }
     return 0;
 }

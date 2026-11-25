@@ -427,3 +427,11 @@ Reference: Flurry on the GeForce through `~/Desktop/TGL Run.app` (= `/Library/TG
 2. **Textures created before the drawable is attached were dropped.** GLEngine's capability descriptor (`gli[0x789c]`, max texture size at +0xb2, units at +0xac) is all zero until our code fills it; we only filled it in `gldAttachDrawable`, but NSOpenGLView savers create their textures first -> glTexImage2D silently failed, level records stayed empty, quads drew flat. Now filled from `gldCreateTexture`/`gldModifyTexture` (the back-pointer `gli[0x7898]==ctx` is valid by then; gli base = `ctx[0x10]-0x3610`). Reproducer: `tools/ragegl/agl_tex` with `TEX_EARLY=1`.
 3. **A context for a window on another display was drawn into our scanout.** The saver also runs on the GeForce's screen; CGL handed us that context too; `mach64_cgs_resolve_bounds` failed (off display) and attach fell through to the full-screen branch, so two different animations (1920 px wide scene squeezed into 640x480) alternated presents = flicker + strands 3x too big. Now `gldAttachDrawable` refuses (0x2715) when `mach64_cgs_off_display()`.
 Also verified: texture/blend rows from `agl_tex` are identical on the Rage and on the GeForce (renderer 0x21048) for luminance and RGBA, gluBuild2DMipmaps and glTexImage2D.
+
+## Stencil (found by static analysis of GLEngine, Nov 25)
+
+The chip has no stencil planes. GLEngine keeps per-face state (face = gli[0x14612], 0 = front, fields at face*0x10): +0x670c value mask, +0x6710 reference, +0x6714 func, +0x6716 sfail, +0x6718 dpfail, +0x671a dppass (halfwords); write mask gli[0x63ac+face*4], clear value gli[0x6334], enable = bit `face` of gli[0x6734]. `glStencilFunc` (GLEngine 0x38528) clamps the reference to `(1 << desc[0x38]) - 1`; the descriptor we fill (`rage_fill_descriptor`) now reports 8 stencil bits. Before that every reference read back as 0, which is why live scans never saw it move.
+
+Implemented (Z-buffer as stencil, depth test off): all 8 compare funcs, any reference, KEEP/REPLACE/ZERO pass ops, sfail KEEP (any sfail op when func is ALWAYS), clear value.
+
+Not yet implemented (needs a CPU-side stencil buffer plus coverage): INCR/DECR/INVERT/wraps, value/write masks other than 0xff, sfail/dpfail ops with a non-ALWAYS func, depth test together with stencil. These are currently ignored (stencil off).
