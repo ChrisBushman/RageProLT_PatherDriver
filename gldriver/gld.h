@@ -204,7 +204,7 @@ int  mach64_ctl14(gld_context *, uint32_t, uint32_t, uint32_t, uint32_t, uint32_
 int  mach64_ctl08(void *rb_ctx, int x, int y, int w, int h, unsigned format, unsigned type, void *pixels);
 void mach64_texture_dirtied(void *texobj);
 void mach64_texture_bound(void *texobj);
-void mach64_texture_deleted(void *texobj);
+void mach64_texture_deleted(gld_context *ctx, void *texobj);
 
 /* gld_texture.c */
 int      mach64_bind_texture(gld_context *ctx);

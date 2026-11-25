@@ -376,7 +376,7 @@ void gldCreateTexture(void *ctx, void **out, void *shared)
     if (out) *out = t;
 }
 int gldDeleteTexture(void *ctx, void *t)
-{ (void)ctx; if (t) { mach64_texture_deleted(t); free(t); } return 0; }
+{ if (t) { mach64_texture_deleted((gld_context *)ctx, t); free(t); } return 0; }
 int gldCreateTextureLevel(void *ctx, void *t, uint32_t a3, uint32_t lvl, uint32_t a5, uint32_t a6, uint32_t a7)
 { (void)ctx; return 0; }
 int gldDeleteTextureLevel(void *ctx, void *t, uint32_t lvl)

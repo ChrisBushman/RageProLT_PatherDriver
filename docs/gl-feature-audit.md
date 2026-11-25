@@ -1,6 +1,6 @@
 # GL feature audit (Nov 25)
 
-Evidence: `tools/ragegl/gl_probe` (126 probes) on the G4 MDD against the standalone driver: **125 pass, 1 fail** (ARB fragment program); `gl_suite` 290/290.
+Evidence: `tools/ragegl/gl_probe` (128 probes) on the G4 MDD against the standalone driver: **127 pass, 1 fail** (ARB fragment program); `gl_suite` 290/290.
 Status words: **tested** = a probe draws and checks pixels; **accepted-only** = the call is accepted but the effect is not verified (weaker than tested);
 **failing** = probe fails (driver gap); **unsupported** = GLEngine or the chip cannot do it; **untested** = no probe yet.
 
@@ -29,7 +29,7 @@ groups (kext reload heals it) showed `TEX_CNTL` keeps the secondary-unit bits of
 | Texture border | tested (CLAMP and REPEAT) | border texels kept for CLAMP, cropped otherwise; no texel-centre inset |
 | TexSubImage1D/2D, CopyTexImage2D, CopyTexSubImage2D | tested | probes |
 | CopyTexImage1D | tested | |
-| Texture objects, priorities, residency | tested (residency result unchecked) | texture objects |
+| Texture objects, priorities, residency, delete while in flight | tested (residency result unchecked) | texture objects, tex_delete_before_read |
 | texgen OBJECT_LINEAR, SPHERE_MAP, texture matrix | tested (sphere map: drawn only) | |
 | texgen EYE_LINEAR | tested | |
 | Display lists, vertex arrays, interleaved arrays | tested | |
@@ -68,7 +68,7 @@ separate_specular_color, texture_mirror_clamp, compiled_vertex_array, abgr, bgra
 | ARB_occlusion_query, ARB_vertex_program, APPLE_* (fence, flush_render, VAO), multi_draw_arrays, draw_range_elements, SGIS_generate_mipmap, ARB_window_pos | tested | GLEngine-side or driver-assisted |
 | ARB_fragment_program | **failing** (accepted, not executed: draws with the primary colour) | static analysis (GLEngine 0x9d104..0x9e488): programs are parsed by the external PP library (PPParserParse) and compiled to a PPEmulatorProgram kept in the context; the driver never receives the text. GLEngine keeps the fragment PPStream at program-object+0 (object = ctx+0x10000+0x8724+4*target index) and does not build an emulator program for it (vertex programs do, and run through PPEmulatorRun, 0xd9908). Two routes: (a) the driver dlopens libGLProgrammability (present on Panther: PPEmulatorProgramCreate/ConvertFromPPStream/InitialiseHandleBanks/Run, emulator struct fields +0x2d0 program, +0x2d8/+0x2dc data blocks, 0x100-byte stride; it also spawns a secondary thread, which conflicts with the single-core rule) or (b) decode the PP stream and write an own fixed-point interpreter. Neither is small; no target app uses ARB_fragment_program (2003-era Panther titles). GLEngine advertises ARB shader names in its fixed list, so they cannot be removed |
 | 3D textures | tested (CPU shaded) | descriptor +0xb4 = MAX_3D_TEXTURE_SIZE; nearest/trilinear, wrap S/T/R; level 0 only |
-| ARB_depth_texture / shadow | accepted-only (upload) | not implemented |
+| ARB_depth_texture | tested (DEPTH_COMPONENT FLOAT/UINT/USHORT/UBYTE sampled as luminance, 8-bit) | GLEngine stores float depth as UNSIGNED_INT; DEPTH_TEXTURE_MODE INTENSITY/ALPHA and TEXTURE_COMPARE (shadow) not implemented |
 | ARB_multisample | pixel format offered only | no multisampling |
 | SGI_color_matrix | tested for pixel transfer; not advertised (no extension bit identified) | |
 | Register combiners, texture shaders, NV/ATI vendor bits | unsupported | no hardware path |
@@ -76,3 +76,6 @@ separate_specular_color, texture_mirror_clamp, compiled_vertex_array, abgr, bgra
 
 ## Known limits of the CPU rasteriser path
 Level-0 only for CPU textures. Two-unit texturing on the CPU path only for crossbar COMBINE. Alpha test (before stencil/depth, so discarded fragments touch neither) and fog (vertex fog factor interpolated, blended with the fog colour) are applied on the CPU path (probes cpu_alpha_test, cpu_fog). Colour-mask nuances remain.
+
+## Resolved (Nov 25): texture deleted while its draw was unsubmitted
+glDeleteTextures freed the texture's VRAM immediately, but the draw that sampled it could still sit in the unsubmitted batch; the kernel validates texture offsets against live allocations, so that draw sampled garbage (a stale red block in the probes). Apps that delete a texture before the frame ends (common) were exposed. `mach64_texture_deleted` now takes the context and submits the batch first when the slot was bound in the current batch. Regression probe: `tex_delete_before_read`. The bug looked like a heisenbug (any extra getenv/fprintf call moved the batch flush) and took a long bisect; lesson: when a probe result changes with unrelated code, suspect batching/lifetime races before hardware state.

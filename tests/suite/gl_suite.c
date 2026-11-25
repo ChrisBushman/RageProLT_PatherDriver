@@ -372,7 +372,7 @@ static void t_tex_replace(void)
     default_state(); bindtex(t, GL_REPLACE_ENV); sync(); clear_rt(0);
     tquad(20, 20, 148, 148, 0.0f, 0.0f, 1.0f, 1.0f, 0xffffffffu);
     CHECK("texture re-upload: modified texel (yellow) shows", isclr(px(36, 36), 255, 255, 0));
-    texreset(); mach64_texture_deleted(t);
+    texreset(); mach64_texture_deleted(0, t);
     default_state(); sync(); clear_rt(0); tri(20, 16, 0xffff0000u, 110, 44, 0xffff0000u, 50, 116, 0xffff0000u, 0.0f);
     CHECK("texture deleted + disabled: plain geometry still draws", ch(px(60, 59), 16) > 200);
 }
@@ -427,7 +427,7 @@ static void t_multitex(void)
     CHECK("unit 1 only: top half = white (unit-1 coordinates used)", isclr_mt(px(36, 36), 255, 255, 255));
     CHECK("unit 1 only: bottom half = half grey", isclr_mt(px(36, 132), 128, 128, 128));
     /* 5. back to a clean single-texture state: plain geometry still draws, no stale composite */
-    texreset1(); texreset(); mach64_texture_deleted(ta); mach64_texture_deleted(tb);
+    texreset1(); texreset(); mach64_texture_deleted(0, ta); mach64_texture_deleted(0, tb);
     default_state(); sync(); clear_rt(0); tri(20, 16, 0xffff0000u, 110, 44, 0xffff0000u, 50, 116, 0xffff0000u, 0.0f);
     CHECK("multitex deleted: plain geometry still draws", ch(px(60, 59), 16) > 200);
     free(da); free(db);
@@ -448,7 +448,7 @@ static void t_multitex_min(void)
         tquad2(196, 40, 228, 72, 0, 0, 1, 1, 0, 0, 1, 1, 0xffffffffu);
         { unsigned c = px(212, 56), d = px(120, 100); printf("    (%s: minified 0x%08x, 1:1 0x%08x; probes %08x %08x %08x)\n", pass ? "LINEAR" : "NEAREST", c, d, px(200,44), px(224,68), px(197,41));
           if (ch(c, 16) < 40) nbad++; (void)d; }
-        texreset1(); texreset(); mach64_texture_deleted(ta); mach64_texture_deleted(tb); free(da); free(db);
+        texreset1(); texreset(); mach64_texture_deleted(0, ta); mach64_texture_deleted(0, tb); free(da); free(db);
     }
     CHECK("multitex 128x128 minified + 1:1, nearest and linear: engine alive, minified output drawn", nbad == 0);
 }
@@ -479,7 +479,7 @@ static void t_specular(void)
     tquad_spec(20, 20, 148, 148, 0xffffffffu, 100.0f / 255, 100.0f / 255, 100.0f / 255, 1);
     CHECK("specular off: textured pixel = texel only", isclr(px(80, 80), 64, 64, 64));
     /* untextured: the secondary colour is folded into the primary colour */
-    texreset(); mach64_texture_deleted(t);
+    texreset(); mach64_texture_deleted(0, t);
     default_state(); g32(0x6380, 1); sync(); clear_rt(0);
     tquad_spec(20, 20, 148, 148, 0xff404040u, 32.0f / 255, 32.0f / 255, 32.0f / 255, 0);
     printf("    (untextured+specular 0x%08x)\n", px(80, 80));
@@ -518,7 +518,7 @@ static void t_texfmt(void)
     CHECK("RGB565 texture: green", isclr(px(132, 36), 0, 255, 0));
     CHECK("RGB565 texture: blue",  isclr(px(36, 132), 0, 0, 255));
     CHECK("RGB565 texture: white", isclr(px(132, 132), 255, 255, 255));
-    texreset(); mach64_texture_deleted(t); free(d);
+    texreset(); mach64_texture_deleted(0, t); free(d);
     /* RGBA 4_4_4_4 native (R15..12 G B A3..0): opaque red, opaque green, opaque blue, 0x8 alpha white (blend off: alpha ignored -> white) */
     d = quad16(0xf00f, 0x0f0f, 0x00ff, 0xffff); t = mktex_typed(8, 8, 0x1908, 0x8033, d);
     default_state(); bindtex(t, GL_REPLACE_ENV); sync(); clear_rt(0); tquad(20, 20, 148, 148, 0, 0, 1, 1, 0xffffffffu);
@@ -526,7 +526,7 @@ static void t_texfmt(void)
     CHECK("RGBA4444 texture: red",   isclr(px(36, 36), 255, 0, 0));
     CHECK("RGBA4444 texture: green", isclr(px(132, 36), 0, 255, 0));
     CHECK("RGBA4444 texture: blue",  isclr(px(36, 132), 0, 0, 255));
-    texreset(); mach64_texture_deleted(t); free(d);
+    texreset(); mach64_texture_deleted(0, t); free(d);
     /* RGB 5_5_5_1 native (R15..11 G B A0) */
     d = quad16(0xf801, 0x07c1, 0x003f, 0xffff); t = mktex_typed(8, 8, 0x1908, 0x8034, d);
     default_state(); bindtex(t, GL_REPLACE_ENV); sync(); clear_rt(0); tquad(20, 20, 148, 148, 0, 0, 1, 1, 0xffffffffu);
@@ -534,7 +534,7 @@ static void t_texfmt(void)
     CHECK("RGB5_A1 texture: red",   isclr(px(36, 36), 255, 0, 0));
     CHECK("RGB5_A1 texture: green", isclr(px(132, 36), 0, 255, 0));
     CHECK("RGB5_A1 texture: blue",  isclr(px(36, 132), 0, 0, 255));
-    texreset(); mach64_texture_deleted(t); free(d);
+    texreset(); mach64_texture_deleted(0, t); free(d);
     /* an 8-bit RGB source forced to 16-bit storage (what a heap-full fallback does): colours survive 565 truncation */
     setenv("MACH64_TEX16", "1", 1);
     { unsigned char *q = quadtex(); t = mktex(8, 8, 0x1907, q, (GL_REPEAT_ << 16) | GL_REPEAT_, 0x2600, 0x2600);
@@ -543,13 +543,13 @@ static void t_texfmt(void)
       CHECK("RGB8 stored as 16-bit: red", isclr(px(36, 36), 255, 0, 0));
       CHECK("RGB8 stored as 16-bit: green", isclr(px(132, 36), 0, 255, 0));
       CHECK("RGB8 stored as 16-bit: white", isclr(px(132, 132), 255, 255, 255));
-      texreset(); mach64_texture_deleted(t); free(q); }
+      texreset(); mach64_texture_deleted(0, t); free(q); }
     unsetenv("MACH64_TEX16");
     /* back to ARGB8888: the datatype nibble must be restored */
     { unsigned char *q = quadtex(); t = mktex(8, 8, 0x1907, q, (GL_REPEAT_ << 16) | GL_REPEAT_, 0x2600, 0x2600);
       default_state(); bindtex(t, GL_REPLACE_ENV); sync(); clear_rt(0); tquad(20, 20, 148, 148, 0, 0, 1, 1, 0xffffffffu);
       CHECK("ARGB8888 texture after 16-bit ones: colours exact", isclr(px(36, 36), 255, 0, 0) && isclr(px(132, 36), 0, 255, 0));
-      texreset(); mach64_texture_deleted(t); free(q); }
+      texreset(); mach64_texture_deleted(0, t); free(q); }
 }
 
 static void t_texfmt_fallback(void)
@@ -568,7 +568,7 @@ static void t_texfmt_fallback(void)
         if (isclr(c, 40 + q * 16, 200, 255 - q * 16)) ok++; else printf("    pass-draw %d (texture %d): got 0x%08x want rgb(%d,200,%d)\n", k, q, c, 40 + q * 16, 255 - q * 16);
     }
     CHECK("12 x 256x256 textures cycled twice through a 1 MB heap: every draw correct (LRU eviction + re-upload)", ok == 24);
-    texreset(); for (k = 0; k < 12; k++) { mach64_texture_deleted(tx[k]); free(d[k]); }
+    texreset(); for (k = 0; k < 12; k++) { mach64_texture_deleted(0, tx[k]); free(d[k]); }
 }
 static void t_texfmt_mt(void)
 {   /* multitexture with a 16-bit secondary map: unit 0 = ARGB8888 quadrants (REPLACE), unit 1 = RGB565 half-grey (MODULATE) */
@@ -580,7 +580,7 @@ static void t_texfmt_mt(void)
     printf("    (TL 0x%08x BL 0x%08x BR 0x%08x)\n", px(36, 36), px(36, 132), px(132, 132));
     CHECK("multitex, 16-bit secondary: top = primary colour", isclr_mt(px(36, 36), 255, 0, 0));
     CHECK("multitex, 16-bit secondary: bottom = primary x grey", isclr_mt(px(36, 132), 0, 0, 135) && isclr_mt(px(132, 132), 135, 135, 135));
-    texreset1(); texreset(); mach64_texture_deleted(ta); mach64_texture_deleted(tb); free(da); free(d16);
+    texreset1(); texreset(); mach64_texture_deleted(0, ta); mach64_texture_deleted(0, tb); free(da); free(d16);
 }
 
 /* ------------------------------------------------------------ 16-bit colour target
@@ -602,7 +602,7 @@ static void t_texfmt8(void)
         printf("    (%s luminance: TL 0x%08x TR 0x%08x BL 0x%08x BR 0x%08x)\n", k ? "ARGB8888" : "Y8", px(36, 36), px(132, 36), px(36, 132), px(132, 132));
         CHECK(k ? "luminance (ARGB8888 path): quadrant greys" : "luminance Y8: quadrant greys 255/128/64/0",
               isclr(px(36, 36), 255, 255, 255) && isclr(px(132, 36), 128, 128, 128) && isclr(px(36, 132), 64, 64, 64) && isclr(px(132, 132), 0, 0, 0));
-        texreset(); mach64_texture_deleted(t);
+        texreset(); mach64_texture_deleted(0, t);
     }
     unsetenv("MACH64_TEX_NOY8");
     /* YCbCr 4:2:2 (GL_APPLE_ycbcr_422): memory order [Cb Y0 Cr Y1] for 8_8_APPLE, [Y0 Cb Y1 Cr] for 8_8_REV_APPLE.  Quadrants: Y = eb/80/40/10 with neutral chroma
@@ -623,7 +623,7 @@ static void t_texfmt8(void)
               ch(px(36, 36), 8) > ch(px(132, 36), 8) + 20 && ch(px(132, 36), 8) > ch(px(36, 132), 8) + 20);
         CHECK(k ? "YCbCr 422 (REV): Cr high tints red (U/V not swapped)" : "YCbCr 422 (8_8): Cr high tints red (U/V not swapped)",
               ch(px(132, 132), 16) > ch(px(132, 132), 0) + 40);
-        texreset(); mach64_texture_deleted(t);
+        texreset(); mach64_texture_deleted(0, t);
     }
 }
 
@@ -731,7 +731,7 @@ static void t_tex_alpha(void)
     tquad(20, 20, 148, 148, 0.0f, 0.0f, 1.0f, 1.0f, 0xffffffffu);
     CHECK("RGBA texture + alpha test: transparent texel rejected", px(36, 84) == 0);
     CHECK("RGBA texture + alpha test: opaque texel kept",         isclr(px(132, 84), 0, 255, 0));
-    texreset(); mach64_texture_deleted(t);
+    texreset(); mach64_texture_deleted(0, t);
 }
 static void t_tex_wrap(void)
 {
@@ -742,14 +742,14 @@ static void t_tex_wrap(void)
     printf("    (repeat: 0x%08x 0x%08x 0x%08x 0x%08x)\n", px(28, 36), px(60, 36), px(92, 36), px(124, 36));
     CHECK("wrap REPEAT: first copy red then green",   isclr(px(28, 36), 255, 0, 0) && isclr(px(60, 36), 0, 255, 0));
     CHECK("wrap REPEAT: second copy repeats red",     isclr(px(92, 36), 255, 0, 0) && isclr(px(124, 36), 0, 255, 0));
-    texreset(); mach64_texture_deleted(tr);
+    texreset(); mach64_texture_deleted(0, tr);
     tc = mktex(8, 8, 0x1907, d, (GL_CLAMP_E << 16) | GL_CLAMP_E, 0x2600, 0x2600);
     default_state(); bindtex(tc, GL_REPLACE_ENV); sync(); clear_rt(0);
     tquad(20, 20, 148, 148, 0.0f, 0.0f, 2.0f, 1.0f, 0xffffffffu);
     printf("    (clamp: 0x%08x 0x%08x 0x%08x 0x%08x)\n", px(28, 36), px(60, 36), px(92, 36), px(124, 36));
     CHECK("wrap CLAMP: first copy as normal",         isclr(px(28, 36), 255, 0, 0) && isclr(px(60, 36), 0, 255, 0));
     CHECK("wrap CLAMP: beyond 1.0 holds the edge texel (green), no repeat", isclr(px(92, 36), 0, 255, 0) && isclr(px(124, 36), 0, 255, 0));
-    texreset(); mach64_texture_deleted(tc);
+    texreset(); mach64_texture_deleted(0, tc);
 }
 /* Bilinear MAG on an RGBA texture: with and without framebuffer blending.  (An old note says the chip cannot bilinear-filter alpha-blended textures.) */
 static int edge_blended(int y)
@@ -770,7 +770,7 @@ static void t_tex_alpha_bilinear(void)
     printf("    (RGBA texture, LINEAR mag: %d blended edge pixels without blending, %d with GL_BLEND on)\n", m_plain, m_blend);
     CHECK("bilinear mag on an RGBA texture (no blending): edge pixels blend", m_plain >= 4);
     CHECK("bilinear mag on an RGBA texture WITH GL_BLEND: edge pixels blend", m_blend >= 4);
-    texreset(); mach64_texture_deleted(t);
+    texreset(); mach64_texture_deleted(0, t);
 }
 /* Does bilinear also filter the ALPHA channel?  Left half transparent green, right half opaque green over a blue background: a smooth alpha
  * edge gives intermediate blue/green pixels across it, a hard (pixelated) edge gives none. */
@@ -784,7 +784,7 @@ static int alpha_edge_mixed(unsigned magf)
     bindtex(t, GL_REPLACE_ENV); sync();
     tquad(20, 20, 148, 148, 0.0f, 0.0f, 1.0f, 1.0f, 0xffffffffu);
     for (x = 40; x < 128; x++) { unsigned c = px(x, 84); if (!(isclr(c, 0, 0, 255) || isclr(c, 0, 255, 0))) mixed++; }
-    texreset(); mach64_texture_deleted(t);
+    texreset(); mach64_texture_deleted(0, t);
     return mixed;
 }
 /* Experiment: does the texture unit filter texel alpha inside ALPHA_DECAL (TEX_LIGHT_FCN=2: Tclr*Talp + Cprim*(1-Talp)), no framebuffer blending?
@@ -800,7 +800,7 @@ static void t_tex_alpha_decal_probe(void)
         { int m = 0; for (x = 40; x < 128; x++) { unsigned c = px(x, 84); if (!(isclr(c, 0, 0, 255) || isclr(c, 0, 255, 0))) m++; }
           printf("    (DECAL probe, %s mag: centre-left 0x%08x centre-right 0x%08x, %d mixed)\n", pass ? "LINEAR" : "NEAREST", px(36, 84), px(132, 84), m);
           if (pass) mixed_l = m; else mixed_n = m; }
-        texreset(); mach64_texture_deleted(t);
+        texreset(); mach64_texture_deleted(0, t);
     }
     CHECK("ALPHA_DECAL path: texel alpha also unfiltered under LINEAR mag (hard edge, same as NEAREST)", mixed_n <= 2 && mixed_l <= 2);
 }
@@ -822,7 +822,7 @@ static void t_tex_filter(void)
     for (x = 40; x < 128; x++) { unsigned c = px(x, 36); if (isclr(c, 255, 0, 0) || isclr(c, 0, 255, 0)) pure++; else mixed++; }
     printf("    (nearest: %d pure / %d mixed pixels across the red|green edge)\n", pure, mixed);
     CHECK("filter NEAREST: hard edge (no blended pixels)", mixed <= 2);
-    texreset(); mach64_texture_deleted(tn);
+    texreset(); mach64_texture_deleted(0, tn);
     tl = mktex(8, 8, 0x1907, d, (GL_REPEAT_ << 16) | GL_REPEAT_, 0x2600, 0x2601);           /* LINEAR mag */
     default_state(); bindtex(tl, GL_REPLACE_ENV); sync(); clear_rt(0);
     tquad(20, 20, 148, 148, 0.0f, 0.0f, 1.0f, 1.0f, 0xffffffffu);
@@ -831,7 +831,7 @@ static void t_tex_filter(void)
     printf("    (bilinear: %d pure / %d mixed pixels across the red|green edge)\n", pure, mixed);
     CHECK("filter LINEAR mag: blended pixels appear at the edge", mixed >= 4);
     CHECK("filter LINEAR mag: texture centres still pure",       isclr(px(36, 36), 255, 0, 0) && isclr(px(132, 36), 0, 255, 0));
-    texreset(); mach64_texture_deleted(tl);
+    texreset(); mach64_texture_deleted(0, tl);
 }
 /* Software mip level selection: a 64x64 chain with a distinct SOLID colour per level, drawn minified at known ratios.  The hardware only
  * ever samples one image, so the plugin rebinds the right level per triangle (gld_texture.c mach64_tex_select_lod). */
@@ -887,7 +887,7 @@ static void t_tex_mip_gouraud(void)
     a = px(30, 30); b = px(90, 30);                                   /* near the white corner vs near the grey corner; ~100px triangle over a 64px texture = magnified, so level 0 (red) */
     printf("    (mip+gouraud: near-bright 0x%08x, near-dim 0x%08x)\n", a, b);
     CHECK("mip + MODULATE + gouraud: vertex-colour gradient present (SETUP_CNTL bit 6 set)", ch(a, 16) + ch(a, 8) + ch(a, 0) > ch(b, 16) + ch(b, 8) + ch(b, 0) + 60);
-    texreset(); mach64_texture_deleted(tm);
+    texreset(); mach64_texture_deleted(0, tm);
     default_state(); sync(); clear_rt(0); tri(20, 16, 0xffff0000u, 110, 44, 0xff00ff00u, 50, 116, 0xff0000ffu, 0.0f);
     CHECK("untextured gouraud after a mip draw: still a colour gradient (bit 6 cleared again)", ch(px(36, 30), 16) > ch(px(36, 30), 8) || ch(px(80, 45), 8) > 80);
     for (k = 0; k < 7; k++) free(bufs[k]);
@@ -905,7 +905,7 @@ static void t_tex_mip_fog(void)
     SLOT(0x38)(ctx, vb, 4); endframe(); free(vb);
     c = px(26, 36); printf("    (mip level 1 green + 50%% blue fog: 0x%08x)\n", c);
     CHECK("mip + fog: level 1 (green) blended half way with the fog colour", ch(c, 16) < 40 && ch(c, 8) > 80 && ch(c, 8) < 180 && ch(c, 0) > 80 && ch(c, 0) < 180);
-    texreset(); mach64_texture_deleted(tm);
+    texreset(); mach64_texture_deleted(0, tm);
     for (k = 0; k < 7; k++) free(bufs[k]);
 }
 typedef void (*fan_fn)(gld_context *, const void *, const void *, uint32_t);
@@ -949,7 +949,7 @@ static void t_tex_mip_prims(void)
     printf("    (strip 32px: 0x%08x 0x%08x)\n", c1, c2);
     CHECK("mip + slot 0x34 strip: samples level 1 (green)", isclr(c1, 0, 255, 0) && isclr(c2, 0, 255, 0));
     free(vb);
-    texreset(); mach64_texture_deleted(tm);
+    texreset(); mach64_texture_deleted(0, tm);
     for (k = 0; k < 7; k++) free(bufs[k]);
 }
 /* GL_TEXTURE_LOD_BIAS (gli+0x6774): hardware nibble path.  Sweep: which colour (= mip level) a quad of each size shows, for several biases. */
@@ -993,7 +993,7 @@ static void t_tex_lodbias(void)
     printf("    (SW selector, 32px quad: bias 0 -> L%d, +1 -> L%d, -1 -> L%d)\n", a, b, c);
     CHECK("LOD bias (software selector): 32px quad level 1; +1 -> level 2; -1 -> level 0", a == 1 && b == 2 && c == 0);
     unsetenv("MACH64_SW_MIP");
-    gf(0x6774, 0.0f); texreset(); mach64_texture_deleted(tm);
+    gf(0x6774, 0.0f); texreset(); mach64_texture_deleted(0, tm);
     for (k = 0; k < 7; k++) free(bufs[k]);
 }
 /* Audit experiment: what does SCALE_3D_CNTL bit 8 do (DRI header: EDGE_ANTI_ALIAS; ATI3DCIF: ENHANCED_COLOR_RANGE_EN)?  A white textured triangle
@@ -1029,7 +1029,7 @@ static void t_tex_bit8(void)
     CHECK("SCALE_3D_CNTL bit 8 off: gradient at full range, no partial-alpha pixels", g0 >= 0xc0 && e0 == 0);
     /* "bit 8 on" not carried over: it was an audit experiment driven by the old bundle's MACH64_SC_BIT8 knob; the new bundle never sets the bit (measured: no effect without it, e1==0). */
     (void)g1; (void)l1; (void)e1;
-    texreset(); mach64_texture_deleted(t);
+    texreset(); mach64_texture_deleted(0, t);
 }
 static void t_tex_mip_nonsq(void)
 {
@@ -1046,7 +1046,7 @@ static void t_tex_mip_nonsq(void)
         snprintf(nm, sizeof nm, "mipmap non-square 64x16: %dx%d quad samples level %d", qw[k], qh[k], k);
         CHECK(nm, isclr(got, (int)want[k][0], (int)want[k][1], (int)want[k][2]));
     }
-    texreset(); mach64_texture_deleted(tm);
+    texreset(); mach64_texture_deleted(0, tm);
     for (k = 0; k < 7; k++) free(bufs[k]);
 }
 static void t_tex_mip(void)
@@ -1068,13 +1068,13 @@ static void t_tex_mip(void)
     clear_rt(0); tquad(10, 10, 138, 138, 0.0f, 0.0f, 1.0f, 1.0f, 0xffffffffu);
     CHECK("mipmap: magnified quad stays on level 0", isclr(px(74, 74), 255, 0, 0));
     /* NON-mipmapped MIN filter on the same data: a minified quad must keep using level 0 */
-    texreset(); mach64_texture_deleted(tm);
+    texreset(); mach64_texture_deleted(0, tm);
     tn = mktex_mip(7, 0x2600, 0x2600, bufs);
     default_state(); bindtex(tn, GL_REPLACE_ENV); sync(); clear_rt(0);
     tquad(10, 20, 26, 36, 0.0f, 0.0f, 1.0f, 1.0f, 0xffffffffu);
     CHECK("mipmap: NEAREST min filter keeps level 0 when minified", isclr(px(18, 28), 255, 0, 0));
     /* same chain, next frame the level must reset: first a minified quad, then a full-size one */
-    texreset(); mach64_texture_deleted(tn);
+    texreset(); mach64_texture_deleted(0, tn);
     tm = mktex_mip(7, 0x2700, 0x2600, bufs);
     default_state(); bindtex(tm, GL_REPLACE_ENV); sync(); clear_rt(0);
     g_endframe = 0;
@@ -1082,7 +1082,7 @@ static void t_tex_mip(void)
     tquad(100, 20, 164, 84, 0.0f, 0.0f, 1.0f, 1.0f, 0xffffffffu);
     g_endframe = 1; endframe();
     CHECK("mipmap: minified then full-size in one frame (level restored)", isclr(px(18, 28), 0, 0, 255) && isclr(px(132, 52), 255, 0, 0));
-    texreset(); mach64_texture_deleted(tm);
+    texreset(); mach64_texture_deleted(0, tm);
     for (k = 0; k < 7; k++) free(bufs[k]);
     /* tri-linear at a fractional LOD: a 45px quad is ~0.5 levels down, so the centre must blend level 0 (red) and level 1 (green) */
     tm = mktex_mip(7, 0x2703, 0x2600, bufs);
@@ -1090,14 +1090,14 @@ static void t_tex_mip(void)
     tquad(10, 20, 55, 65, 0.0f, 0.0f, 1.0f, 1.0f, 0xffffffffu);
     { unsigned c = px(32, 42); printf("    (trilinear 45px centre 0x%08x)\n", c);
       CHECK("mipmap: LINEAR_MIPMAP_LINEAR blends two levels at a fractional LOD", ch(c, 16) > 60 && ch(c, 8) > 60 && ch(c, 0) < 30); }
-    texreset(); mach64_texture_deleted(tm);
+    texreset(); mach64_texture_deleted(0, tm);
     for (k = 0; k < 7; k++) free(bufs[k]);
     /* incomplete chain (no 1x1): must fall back to the software selector and still pick the right level */
     tm = mktex_mip(6, 0x2700, 0x2600, bufs);
     default_state(); bindtex(tm, GL_REPLACE_ENV); sync(); clear_rt(0);
     tquad(10, 20, 42, 52, 0.0f, 0.0f, 1.0f, 1.0f, 0xffffffffu);
     CHECK("mipmap: incomplete chain falls back to software level selection", isclr(px(26, 36), 0, 255, 0));
-    texreset(); mach64_texture_deleted(tm);
+    texreset(); mach64_texture_deleted(0, tm);
     for (k = 0; k < 6; k++) free(bufs[k]);
     /* MACH64_SW_MIP forces the software selector even for a complete chain */
     setenv("MACH64_SW_MIP", "1", 1);
@@ -1106,7 +1106,7 @@ static void t_tex_mip(void)
     tquad(10, 20, 26, 36, 0.0f, 0.0f, 1.0f, 1.0f, 0xffffffffu);
     CHECK("mipmap: MACH64_SW_MIP=1 software selector picks level 2", isclr(px(18, 28), 0, 0, 255));
     unsetenv("MACH64_SW_MIP");
-    texreset(); mach64_texture_deleted(tm);
+    texreset(); mach64_texture_deleted(0, tm);
     for (k = 0; k < 7; k++) free(bufs[k]);
 }
 /* Hardware mipmapping evidence run (opt-in: PB_HWMIP=1 point mip, 2 adds mip-linear/2x2/tri-linear fields; each stage can wedge the engine, so
@@ -1126,7 +1126,7 @@ static void hwmip_run(const char *label, unsigned minf)
                vrd(REGS + 0x5fc), vrd(REGS + 0x304), vrd(REGS + 0x748), vrd(REGS + 0x770));
         fflush(stdout);
     }
-    texreset(); mach64_texture_deleted(tm);
+    texreset(); mach64_texture_deleted(0, tm);
     for (k = 0; k < 7; k++) free(bufs[k]);
 }
 static void t_tex_hwmip(void)
@@ -1152,7 +1152,7 @@ static void minlin_run(int sz, unsigned minf, int *mixed_out, int *pure_out)
     for (x = 12; x < 8 + sz / 2; x++) { unsigned c = px(x, 20 + sz / 4); if (isclr(c, 255, 0, 0) || isclr(c, 0, 255, 0)) pure++; else mixed++; }
     printf("    (%dx%d minified 2:1, min filter 0x%x: %d pure / %d blended pixels)\n", sz, sz, minf, pure, mixed);
     fflush(stdout);
-    texreset(); mach64_texture_deleted(tl); free(d);
+    texreset(); mach64_texture_deleted(0, tl); free(d);
     *mixed_out = mixed; *pure_out = pure;
 }
 static void t_tex_minlin(void)
@@ -1172,7 +1172,7 @@ static void t_tex_highptr(void)
     default_state(); bindtex(t, GL_REPLACE_ENV); sync(); clear_rt(0);
     tquad(20, 20, 148, 148, 0.0f, 0.0f, 1.0f, 1.0f, 0xffffffffu);
     CHECK("texture data above 1GB (stack buffer) uploads and samples", (uintptr_t)d > 0x40000000u && isclr(px(80, 80), 255, 0, 255));
-    texreset(); mach64_texture_deleted(t);
+    texreset(); mach64_texture_deleted(0, t);
 }
 static void t_tex_churn(void)
 {
@@ -1182,7 +1182,7 @@ static void t_tex_churn(void)
         default_state(); bindtex(t, GL_REPLACE_ENV); sync(); clear_rt(0);
         tquad(20, 20, 148, 148, 0.0f, 0.0f, 1.0f, 1.0f, 0xffffffffu);
         if (!isclr(px(36, 36), 255, 0, 0) || !isclr(px(132, 132), 255, 255, 255)) bad++;
-        texreset(); mach64_texture_deleted(t);
+        texreset(); mach64_texture_deleted(0, t);
     }
     printf("    (churn: %d create/upload/draw/delete cycles, %d bad)\n", i, bad);
     CHECK("texture churn: 150 create/upload/draw/delete cycles all correct (slots and heap reclaimed)", bad == 0);
@@ -1334,7 +1334,7 @@ static void t_multictx(void)
         use(&A); if (!(isclr(px(36, 36), 255, 0, 0) && isclr(px(132, 36), 0, 255, 0))) bad3++;
         use(&B); if (!isclr(px(36, 36), 255, 255, 255) || !isclr(px(132, 36), 255, 255, 255)) bad3++;
       }
-      use(&A); texreset(); mach64_texture_deleted(t); }
+      use(&A); texreset(); mach64_texture_deleted(0, t); }
     CHECK("per-context texture binding: textured on A, plain on B, interleaved (6 rounds)", bad3 == 0);
     /* destroy B, A must be unaffected */
     use(&B); gldDestroyContext(B.c); gldDestroyPixelFormat(pf2);

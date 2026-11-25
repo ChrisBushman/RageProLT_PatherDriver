@@ -508,9 +508,29 @@ static void a_tex3d_filter(void)
 }
 static void a_depth_texture(void)
 {
-    static const float d[4] = { 0.1f, 0.4f, 0.7f, 0.9f }; GLuint id; int e;
+    static const float d[4] = { 0.5f, 0.5f, 0.5f, 0.5f }; GLuint id; int e;
     reset(0, 0, 0); glGenTextures(1, &id); glBindTexture(GL_TEXTURE_2D, id); glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT, 2, 2, 0, GL_DEPTH_COMPONENT, GL_FLOAT, d); e = glerr();
     aq("ARB_depth_texture (upload accepted)", e ? -1 : 1, 0);
+}
+static void a_depth_texture_draw(void)
+{
+    static const float d[4] = { 0.5f, 0.5f, 0.5f, 0.5f }; GLuint id;
+    reset(0, 0, 0); glGenTextures(1, &id); glBindTexture(GL_TEXTURE_2D, id);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST); glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT, 2, 2, 0, GL_DEPTH_COMPONENT, GL_FLOAT, d);
+    glEnable(GL_TEXTURE_2D); glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_REPLACE);
+    glColor3f(1, 1, 1); glBegin(GL_QUADS); glTexCoord2f(.5f, .5f); glVertex2f(10, 10); glVertex2f(100, 10); glVertex2f(100, 100); glVertex2f(10, 100); glEnd();
+    glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE); glDisable(GL_TEXTURE_2D); glDeleteTextures(1, &id);
+    report("depth texture (LUMINANCE mode) drawn", glerr() ? -1 : near3(50, 50, 128, 128, 128, 20), 0);
+}
+/* Regression for "texture deleted while its draw is still in the unsubmitted batch": the delete comes BEFORE the frame is read back. */
+static void a_tex2x2_repeat(void)
+{
+    static const unsigned char c[12] = { 64, 192, 64, 64, 192, 64, 64, 192, 64, 64, 192, 64 }; GLuint id;
+    reset(0.2f, 0.3f, 0.4f); glEnable(GL_TEXTURE_2D); id = mktex(GL_TEXTURE_2D, 2, 2, c, GL_NEAREST, GL_REPEAT); glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_REPLACE);
+    glColor3f(1, 1, 1); glBegin(GL_QUADS); glTexCoord2f(.5f, .5f); glVertex2f(10, 10); glVertex2f(100, 10); glVertex2f(100, 100); glVertex2f(10, 100); glEnd();
+    glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE); glDeleteTextures(1, &id);
+    report("texture deleted before readback", glerr() ? -1 : near3(50, 50, 64, 192, 64, 24), 0);
 }
 static void a_multisample_attr(void)
 {
@@ -540,6 +560,8 @@ static void a_cpu_fog(void)
 }
 
 #define AUDIT_ENTRIES \
+    { "tex_delete_before_read", a_tex2x2_repeat, 0 }, \
+    { "depth_texture_draw", a_depth_texture_draw, 0 }, \
     { "cpu_alpha_test", a_cpu_alpha_test, "GL_EXT_blend_minmax" }, { "cpu_fog", a_cpu_fog, "GL_EXT_fog_coord" }, \
     { "wide_point", a_wide_point, 0 }, { "wide_line", a_wide_line, 0 }, { "polygon_stipple", a_polygon_stipple, 0 }, { "polygon_smooth", a_polygon_smooth, 0 }, \
     { "polyoffset_line", a_polyoffset_line, 0 }, { "polyoffset_point", a_polyoffset_point, 0 }, { "tex1d", a_tex1d, 0 }, { "tex_border", a_tex_border, 0 }, { "tex_border_rep", a_tex_border_rep, 0 }, \

@@ -169,9 +169,13 @@ void mach64_texture_bound(void *texobj) { (void)texobj; }   /* no bind hook; see
 static void cube_cache_drop(uint32_t state);
 static void vol_cache_drop(uint32_t state);
 
-void mach64_texture_deleted(void *texobj)
+void mach64_texture_deleted(gld_context *ctx, void *texobj)
 {
-    mach64_tex_slot *s;
+    mach64_tex_slot *s; int used;
+    /* A draw that sampled this texture may still sit in the unsubmitted batch: submit it before the VRAM is returned (the kernel validates texture offsets against the
+     * owner's live allocations, so a batch naming a freed block samples garbage -- found with probes that delete the texture before reading the frame back). */
+    TEX_LOCK(); s = slot_find(tex_key(texobj)); used = s && s->rsize && s->gen == mach64_batch_gen; TEX_UNLOCK();
+    if (used && ctx) mach64_flush_batch(ctx);
     TEX_LOCK();
     s = slot_find(tex_key(texobj));
     cube_cache_drop(tex_key(texobj)); vol_cache_drop(tex_key(texobj));
@@ -184,8 +188,23 @@ static uint32_t potge(uint32_t v) { uint32_t r = 1; while (r < v) r <<= 1; retur
 static uint32_t ilog2u(uint32_t v) { uint32_t r = 0; while (v > 1) { v >>= 1; r++; } return r; }
 
 /* Convert texel `i` of `src` (in GLEngine's base fmt/type) to native ARGB8888. */
+/* ARB_depth_texture: GL_DEPTH_COMPONENT image in the app's type -> 8-bit depth (DEPTH_TEXTURE_MODE LUMINANCE: the texel is (d, d, d, 1)).  Integer maths. */
+static uint32_t depth_texel8(const unsigned char *src, uint32_t i, uint16_t type)
+{
+    if (type == 0x1406u) {                                   /* GL_FLOAT, 0..1: v*255 from the bits */
+        uint32_t b = ((uint32_t)src[i*4] << 24) | ((uint32_t)src[i*4+1] << 16) | ((uint32_t)src[i*4+2] << 8) | src[i*4+3], e = (b >> 23) & 255u, m = (b & 0x7fffffu) | 0x800000u, sh;
+        if (b >> 31) return 0;
+        if (e >= 127u) return 255;
+        if (e < 119u) return 0;
+        sh = 150u - e; return (m * 255u + (1u << (sh - 1u))) >> sh;
+    }
+    if (type == 0x1405u) return (uint32_t)src[i*4];         /* GL_UNSIGNED_INT: the top byte */
+    if (type == 0x1403u) return (uint32_t)src[i*2];         /* GL_UNSIGNED_SHORT: the top byte */
+    return (uint32_t)src[i];                                  /* GL_UNSIGNED_BYTE and friends */
+}
 static uint32_t tex_texel_argb(const unsigned char *src, uint32_t i, uint16_t fmt, uint16_t type)
 {
+    if (fmt == 0x1902u) { uint32_t d = depth_texel8(src, i, type); return 0xff000000u | (d << 16) | (d << 8) | d; }
     if (type == 0x8363u) {                       /* GL_UNSIGNED_SHORT_5_6_5 (BE u16) */
         unsigned v  = ((unsigned)src[i*2] << 8) | src[i*2 + 1];
         unsigned r5 = (v >> 11) & 0x1fu, g6 = (v >> 5) & 0x3fu, b5 = v & 0x1fu;
@@ -273,6 +292,7 @@ static uint32_t tex_src_bytes(uint32_t w, uint32_t h, uint16_t fmt, uint16_t typ
 {
     uint32_t bpp;
     if (fmt >= 0x83F0u && fmt <= 0x83F3u) return ((w + 3u) / 4u) * ((h + 3u) / 4u) * (fmt == 0x83F0u || fmt == 0x83F1u ? 8u : 16u);     /* S3TC blocks */
+    if (fmt == 0x1902u) return w * h * (type == 0x1406u || type == 0x1405u ? 4u : type == 0x1403u ? 2u : 1u);
     if (type == 0x8363u || type == 0x8033u || type == 0x8034u) bpp = 2;
     else switch (fmt) { case 0x1900u: bpp = 1; break; case 0x1908u: bpp = 4; break; case 0x1909u: case 0x1906u: case 0x8049u: bpp = 1; break; case 0x190Au: case 0x85B9u: bpp = 2; break; default: bpp = 3; }
     return w * h * bpp;
