@@ -41,6 +41,7 @@ bool RageLTGLClient::start(IOService *provider)
     M(RAGE_GL_VRAM_READ,   selVramRead,   kIOUCScalarIScalarO, 4, 0);
     M(RAGE_GL_DISPLAY,     selDisplay,    kIOUCScalarIScalarO, 0, 6);
     M(RAGE_GL_SET_TEXTURE, selSetTexture, kIOUCScalarIScalarO, 3, 0);
+    M(RAGE_GL_CLEAR_Z,     selClearZ,     kIOUCScalarIScalarO, 1, 0);
     M(RAGE_GL_CONFIG,      selConfig,     kIOUCScalarIScalarO, 2, 0);
     M(RAGE_GL_SCANOUT_READ, selScanoutRead, kIOUCScalarIScalarO, 3, 0);
 #undef M
@@ -106,6 +107,9 @@ IOReturn RageLTGLClient::selSetScissor(uint32_t l, uint32_t r, uint32_t t, uint3
 IOReturn RageLTGLClient::selSetZ(uint32_t off, uint32_t pitch) { return fDev ? fDev->setZBuffer(fOwner, off, pitch) : kIOReturnNotAttached; }
 IOReturn RageLTGLClient::selFill(uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint32_t color)
 { return fDev ? fDev->fillRect(fOwner, (int32_t)x, (int32_t)y, (int32_t)w, (int32_t)h, color) : kIOReturnNotAttached; }
+
+IOReturn RageLTGLClient::selClearZ(uint32_t value)
+{ return fDev ? fDev->clearZ(fOwner, value) : kIOReturnNotAttached; }
 
 IOReturn RageLTGLClient::selSubmit(uint32_t addr, uint32_t npairs)
 {

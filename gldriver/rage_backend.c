@@ -41,6 +41,15 @@ int rgb_surface(rgb_t *b, uint32_t w, uint32_t h, uint32_t bpp, int with_z)
     return 0;
 }
 
+uint32_t rgb_gen(rgb_t *b)
+{ uint32_t g = 0, f = 0, e = 0, fl = 0; if (CALL(RAGE_GL_INFO, 0, 4, &g, &f, &e, &fl)) return 1u; b->features = f; b->flags = fl; return g; }
+int rgb_display(rgb_t *b, uint32_t *w, uint32_t *h, uint32_t *bpp)
+{ uint32_t g, ww, hh, pitch, bb, base; kern_return_t kr = CALL(RAGE_GL_DISPLAY, 0, 6, &g, &ww, &hh, &pitch, &bb, &base); if (kr) return (int)kr; if (w) *w = ww; if (h) *h = hh; if (bpp) *bpp = bb; return 0; }
+void rgb_release(rgb_t *b)
+{
+    if (b->col_off) { CALL(RAGE_GL_FREE, 1, 0, b->col_off); b->col_off = 0; }
+    if (b->z_off) { CALL(RAGE_GL_FREE, 1, 0, b->z_off); b->z_off = 0; }
+}
 int rgb_scissor(rgb_t *b, int l, int r, int t, int bt)
 { return (int)CALL(RAGE_GL_SET_SCISSOR, 4, 0, (uint32_t)l, (uint32_t)r, (uint32_t)t, (uint32_t)bt); }
 
@@ -76,6 +85,7 @@ int rgb_flush(rgb_t *b, const m64_cmdbuf *cb)
 }
 
 int rgb_fill(rgb_t *b, int x, int y, int w, int h, uint32_t c) { return (int)CALL(RAGE_GL_FILL, 5, 0, (uint32_t)x, (uint32_t)y, (uint32_t)w, (uint32_t)h, c); }
+int rgb_clear_z(rgb_t *b, uint32_t v) { return (int)CALL(RAGE_GL_CLEAR_Z, 1, 0, v); }
 int rgb_fence(rgb_t *b) { uint32_t done; return (int)CALL(RAGE_GL_FENCE, 1, 1, b->fence, &done); }
 int rgb_present(rgb_t *b, int sx, int sy, int w, int h, int dx, int dy) { return (int)CALL(RAGE_GL_PRESENT, 6, 0, (uint32_t)sx, (uint32_t)sy, (uint32_t)w, (uint32_t)h, (uint32_t)dx, (uint32_t)dy); }
 int rgb_tex_alloc(rgb_t *b, uint32_t bytes, uint32_t *off) { return (int)CALL(RAGE_GL_ALLOC, 2, 1, (bytes + 4095u) & ~4095u, 4096u, off); }

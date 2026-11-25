@@ -29,6 +29,10 @@ int  rgb_scissor(rgb_t *b, int l, int r, int t, int bt);
  * width) are routed to the matching kernel calls instead of being written; anything else not on the allow-list is counted in b->dropped. */
 int  rgb_flush(rgb_t *b, const m64_cmdbuf *cb);
 int  rgb_fill(rgb_t *b, int x, int y, int w, int h, uint32_t rgb565);
+uint32_t rgb_gen(rgb_t *b);                                         /* current display generation (odd = mode change in progress) */
+int  rgb_display(rgb_t *b, uint32_t *w, uint32_t *h, uint32_t *bpp);   /* live scanout size and depth */
+void rgb_release(rgb_t *b);                                         /* free the colour and Z blocks */
+int  rgb_clear_z(rgb_t *b, uint32_t value);                        /* fill the bound Z buffer */
 int  rgb_fence(rgb_t *b);                                          /* wait for everything submitted */
 int  rgb_present(rgb_t *b, int sx, int sy, int w, int h, int dx, int dy);
 int  rgb_tex_alloc(rgb_t *b, uint32_t bytes, uint32_t *off);

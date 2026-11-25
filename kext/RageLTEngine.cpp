@@ -210,6 +210,23 @@ IOReturn RageLTDevice::submitBatch(uint32_t owner, const uint32_t *pairs, uint32
     return rc;
 }
 
+/* Z clear: the Z buffer is 16 bits per pixel with the target's size and pitch, so it is an RGB565-width solid fill of the bound Z block. */
+IOReturn RageLTDevice::clearZ(uint32_t owner, uint32_t value)
+{
+    struct rage_ctx c; IOReturn rc; uint32_t seq;
+    if (!fEngineLive || (fModeGen & 1u)) return kIOReturnNotReady;
+    IOLockLock(fLock);
+    { struct rage_ctx *p = ctxFor(owner, false); if (!p || !p->z_set || !p->tgt_bpp) { IOLockUnlock(fLock); return kIOReturnNotReady; } c = *p; }
+    if (idleWait()) { IOLockUnlock(fLock); return kIOReturnTimeout; }
+    rc = (IOReturn)eng_fill16(fRegs, c.z_off, c.z_pitch, 0, 0, c.tgt_w, c.tgt_h, value & 0xffffu,
+                              ((c.tgt_w - 1u) << 16), ((c.tgt_h - 1u) << 16), 3u);
+    if (rc) { IOLockUnlock(fLock); return kIOReturnTimeout; }
+    seq = ++fFenceSubmitted;
+    rc = waitFence(seq);
+    IOLockUnlock(fLock);
+    return rc;
+}
+
 IOReturn RageLTDevice::fillRect(uint32_t owner, int32_t x, int32_t y, int32_t w, int32_t h, uint32_t color565)
 {
     struct rage_ctx c; IOReturn rc; uint32_t seq; int32_t x1, y1;
