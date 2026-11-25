@@ -80,7 +80,7 @@ static void fl(void) { mach64_flush_batch(ctx); rgb_fence(&P->rb); }
 /* a clean frame the test owns: colour 0, stencil 0, depth far, no deferred clears */
 static void zs_begin(void)
 {
-    default_state(); g_endframe = 0; clear_rt(0); P->z_clear_pending = 0; P->frame_new = 0;
+    default_state(); g_clear_pending = 0; g_endframe = 0; clear_rt(0); P->z_clear_pending = 0; P->frame_new = 0;
     mach64_zs_clear_stencil(ctx, 0); mach64_zs_clear_depth(ctx); model_clear(0);
     g32(0x63b4, 0x01010101u);
 }
@@ -342,9 +342,9 @@ static void t_stencil_clear(void)
         zs_end();
     }
     CHECK("stencil clear value reaches the plane from the chip, the CPU copy and the uniform state", bad == 0);
-    zs_begin(); g32(0x6334, 33); g32(0x308, 0x10); P->frame_new = 1;                                    /* a new frame whose glClear is flagged */
+    zs_begin(); g32(0x6334, 33); P->frame_new = 1; g_clear_pending = 1; sync();                                     /* a new frame whose glClear (slot 0x04, mask 0x4500) arrives */
     m.f[0].dp = m.f[1].dp = OPK; rect_m(&m, 5, 5, 6, 6, 0.0f, 0xffffffffu, 1); fl();
-    CHECK("a flagged glClear at frame start clears the stencil plane to glClearStencil", mach64_zs_peek(ctx, 0, 100, 100) == 33);
+    CHECK("a glClear at frame start clears the stencil plane to glClearStencil", mach64_zs_peek(ctx, 0, 100, 100) == 33);
     g32(0x6334, 0); zs_end();
 }
 

@@ -166,11 +166,10 @@ void mach64_frame_start(gld_context *ctx)
     if (p->k2d_touched) { p->k2d_touched = 0; p->dirty |= MACH64_DIRTY_STATE; }       /* the idle-repaint thread blitted in between */
     if (p->frame_new) {
         if (!mach64_mode_check(ctx)) return;
-        /* GLEngine sends the driver no clear call; glClear only sets bit 4 of gli+0x308 until the frame's swap (measured: set by glClear with any mask
-         * incl. 0, absent when the app never clears, per frame).  Apps that accumulate (Flurry fades the last frame with a quad) must keep the colour
-         * buffer, so clear it only when the app asked to (or once for a new, undefined surface). */
-        if (p->init_clear || (mach64_gli_u32(ctx, 0x308) & 0x10u)) colour_clear(ctx);
-        if (p->init_clear || (mach64_gli_u32(ctx, 0x308) & 0x10u)) mach64_zs_clear_stencil(ctx, mach64_gli_u32(ctx, 0x6334));   /* glClear also owes the stencil plane */
+        /* glClear reaches the driver through slot 0x04 (mach64_flush, a2 = the GL_*_BUFFER_BIT mask, found in GLEngine's glClear at 0x4530 which
+         * tail-calls ctx[0x78ac]); an app that never clears (Flurry fades the last frame with a quad) keeps its colour buffer, so the frame start
+         * only clears a new, undefined surface. */
+        if (p->init_clear) { colour_clear(ctx); mach64_zs_clear_stencil(ctx, mach64_gli_u32(ctx, 0x6334)); }
         p->init_clear = 0;
         p->z_clear_pending = 1;
         p->frame_new = 0;
@@ -343,8 +342,16 @@ int mach64_ctl00(gld_context *c, uint32_t a, uint32_t b, uint32_t d, uint32_t e,
 /* table[0x04] = the STATE flush: sync the app's depth state into Z_CNTL before the batch renders. */
 int mach64_flush(gld_context *ctx, uint32_t a2, uint32_t a3, uint32_t a4, uint32_t a5, uint32_t a6, uint32_t a7)
 {
-    (void)a2; (void)a3; (void)a4; (void)a5; (void)a6; (void)a7;
+    mach64_priv *p = MACH64_PRIV(ctx);
+    (void)a3; (void)a4; (void)a5; (void)a6; (void)a7;
     mach64_sync_depth_from_gli(ctx);
+    if ((a2 & 0x4500u) && p && p->attached) {
+        mach64_frame_start(ctx);                     /* arm the frame (mode check, undefined-surface clear) before the app's own clear */
+        if (!p->attached) return 0;
+        if (a2 & 0x4000u) colour_clear(ctx);
+        if (a2 & 0x0100u) { p->z_clear_pending = 0; if (p->rb.z_off) mach64_zs_clear_depth(ctx); else p->z_clear_pending = 1; }
+        if (a2 & 0x0400u) mach64_zs_clear_stencil(ctx, mach64_gli_u32(ctx, 0x6334));
+    }
     return 0;
 }
 

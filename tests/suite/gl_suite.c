@@ -61,8 +61,10 @@ static int isclr_mt(unsigned c, int r, int g, int b) { return near20(ch(c, 16), 
 
 static void clear_rt(unsigned argb) { mach64_flush_batch(ctx); rgb_fill(&P->rb, 0, 0, (int)P->fb_w, (int)P->fb_h, to565(argb)); P->frame_new = 0; P->z_clear_pending = 1; P->dirty |= MACH64_DIRTY_STATE; }   /* the test owns the colour contents; a new frame still owes its Z clear */
 
+static int g_clear_pending;
 static void default_state(void)
 {
+    g_clear_pending = 1;                     /* each test starts with the app's glClear: the next sync() delivers it through slot 0x04 */
     memset(gli + 0x6200, 0, 0x700);
     memset(gli + 0x63b4, 1, 4);              /* glColorMask all on */
     g32(0x6708, 1);                          /* GL_SMOOTH */
@@ -91,14 +93,14 @@ static void sync(void)
     static uint32_t info[16];
     gldUpdateDispatch(ctx, table, (uint32_t)(uintptr_t)info);
     { typedef int (*fl_fn)(gld_context *, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t);
-      fl_fn f = *(fl_fn *)(table + 0x04); if (f) f(ctx, 0, 0, 0, 0, 0, 0); }
+      fl_fn f = *(fl_fn *)(table + 0x04); if (!f) f = (fl_fn)mach64_flush; /* the suite never runs gldInitDispatch, which installs slot 0x04 */ if (f) f(ctx, g_clear_pending ? 0x4500u : 0, 0, 0, 0, 0, 0); g_clear_pending = 0; }
 }
 typedef void (*rc_fn)(gld_context *, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t);
 /* a real frame ends in dispatch slot 0x60 (GLEngine's once-per-frame render control): flushes the batch (ONE drain) then presents */
 static void endframe(void)
 {
     rc_fn f = *(rc_fn *)(table + 0x60); if (f) f(ctx, 0, 0, 0, 0, 0);
-    g32(0x308, 0x10);         /* GLEngine sets this bit when the app calls glClear and resets it at the swap; the suite's frames all clear, so re-arm it */
+    g_clear_pending = 1; g32(0x308, 0x10);         /* GLEngine sets this bit when the app calls glClear and resets it at the swap; the suite's frames all clear, so re-arm it */
     rgb_fence(&P->rb);        /* the kernel serialises: the next kernel call (readback) waits for the engine anyway; the fence also covers the present */
 }
 static int g_endframe = 1;   /* 0 = leave the frame open so several primitives share one frame (one clear, one Z buffer) */
