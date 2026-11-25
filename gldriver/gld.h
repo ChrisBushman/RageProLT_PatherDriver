@@ -113,6 +113,7 @@ typedef struct {
     uint32_t   z_clear_pending;
     uint32_t   mode_gen;           /* display generation the surface was built for */
     uint32_t   attached;           /* a surface exists */
+    uint32_t   tex_off;            /* bound texture VRAM offset */
     uint32_t   tex_w, tex_h, tex2_w, tex2_h;   /* bound texture sizes (texel inset) */
     const void *tex_slot;
     int        tex_lvl;

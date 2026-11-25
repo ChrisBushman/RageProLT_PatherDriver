@@ -43,6 +43,7 @@ int main(void)
     *(uint32_t *)(gli + 0x7898) = (uint32_t)(uintptr_t)ctx;
     *(uint32_t *)((unsigned char *)ctx + 0x10) = (uint32_t)(uintptr_t)gli + 0x3610;
     { float f = 1.0f; memcpy(gli + 0x6630, &f, 4); memcpy(gli + 0x6394, &f, 4); }
+    memset(gli + 0x63b4, 1, 4);   /* glColorMask all on */
     *(uint32_t *)(gli + 0x6708) = 1; *(uint32_t *)(gli + 0x633c) = 0x0201u << 16;
     { float cc[4] = { 0.f, 0.f, 1.f, 1.f }; memcpy(gli + 0x6320, cc, 16); }   /* clear colour blue */
     gldUpdateDispatch(ctx, table, (uint32_t)(uintptr_t)info);

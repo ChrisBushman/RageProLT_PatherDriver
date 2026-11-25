@@ -38,6 +38,7 @@ int  rgb_present(rgb_t *b, int sx, int sy, int w, int h, int dx, int dy);
 int  rgb_tex_alloc(rgb_t *b, uint32_t bytes, uint32_t *off);
 int  rgb_tex_free(rgb_t *b, uint32_t off);
 int  rgb_upload(rgb_t *b, uint32_t off, const void *data, uint32_t len, int swap16);   /* copies through the kernel (validated span, drains the engine first) */
+int  rgb_upload2(rgb_t *b, uint32_t off, const void *data, uint32_t len, uint32_t xfer_flags);   /* RAGE_XFER_* flags: 1 swap16, 2 swap32 */
 int  rgb_readback(rgb_t *b, uint32_t off, void *data, uint32_t len);
 
 #endif

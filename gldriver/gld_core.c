@@ -9,6 +9,8 @@
 #include "gld.h"
 
 #define GLI_CLEAR_COLOR 0x6320
+extern uint32_t mach64_batch_gen;
+extern void mach64_tex_invalidate_all(void);
 
 /* ---- geometry -------------------------------------------------------- */
 /* post-T&L float vertex -> hardware m64_vertex.  X/Y in 2 sub-pixel bits (exact integer conversion), colour/depth as in the old driver.
@@ -123,6 +125,7 @@ int mach64_mode_check(gld_context *ctx)
     if (g != p->mode_gen) {
         p->batch.n = 0;                         /* anything queued targeted the old surface */
         p->rb.col_off = p->rb.z_off = 0;        /* the kernel dropped them with the old mode */
+        mach64_tex_invalidate_all();
         if (mach64_build_surface(ctx)) return 0;
     }
     return 1;
@@ -133,6 +136,7 @@ void mach64_flush_batch(gld_context *ctx)
 {
     mach64_priv *p = MACH64_PRIV(ctx);
     if (!p || !p->batch.buf || p->batch.n == 0) return;
+    mach64_batch_gen++;
     rgb_flush(&p->rb, &p->batch);
     m64_cb_init(&p->batch, p->batchbuf, GLD_BATCH_DWORDS);
     p->dirty |= MACH64_DIRTY_STATE;          /* the next batch re-emits the render state */
