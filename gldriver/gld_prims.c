@@ -380,8 +380,21 @@ void mach64_render_tri_fan(gld_context *ctx, const void *v, uint32_t n)
 void mach64_render_tri_fan_slot(gld_context *ctx, const void *apex,
                                 const void *perim, uint32_t m)
 {
-    (void)perim;   /* == apex + one vertex stride; array is contiguous from apex */
-    mach64_render_tri_fan(ctx, apex, m + 1);
+    /* The perimeter array is NOT always directly after the apex: GLEngine's 16-gons (Chess rook tops) have it at apex + 2 strides, so the old
+     * "contiguous from apex" reading started on the wrong vertex and dropped the last one (a missing wedge).  Use the pointer we are given. */
+    uint32_t i;
+    PRIM_SANE(m);
+    mach64_sync_depth_from_gli(ctx);
+    mach64_bind_texture(ctx);
+    if (m < 2 || !apex || !perim) return;
+    {   m64_vertex a, q[2]; float fb_h = FBH_OF(ctx);
+        mach64_read_vertex(apex, &a, fb_h);
+        mach64_read_vertex(perim, &q[0], fb_h);
+        for (i = 1; i < m; i++) {
+            m64_vertex *b = &q[(i - 1) & 1], *c = &q[i & 1];
+            mach64_read_vertex(VTX(perim, i), c, fb_h);
+            emit_tri_rv(ctx, &a, b, c, apex, VTX(perim, i - 1), VTX(perim, i));
+        } }
 }
 
 void mach64_render_polygon(gld_context *ctx, const void *v, uint32_t n)
