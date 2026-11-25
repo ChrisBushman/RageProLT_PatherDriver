@@ -77,7 +77,7 @@ int rgb_flush(rgb_t *b, const m64_cmdbuf *cb)
     while (np && !rc) {                                                                  /* kernel cap 8192 pairs per batch */
         uint32_t n = np > 8000u ? 8000u : np;
         rc = (int)CALL(RAGE_GL_SUBMIT, 2, 0, (uint32_t)(uintptr_t)p, n);
-        if (!rc) b->fence++;
+        if (!rc) b->fence++; else b->last_err = rc;
         np -= n; p += 2u * n;
     }
     free(base);
@@ -92,4 +92,5 @@ int rgb_tex_alloc(rgb_t *b, uint32_t bytes, uint32_t *off) { return (int)CALL(RA
 int rgb_tex_free(rgb_t *b, uint32_t off) { return (int)CALL(RAGE_GL_FREE, 1, 0, off); }
 int rgb_upload(rgb_t *b, uint32_t off, const void *d, uint32_t len, int swap16) { return (int)CALL(RAGE_GL_VRAM_WRITE, 4, 0, off, (uint32_t)(uintptr_t)d, len, swap16 ? RAGE_XFER_SWAP16 : 0u); }
 int rgb_upload2(rgb_t *b, uint32_t off, const void *d, uint32_t len, uint32_t fl) { return (int)CALL(RAGE_GL_VRAM_WRITE, 4, 0, off, (uint32_t)(uintptr_t)d, len, fl); }
+int rgb_readback2(rgb_t *b, uint32_t off, void *d, uint32_t len, uint32_t fl) { return (int)CALL(RAGE_GL_VRAM_READ, 4, 0, off, (uint32_t)(uintptr_t)d, len, fl); }
 int rgb_readback(rgb_t *b, uint32_t off, void *d, uint32_t len) { return (int)CALL(RAGE_GL_VRAM_READ, 4, 0, off, (uint32_t)(uintptr_t)d, len, 0u); }

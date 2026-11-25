@@ -19,6 +19,7 @@ typedef struct {
     uint32_t features, flags;
     uint32_t dropped;             /* register writes of a stream the kernel owns and the bundle therefore did not forward (statistics) */
     uint32_t fence;               /* last submitted sequence */
+    int      last_err;            /* last non-zero return of a submit (diagnostic) */
 } rgb_t;
 
 int  rgb_open(rgb_t *b);                                           /* 0 or an IOKit error */
@@ -39,6 +40,7 @@ int  rgb_tex_alloc(rgb_t *b, uint32_t bytes, uint32_t *off);
 int  rgb_tex_free(rgb_t *b, uint32_t off);
 int  rgb_upload(rgb_t *b, uint32_t off, const void *data, uint32_t len, int swap16);   /* copies through the kernel (validated span, drains the engine first) */
 int  rgb_upload2(rgb_t *b, uint32_t off, const void *data, uint32_t len, uint32_t xfer_flags);   /* RAGE_XFER_* flags: 1 swap16, 2 swap32 */
+int  rgb_readback2(rgb_t *b, uint32_t off, void *data, uint32_t len, uint32_t xfer_flags);
 int  rgb_readback(rgb_t *b, uint32_t off, void *data, uint32_t len);
 
 #endif

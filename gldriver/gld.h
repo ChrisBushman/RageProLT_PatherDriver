@@ -136,6 +136,8 @@ void     mach64_flush_batch(gld_context *ctx);
 void     mach64_sync_depth_from_gli(gld_context *ctx);
 uint32_t mach64_gli_u32(gld_context *ctx, uint32_t off);
 void     mach64_frame_start(gld_context *ctx);
+void     mach64_clear_color(gld_context *ctx);
+void     mach64_clear_zbuffer(gld_context *ctx);
 void     mach64_present(gld_context *ctx);
 int      mach64_mode_check(gld_context *ctx);
 int      mach64_build_surface(gld_context *ctx);

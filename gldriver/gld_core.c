@@ -11,6 +11,7 @@
 #define GLI_CLEAR_COLOR 0x6320
 extern uint32_t mach64_batch_gen;
 extern void mach64_tex_invalidate_all(void);
+extern void mach64_tex_ctx_gone(rgb_t *rb);
 
 /* ---- geometry -------------------------------------------------------- */
 /* post-T&L float vertex -> hardware m64_vertex.  X/Y in 2 sub-pixel bits (exact integer conversion), colour/depth as in the old driver.
@@ -154,6 +155,17 @@ static void colour_clear(gld_context *ctx)
     }
     mach64_flush_batch(ctx);
     rgb_fill(&p->rb, 0, 0, (int)p->fb_w, (int)p->fb_h, c565);
+    p->dirty |= MACH64_DIRTY_STATE;                /* the kernel fill reprogrammed the engine for 2D */
+}
+
+void mach64_clear_color(gld_context *ctx) { colour_clear(ctx); }
+void mach64_clear_zbuffer(gld_context *ctx)
+{
+    mach64_priv *p = MACH64_PRIV(ctx);
+    if (!p->rb.z_off) return;
+    mach64_flush_batch(ctx);
+    rgb_clear_z(&p->rb, 0xffffu);
+    p->dirty |= MACH64_DIRTY_STATE;
 }
 
 /* The deferred per-frame clear (armed by frame_new; GLEngine dispatches no clear entry point for our surface).  Colour on the frame's first draw;
@@ -170,6 +182,7 @@ void mach64_frame_start(gld_context *ctx)
     if (p->z_clear_pending && p->rb.z_off && (p->hw.z_cntl & MACH64_Z_EN)) {
         mach64_flush_batch(ctx);
         rgb_clear_z(&p->rb, 0xffffu);
+        p->dirty |= MACH64_DIRTY_STATE;
         p->z_clear_pending = 0;
     }
 }
@@ -215,6 +228,7 @@ void mach64_present(gld_context *ctx)
     mach64_flush_batch(ctx);
     if (!mach64_mode_check(ctx)) return;
     rgb_present(&p->rb, 0, 0, (int)p->fb_w, (int)p->fb_h, (int)p->win_x, (int)p->win_y);
+    p->dirty |= MACH64_DIRTY_STATE;                /* the kernel blit reprogrammed the engine for 2D */
 }
 
 int gldFlush(gld_context *ctx)

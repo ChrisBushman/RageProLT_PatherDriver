@@ -8,6 +8,7 @@
 #include "gld.h"
 
 #define MACH64_RENDERER_ID  0x00002540
+extern void mach64_tex_ctx_gone(rgb_t *rb);
 
 int gldGetRendererInfo(gld_renderer_info *out, uint32_t renderer_mask)
 {
@@ -102,6 +103,7 @@ int gldDestroyContext(gld_context *ctx)
     if (p) {
         mach64_flush_batch(ctx);
         rgb_fence(&p->rb);
+        mach64_tex_ctx_gone(&p->rb);
         rgb_release(&p->rb);
         rgb_close(&p->rb);
         free(p);

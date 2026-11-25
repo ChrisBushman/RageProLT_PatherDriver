@@ -37,6 +37,7 @@ typedef struct {
     uint32_t h1, h2, hlen;                 /* content hash of the source image(s) at the last upload: an unchanged re-upload is skipped */
     uint32_t gen;                          /* mach64_batch_gen when last bound: still referenced by the pending (unsubmitted) batch if == current */
     void    *texobj;                       /* GLEngine texobj, for re-upload after eviction */
+    rgb_t   *owner;                        /* the context connection that owns the kernel allocation (0 = none) */
 } mach64_tex_slot;
 static mach64_tex_slot g_slots[MACH64_TEX_SLOTS];
 uint32_t mach64_batch_gen = 1;   /* bumped by every real submit; slots stamp the generation they were last bound in */
@@ -45,29 +46,34 @@ static uint32_t        g_tick = 0;
 static uint32_t        g_protect[2] = { 0, 0 };
 static uint32_t        g_nevict = 0;
 
-/* ---- texture VRAM: the kernel allocator, one process-wide connection (offsets are global; the engine reads any offset a batch names) ---- */
-static rgb_t g_trb; static int g_trb_ok;
-static int tex_conn(void)
-{
-    if (!g_trb_ok) { if (rgb_open(&g_trb)) return 0; g_trb_ok = 1; }
-    return 1;
-}
+/* ---- texture VRAM: the kernel allocator.  A block belongs to the context connection that allocated it (the kernel validates TEX offsets against the
+ * owner), so a texture is resident for ONE context at a time: a draw from another context re-uploads it into that context's own block. ---- */
+static rgb_t *g_cur;                       /* the connection of the context being served */
+static int tex_conn(void) { return g_cur != 0; }
 static uint32_t heap_alloc(uint32_t size)
 {
     uint32_t off = 0;
-    if (!tex_conn()) return 0;
-    if (rgb_tex_alloc(&g_trb, size, &off)) return 0;
+    if (!g_cur) return 0;
+    if (rgb_tex_alloc(g_cur, size, &off)) return 0;
     return off;
 }
-static void heap_free(uint32_t off, uint32_t size) { (void)size; if (off && g_trb_ok) rgb_tex_free(&g_trb, off); }
+static void heap_free(rgb_t *owner, uint32_t off) { if (off && owner) rgb_tex_free(owner, off); }
+
+/* a context is going away: the kernel frees its blocks; its textures become non-resident (key + texobj kept) */
+void mach64_tex_ctx_gone(rgb_t *rb)
+{
+    int i;
+    for (i = 0; i < MACH64_TEX_SLOTS; i++)
+        if (g_slots[i].key && g_slots[i].owner == rb) { g_slots[i].off = 0; g_slots[i].rsize = 0; g_slots[i].owner = 0; g_slots[i].h1 = g_slots[i].h2 = g_slots[i].hlen = 0; }
+    if (g_cur == rb) g_cur = 0;
+}
 
 /* A display mode change dropped the kernel's allocations: every resident texture is evicted (key + texobj kept) and re-uploads on its next bind. */
 void mach64_tex_invalidate_all(void)
 {
     int i;
     for (i = 0; i < MACH64_TEX_SLOTS; i++)
-        if (g_slots[i].key) { g_slots[i].off = 0; g_slots[i].rsize = 0; g_slots[i].h1 = g_slots[i].h2 = g_slots[i].hlen = 0; }
-    if (g_trb_ok) { rgb_close(&g_trb); g_trb_ok = 0; }
+        if (g_slots[i].key) { heap_free(g_slots[i].owner, g_slots[i].off); g_slots[i].off = 0; g_slots[i].rsize = 0; g_slots[i].owner = 0; g_slots[i].h1 = g_slots[i].h2 = g_slots[i].hlen = 0; }
 }
 
 static void           *g_pending[16];   /* texobjs image-dirtied, to upload next draw */
@@ -97,8 +103,8 @@ static mach64_tex_slot *slot_alloc_locked(uint32_t key, uint32_t w, uint32_t h, 
     uint32_t off;
     mach64_tex_slot *s = slot_find(key);
     if (s) {
-        if (s->rsize >= sz) { s->w = w; s->h = h; return s; }  /* still fits */
-        heap_free(s->off, s->rsize);                           /* grew: reclaim */
+        if (s->rsize >= sz && s->owner == g_cur) { s->w = w; s->h = h; return s; }  /* still fits, and ours */
+        heap_free(s->owner, s->off); s->off = 0; s->rsize = 0; s->owner = 0;       /* grew or another context's: reclaim */
     } else {
         int i;
         for (i = 0; i < MACH64_TEX_SLOTS; i++) if (!g_slots[i].key) { s = &g_slots[i]; break; }
@@ -117,11 +123,11 @@ static mach64_tex_slot *slot_alloc_locked(uint32_t key, uint32_t w, uint32_t h, 
         }
         if (!v) break;
         if (v->gen == mach64_batch_gen) g_evict_used = 1;
-        heap_free(v->off, v->rsize); v->off = 0; v->rsize = 0; g_nevict++;
+        heap_free(v->owner, v->off); v->off = 0; v->rsize = 0; v->owner = 0; g_nevict++;
         off = heap_alloc(sz);
     }
     if (!off) { GLD_TRACE("tex: heap alloc FAILED %u bytes (heap 0x%x-0x%x next 0x%x)\n", sz, g_heap_base, g_heap_end, g_heap_next); if (s->key != key) s->key = 0; return 0; }
-    s->key = key; s->off = off; s->w = w; s->h = h; s->rsize = sz;
+    s->key = key; s->off = off; s->w = w; s->h = h; s->rsize = sz; s->owner = g_cur;
     return s;
 }
 
@@ -163,7 +169,7 @@ void mach64_texture_deleted(void *texobj)
     mach64_tex_slot *s;
     TEX_LOCK();
     s = slot_find(tex_key(texobj));
-    if (s) { heap_free(s->off, s->rsize); s->key = 0; }   /* reclaim VRAM + slot */
+    if (s) { heap_free(s->owner, s->off); s->key = 0; s->owner = 0; s->rsize = 0; }   /* reclaim VRAM + slot */
     TEX_UNLOCK();
 }
 
@@ -235,7 +241,7 @@ static int tex_upload_image(uint32_t dst_off, uint32_t w, uint32_t h, const unsi
     else for (i = 0; i < n; i++) buf[i] = src[i];
     while (done < bytes && !rc) {
         uint32_t c = bytes - done; if (c > 0x80000u) c = 0x80000u;
-        rc = rgb_upload2(&g_trb, dst_off + done, buf + done, c, flags);
+        rc = rgb_upload2(g_cur, dst_off + done, buf + done, c, flags);
         done += c;
     }
     free(buf);
@@ -265,6 +271,7 @@ static uint32_t tex_src_bytes(uint32_t w, uint32_t h, uint16_t fmt, uint16_t typ
 static int mach64_upload(gld_context *ctx, void *texobj)
 {
     mach64_priv *p = MACH64_PRIV(ctx);
+    g_cur = &p->rb;
     const unsigned char *t = (const unsigned char *)texobj;
     struct { uint32_t w, h, src, fmt, type, bytes; } lvl[12];
     uint32_t state, base_lod, total, cur, hwfmt, bpt;
@@ -302,7 +309,7 @@ static int mach64_upload(gld_context *ctx, void *texobj)
                 tex_hash((const unsigned char *)(uintptr_t)lvl[k].src, nb, &a1, &a2); h1 = (h1 * 31u) ^ a1; h2 = (h2 * 31u) ^ a2; hl += nb;
             }
             TEX_LOCK(); ex = slot_find(tex_key(texobj));
-            if (ex && ex->rsize && ex->hlen == hl && ex->h1 == h1 && ex->h2 == h2 && ex->w == lvl[0].w && ex->h == lvl[0].h && ex->nlevels == nlevels) {
+            if (ex && ex->rsize && ex->owner == g_cur && ex->hlen == hl && ex->h1 == h1 && ex->h2 == h2 && ex->w == lvl[0].w && ex->h == lvl[0].h && ex->nlevels == nlevels) {
                 ex->texobj = texobj; ex->tick = ++g_tick; TEX_UNLOCK();
                 return 1;
             }
@@ -318,7 +325,7 @@ static int mach64_upload(gld_context *ctx, void *texobj)
         int alpha0 = (f0 == 0x1908u || f0 == 0x1906u || f0 == 0x190Au || f0 == 0x8049u);
         int attempt;
         hwfmt = 6u; bpt = 4u; slot = 0;
-        { mach64_tex_slot *pre; TEX_LOCK(); pre = slot_find(tex_key(texobj)); pre_used = (pre && pre->rsize && pre->gen == mach64_batch_gen); TEX_UNLOCK(); }
+        { mach64_tex_slot *pre; TEX_LOCK(); pre = slot_find(tex_key(texobj)); pre_used = (pre && pre->rsize && pre->owner == g_cur && pre->gen == mach64_batch_gen); TEX_UNLOCK(); }
         if (lvl[0].w >= 2) {
             if (t0 == 0x8363u) { hwfmt = 4u; bpt = 2u; }
             else if (t0 == 0x8033u) { hwfmt = 15u; bpt = 2u; }
@@ -618,6 +625,7 @@ static uint32_t mt_cntl(const mach64_tex_slot *b2)
 int mach64_bind_texture(gld_context *ctx)
 {
     mach64_priv *p = MACH64_PRIV(ctx);
+    g_cur = &p->rb;
     m64_state *st = &p->hw;
     mach64_tex_slot *bound, *bound2;
     /* The textures this draw will use must survive any eviction triggered by an upload below. */
@@ -740,11 +748,11 @@ int mach64_bind_texture(gld_context *ctx)
                     if (last_sl[u] && last_sl[u]->key == key) ub[u] = last_sl[u];
                     else { TEX_LOCK(); ub[u] = slot_find(key); TEX_UNLOCK(); last_sl[u] = ub[u]; }   /* `bound` is this thread's own bound texture */
                 }
-                if (ub[u] && !ub[u]->rsize && ub[u]->texobj) {           /* evicted: bring it back from GLEngine's copy */
+                if (ub[u] && (!ub[u]->rsize || ub[u]->owner != g_cur) && ub[u]->texobj) {           /* evicted: bring it back from GLEngine's copy */
                     mach64_upload(ctx, ub[u]->texobj);
                     TEX_LOCK(); ub[u] = slot_find(key); TEX_UNLOCK();
                 }
-                if (ub[u] && !ub[u]->rsize) ub[u] = 0;                   /* could not be made resident: draw untextured */
+                if (ub[u] && (!ub[u]->rsize || ub[u]->owner != g_cur)) ub[u] = 0;                   /* could not be made resident: draw untextured */
                 if (ub[u]) { ub[u]->tick = ++g_tick; ub[u]->gen = mach64_batch_gen; }
             }
         }
