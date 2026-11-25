@@ -165,7 +165,17 @@ void     mach64_init_state(mach64_priv *p);
 int      mach64_draw_triangle(gld_context *ctx, const m64_vertex *v0, const m64_vertex *v1, const m64_vertex *v2);
 void     mach64_flush_batch(gld_context *ctx);
 void     mach64_sync_depth_from_gli(gld_context *ctx);
-uint32_t mach64_gli_u32(gld_context *ctx, uint32_t off);
+/* Read a gli field (0 if the gli can't be located).  The cached-gli fast path is inline (the established SonicR-plugin fix, gld.h there): bind_texture / state sync read ~100 fields
+ * per primitive and the out-of-line call + re-validation per field was ~3% of the main thread in the race profile. */
+extern gld_context *g_gli_ctx; extern uint32_t g_gli_p10, g_gli_g;
+uint32_t mach64_gli_u32_slow(gld_context *ctx, uint32_t off);
+static inline __attribute__((always_inline)) uint32_t mach64_gli_u32(gld_context *ctx, uint32_t off)
+{
+    uint32_t g = g_gli_g;
+    if (g_gli_ctx == ctx && g_gli_p10 == *(const uint32_t *)((const char *)ctx + 0x10) && g && *(const uint32_t *)(uintptr_t)(g + 0x7898) == (uint32_t)(uintptr_t)ctx)
+        return *(const uint32_t *)(uintptr_t)(g + off);
+    return mach64_gli_u32_slow(ctx, off);
+}
 void mach64_signal_fence(gld_context *ctx, void *fence);
 void mach64_begin_query(gld_context *ctx, void *query);
 void mach64_end_query(gld_context *ctx);

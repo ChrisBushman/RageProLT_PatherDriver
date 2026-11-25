@@ -38,7 +38,7 @@ void mach64_pack_vertex(m64_vertex *out, float x, float y, float z, float w, uin
 
 /* ---- the gli (GLEngine's per-context state block) --------------------
  * ctx+0x10 points into it; the block is found by the back-pointer at +0x7898 (user space only, bounded). */
-static gld_context *g_gli_ctx; static uint32_t g_gli_p10, g_gli_g;
+gld_context *g_gli_ctx; uint32_t g_gli_p10, g_gli_g;
 void mach64_gli_forget(gld_context *ctx) { if (g_gli_ctx == ctx) { g_gli_ctx = 0; g_gli_g = 0; } }
 static uint32_t gli_find_slow(gld_context *ctx);
 static inline uint32_t gli_find(gld_context *ctx)
@@ -57,7 +57,7 @@ static uint32_t gli_find_slow(gld_context *ctx)
     }
     return 0;
 }
-uint32_t mach64_gli_u32(gld_context *ctx, uint32_t off)
+uint32_t mach64_gli_u32_slow(gld_context *ctx, uint32_t off)
 {
     uint32_t g = gli_find(ctx);
     return g ? *(const uint32_t *)(uintptr_t)(g + off) : 0;
