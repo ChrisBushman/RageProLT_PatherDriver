@@ -360,3 +360,39 @@ static void t_npot(void)
     CHECK("NPOT 6x5 repeat: left red, right green", isclr(px(50, 60), 255, 0, 0) && isclr(px(120, 60), 0, 255, 0));
     default_state(); sync(); clear_rt(0);
 }
+
+/* GL_TEXTURE_RECTANGLE_EXT (state word 0 target nibble 2): texel-unit coordinates over a padded power-of-two image */
+static void t_rect(void)
+{
+    static unsigned char d[10 * 6 * 3]; int x, y; void *t; unsigned char *st;
+    for (y = 0; y < 6; y++) for (x = 0; x < 10; x++) { unsigned char *q = d + (y * 10 + x) * 3; q[0] = x < 5 ? 255 : 0; q[1] = x < 5 ? 0 : 255; q[2] = 0; }
+    t = mktex(10, 6, 0x1907, d, (0x812fu << 16) | 0x812fu, 0x2600, 0x2600); st = (unsigned char *)(uintptr_t)*(uint32_t *)((unsigned char *)t + 0x30); *(uint32_t *)st = 0x10020000u | 0x1907u;
+    default_state(); bindtex(t, GL_REPLACE_ENV); sync(); clear_rt(0);
+    tquad(20, 20, 120, 80, 0.0f, 0.0f, 10.0f, 6.0f, 0xffffffffu);                         /* s in texels, 0..10 over 100 px */
+    CHECK("rectangle texture: texel coordinates (left half red, right half green)", isclr(px(40, 50), 255, 0, 0) && isclr(px(100, 50), 0, 255, 0));
+    CHECK("rectangle texture: the boundary sits at s = 5 texels", isclr(px(66, 50), 255, 0, 0) && isclr(px(76, 50), 0, 255, 0));
+    default_state(); sync(); clear_rt(0);
+}
+
+/* cube map (state word 0 target nibble 0, faces at state + 0x9c + face * 0x12c): CPU-shaded from the six face images by the major axis of (s,t,r) */
+static void t_cube(void)
+{
+    static unsigned char face[6][4 * 4 * 3]; static const unsigned char col[6][3] = { { 255, 0, 0 }, { 0, 255, 0 }, { 0, 0, 255 }, { 255, 255, 0 }, { 0, 255, 255 }, { 255, 0, 255 } };
+    unsigned char *st = calloc(1, 0x900), *t = calloc(1, 0x40); int f, i; unsigned char *vb; (void)i;
+    for (f = 0; f < 6; f++) { for (i = 0; i < 16; i++) { face[f][i * 3] = col[f][0]; face[f][i * 3 + 1] = col[f][1]; face[f][i * 3 + 2] = col[f][2]; }
+        *(uint16_t *)(st + 0x9c + f * 0x12c) = 4; *(uint16_t *)(st + 0x9e + f * 0x12c) = 4; *(uint16_t *)(st + 0xa8 + f * 0x12c) = 0x1907; *(uint16_t *)(st + 0xaa + f * 0x12c) = 0x1401;
+        *(uint32_t *)(st + 0xac + f * 0x12c) = (uint32_t)(uintptr_t)face[f]; }
+    *(uint32_t *)st = 0x10000000u | 0x1907u; *(uint16_t *)(st + 0x18) = 0x2600; *(uint32_t *)(t + 0x30) = (uint32_t)(uintptr_t)st;
+    default_state(); g32(0x6748, 1u); g32(0x674c, GL_REPLACE_ENV << 16); g32(0x1573c, (uint32_t)(uintptr_t)t); sync(); clear_rt(0);
+    vb = VB(4);
+    V(VX(vb, 0), 20, 20, 0, 0xffffffffu); V(VX(vb, 1), 100, 20, 0, 0xffffffffu); V(VX(vb, 2), 100, 100, 0, 0xffffffffu); V(VX(vb, 3), 20, 100, 0, 0xffffffffu);
+#define CUBEDIR(a, b, c) do { for (i = 0; i < 4; i++) { float *tc = (float *)(VX(vb, i) + 0x80); tc[0] = (a); tc[1] = (b); tc[2] = (c); } clear_rt(0); SLOT(0x38)(ctx, vb, 4); endframe(); } while (0)
+    CUBEDIR(1.0f, 0.0f, 0.0f);
+    CHECK("cube map: a +X direction samples face 0 (red)", isclr(px(60, 60), 255, 0, 0));
+    CUBEDIR(0.0f, 0.0f, -1.0f);
+    CHECK("cube map: a -Z direction samples face 5 (magenta)", isclr(px(60, 60), 255, 0, 255));
+    CUBEDIR(0.0f, 1.0f, 0.2f);
+    CHECK("cube map: a +Y direction samples face 2 (blue)", isclr(px(60, 60), 0, 0, 255));
+#undef CUBEDIR
+    free(vb); g32(0x6748, 0u); g32(0x1573c, 0u); default_state(); sync(); clear_rt(0);
+}

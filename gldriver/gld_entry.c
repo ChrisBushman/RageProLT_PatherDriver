@@ -55,7 +55,7 @@ static void rage_fill_descriptor(gld_context *ctx)
             unsigned i; for (i = 0; i < sizeof bits; i++) dd[0x104 / 4 + bits[i] / 32] |= 1u << (bits[i] & 31);
         }
         *(uint16_t *)(uintptr_t)(descp + 0xb2) = 1024;
-        *(uint16_t *)(uintptr_t)(descp + 0xb4) = 1024; *(uint16_t *)(uintptr_t)(descp + 0xb6) = 1024;
+        *(uint16_t *)(uintptr_t)(descp + 0xb6) = 1024; *(uint16_t *)(uintptr_t)(descp + 0xb8) = 1024;
         *(uint16_t *)(uintptr_t)(descp + 0xac) = 2;
     }
 }
@@ -157,7 +157,7 @@ int gldAttachDrawable(gld_context *ctx, int type, void *drawable, uint32_t flags
                     /* GL_MAX_TEXTURE_UNITS: read as a halfword from descriptor+0xac
                      * (traced: GLEngine 0xb8204 -> lhz r0,0xac(gli[0x789c])).  We
                      * support one texture unit; advertise 1 (was 0). */
-                    *(uint16_t *)(uintptr_t)(descp + 0xb4) = 1024; *(uint16_t *)(uintptr_t)(descp + 0xb6) = 1024;
+                    *(uint16_t *)(uintptr_t)(descp + 0xb6) = 1024; *(uint16_t *)(uintptr_t)(descp + 0xb8) = 1024;
         *(uint16_t *)(uintptr_t)(descp + 0xac) = 2;
                 }
             }

@@ -43,6 +43,7 @@ typedef struct {
     uint32_t spec_argb; /* specular colour (0 if unused)                   */
     uint32_t argb;    /* primary colour (per-vertex, gouraud)              */
     int32_t  s2, t2, w2; /* SECONDARY texture S,T,W (float bits); emitted only when m64_state.multitex */
+    int32_t  r;       /* third texture coordinate (float bits; cube maps, CPU-shaded only: the emitter ignores it) */
 } m64_vertex;
 
 /* Register shadow: the full untextured-gouraud state we proved on hardware.

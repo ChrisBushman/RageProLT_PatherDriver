@@ -375,6 +375,16 @@ static uint32_t tex_sample(const m64_cpuenv *e, float u, float v)
         return out;
     }
 }
+static uint32_t cube_sample(const m64_cpuenv *e, float s, float t, float r)
+{
+    float as = s < 0.0f ? -s : s, at = t < 0.0f ? -t : t, ar = r < 0.0f ? -r : r, ma, sc, tc; int f; m64_cpuenv fe = *e;
+    if (as >= at && as >= ar) { ma = as; if (s >= 0.0f) { f = 0; sc = -r; tc = -t; } else { f = 1; sc = r; tc = -t; } }
+    else if (at >= ar)        { ma = at; if (t >= 0.0f) { f = 2; sc = s; tc = r; } else { f = 3; sc = s; tc = -r; } }
+    else                      { ma = ar; if (r >= 0.0f) { f = 4; sc = s; tc = -t; } else { f = 5; sc = -s; tc = -t; } }
+    if (ma == 0.0f) return 0;
+    fe.img = e->face[f];
+    return tex_sample(&fe, 0.5f * (sc / ma + 1.0f), 0.5f * (tc / ma + 1.0f));
+}
 static int sat255(int v) { return v < 0 ? 0 : v > 255 ? 255 : v; }
 static int env_arg(const m64_cpuenv *e, uint32_t src, uint32_t op, int ch, uint32_t cf, uint32_t ct)    /* ch 0..2 = R,G,B, 3 = A */
 {
@@ -488,7 +498,7 @@ int mach64_zs_cpu_draw(gld_context *ctx, const m64_vertex *va, const m64_vertex 
         if (minx < 0) minx = 0; if (miny < 0) miny = 0; if (maxx > W - 1) maxx = W - 1; if (maxy > Hh - 1) maxy = Hh - 1; }
     z->rn = 0;
     cbs.tex = 0;
-    if ((z->cb || z->envcpu) && maxy >= miny && (!p->hw.textured ? z->cb != 0 : (mach64_cpu_env(ctx, &cbs.env) != 0 && (cbs.tex = 1)))) {
+    if ((z->cb || z->envcpu) && maxy >= miny && ((!p->hw.textured && !mach64_tex_cube) ? z->cb != 0 : (mach64_cpu_env(ctx, &cbs.env) != 0 && (cbs.tex = 1)))) {
         mach64_flush_batch(ctx); cbw = mach64_cb_open(ctx, miny, maxy - miny + 1); cb_load(ctx, &cbs);
         { const m64_vertex *t = vb; vq[0] = va; vq[1] = (swapped ? vc : vb); vq[2] = (swapped ? t : vc); }
     }
@@ -525,7 +535,11 @@ int mach64_zs_cpu_draw(gld_context *ctx, const m64_vertex *va, const m64_vertex 
                                 tw = f0 * gld_flt((uint32_t)vq[0]->t) * gld_flt((uint32_t)vq[0]->w) + f1 * gld_flt((uint32_t)vq[1]->t) * gld_flt((uint32_t)vq[1]->w) + f2 * gld_flt((uint32_t)vq[2]->t) * gld_flt((uint32_t)vq[2]->w);
                                 ww = f0 * gld_flt((uint32_t)vq[0]->w) + f1 * gld_flt((uint32_t)vq[1]->w) + f2 * gld_flt((uint32_t)vq[2]->w);
                                 if (ww != 0.0f) { sw /= ww; tw /= ww; }
-                                out = env_apply(&cbs.env, out, tex_sample(&cbs.env, sw, tw));
+                                if (cbs.env.cube) {
+                                    float rw = f0 * gld_flt((uint32_t)vq[0]->r) * gld_flt((uint32_t)vq[0]->w) + f1 * gld_flt((uint32_t)vq[1]->r) * gld_flt((uint32_t)vq[1]->w) + f2 * gld_flt((uint32_t)vq[2]->r) * gld_flt((uint32_t)vq[2]->w);
+                                    if (ww != 0.0f) rw /= ww;
+                                    out = env_apply(&cbs.env, out, cube_sample(&cbs.env, sw, tw, rw));
+                                } else out = env_apply(&cbs.env, out, tex_sample(&cbs.env, sw, tw));
                             }
                             *dp = cbs.blend_on ? cb_blend(ctx, &cbs, out, *dp) : mach64_cb_pack(ctx, (out >> 16) & 255u, (out >> 8) & 255u, out & 255u); cb_any = 1;
                         }

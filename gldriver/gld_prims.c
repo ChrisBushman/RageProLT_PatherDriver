@@ -87,6 +87,7 @@ void mach64_read_vertex(const void *vp, m64_vertex *o, float fb_h)
         float rt = tw * rw * mach64_tex_mscale[1] + mach64_tex_mbias[1];
         __builtin_memcpy(&o->s, &rs, 4);
         __builtin_memcpy(&o->t, &rt, 4);
+        if (mach64_tex_cube) { float rr = *(const float *)(v + mach64_tex_vofs[0] + 8) * rw; __builtin_memcpy(&o->r, &rr, 4); }
     }
     /* Secondary texture unit (ARB_multitexture): same gli vertex, coordinates one unit stride (0x10) further on (+0x90/+0x94; the Rage128 driver
      * copies exactly these fields), un-premultiplied by the same 1/w.  The hardware has ONE W per vertex plus SECONDARY_W, both = 1/w. */

@@ -311,6 +311,7 @@ static unsigned count_nz(unsigned off) { unsigned n = 0, q; for (q = 0; q < W * 
 static void *mktex(int w, int h, unsigned fmt, const unsigned char *data, unsigned wrap, unsigned minf, unsigned magf)
 {
     unsigned char *st = calloc(1, 0x400), *t = calloc(1, 0x40), *r = st + 0x9c;
+    *(uint32_t *)st = 0x10030000u | 0x1907u;                         /* state word 0: target nibble 3 = 2D (2 = rectangle, 0 = cube map), as GLEngine writes it */
     *(uint32_t *)(st + 0x10) = wrap; *(uint16_t *)(st + 0x16) = (uint16_t)minf; *(uint16_t *)(st + 0x18) = (uint16_t)magf;
     *(uint16_t *)(r + 0) = (uint16_t)w; *(uint16_t *)(r + 2) = (uint16_t)h; *(uint16_t *)(r + 0xc) = (uint16_t)fmt; *(uint16_t *)(r + 0xe) = 0x1401;
     *(uint32_t *)(r + 0x10) = (uint32_t)(uintptr_t)data;
@@ -491,6 +492,7 @@ static void t_specular(void)
 static void *mktex_typed(int w, int h, unsigned fmt, unsigned type, const void *data)
 {
     unsigned char *st = calloc(1, 0x400), *t = calloc(1, 0x40), *r = st + 0x9c;
+    *(uint32_t *)st = 0x10030000u;
     *(uint32_t *)(st + 0x10) = (GL_REPEAT_ << 16) | GL_REPEAT_; *(uint16_t *)(st + 0x16) = 0x2600; *(uint16_t *)(st + 0x18) = 0x2600;
     *(uint16_t *)(r + 0) = (uint16_t)w; *(uint16_t *)(r + 2) = (uint16_t)h; *(uint16_t *)(r + 0xc) = (uint16_t)fmt; *(uint16_t *)(r + 0xe) = (uint16_t)type;
     *(uint32_t *)(r + 0x10) = (uint32_t)(uintptr_t)data; *(uint32_t *)(t + 0x30) = (uint32_t)(uintptr_t)st;
@@ -835,6 +837,7 @@ static void *mktex_mip(int nlev, unsigned minf, unsigned magf, unsigned char **b
 {
     static const unsigned char col[7][3] = { {255,0,0}, {0,255,0}, {0,0,255}, {255,255,255}, {255,255,0}, {0,255,255}, {255,0,255} };
     unsigned char *st = calloc(1, 0x400), *t = calloc(1, 0x40); int L, i, w = 64;
+    *(uint32_t *)st = 0x10030000u;
     *(uint32_t *)(st + 0x10) = (GL_CLAMP_E << 16) | GL_CLAMP_E; *(uint16_t *)(st + 0x16) = (uint16_t)minf; *(uint16_t *)(st + 0x18) = (uint16_t)magf;
     for (L = 0; L < nlev; L++, w >>= 1) {
         unsigned char *r = st + 0x9c + L * 0x14, *d = malloc((size_t)w * w * 3);
@@ -851,6 +854,7 @@ static void *mktex_mip_nonsq(unsigned minf, unsigned char **bufs)
 {
     static const unsigned char col[7][3] = { {255,0,0}, {0,255,0}, {0,0,255}, {255,255,255}, {255,255,0}, {0,255,255}, {255,0,255} };
     unsigned char *st = calloc(1, 0x400), *t = calloc(1, 0x40); int L, i, w = 64, h = 16;
+    *(uint32_t *)st = 0x10030000u;
     *(uint32_t *)(st + 0x10) = (GL_CLAMP_E << 16) | GL_CLAMP_E; *(uint16_t *)(st + 0x16) = (uint16_t)minf; *(uint16_t *)(st + 0x18) = 0x2600;
     for (L = 0; L < 7; L++, w = w > 1 ? w >> 1 : 1, h = h > 1 ? h >> 1 : 1) {
         unsigned char *r = st + 0x9c + L * 0x14, *d = malloc((size_t)w * h * 3);
@@ -1385,7 +1389,7 @@ static const struct { const char *name; void (*fn)(void); } TESTS[] = {
     {"stencil_raster_rule", t_stencil_raster_rule}, {"stencil_ops", t_stencil_ops}, {"stencil_funcs", t_stencil_funcs}, {"stencil_masks", t_stencil_masks},
     {"stencil_depth", t_stencil_depth}, {"stencil_volume", t_stencil_volume}, {"stencil_twoside", t_stencil_twoside}, {"stencil_watertight", t_stencil_watertight},
     {"stencil_agree", t_stencil_agree}, {"stencil_random", t_stencil_random}, {"stencil_persist", t_stencil_persist}, {"stencil_clear", t_stencil_clear}, {"stencil_scissor", t_stencil_scissor},
-    {"polymode", t_polymode}, {"polyoffset", t_polyoffset}, {"linestipple", t_linestipple}, {"smooth", t_smooth}, {"envadd", t_envadd}, {"query", t_query}, {"mirror", t_mirror}, {"wrapmodes", t_wrapmodes}, {"accum", t_accum}, {"cblend", t_cblend}, {"cputex", t_cputex}, {"s3tc", t_s3tc}, {"paletted", t_paletted}, {"copytexsub", t_copytexsub}, {"pointsprite", t_pointsprite}, {"npot", t_npot},
+    {"polymode", t_polymode}, {"polyoffset", t_polyoffset}, {"linestipple", t_linestipple}, {"smooth", t_smooth}, {"envadd", t_envadd}, {"query", t_query}, {"mirror", t_mirror}, {"wrapmodes", t_wrapmodes}, {"accum", t_accum}, {"cblend", t_cblend}, {"cputex", t_cputex}, {"s3tc", t_s3tc}, {"paletted", t_paletted}, {"copytexsub", t_copytexsub}, {"pointsprite", t_pointsprite}, {"npot", t_npot}, {"rect", t_rect}, {"cube", t_cube},
     {"gouraud", t_gouraud}, {"flat", t_flat}, {"colormask", t_colormask}, {"depth", t_depth}, {"blend", t_blend},
     {"alphatest", t_alphatest}, {"prims", t_prims}, {"pixelops", t_pixelops}, {"gourbig", t_gourbig}, {"clear", t_clear}, {"prims2", t_prims2}, {"fog", t_fog}, {"stipple", t_stipple}, {"logicop", t_logicop}, {"tex_replace", t_tex_replace}, {"multitex", t_multitex}, {"dstalpha", t_dstalpha}, {"texfmt8", t_texfmt8}, {"texfmt", t_texfmt}, {"texfmt_fallback", t_texfmt_fallback}, {"texfmt_mt", t_texfmt_mt}, {"specular", t_specular}, {"multitex_min", t_multitex_min}, {"tex_alpha", t_tex_alpha}, {"tex_wrap", t_tex_wrap}, {"tex_filter", t_tex_filter}, {"tex_alpha_edge", t_tex_alpha_edge}, {"tex_alpha_decal_probe", t_tex_alpha_decal_probe}, {"tex_alpha_bilinear", t_tex_alpha_bilinear}, {"tex_churn", t_tex_churn}, {"tex_highptr", t_tex_highptr}, {"tex_mip", t_tex_mip}, {"tex_mip_nonsq", t_tex_mip_nonsq}, {"tex_bit8", t_tex_bit8}, {"tex_lodbias", t_tex_lodbias}, {"tex_mip_prims", t_tex_mip_prims}, {"tex_mip_fog", t_tex_mip_fog}, {"tex_mip_gouraud", t_tex_mip_gouraud}, {"tex_hwmip", t_tex_hwmip}, {"tex_minlin", t_tex_minlin}, {"multictx", t_multictx}, 
 };

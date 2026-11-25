@@ -186,7 +186,7 @@ void     mach64_dispatch_render_ctl(gld_context *, uint32_t, uint32_t, uint32_t,
 /* gld_pixels.c / control slots */
 void mach64_ctl00(gld_context *, uint32_t op, float value);   /* table[0x00] = glAccum (GL_ACCUM 0x100, LOAD 0x101, RETURN 0x102, MULT 0x103, ADD 0x104) */
 void mach64_accum_clear(gld_context *);
-typedef struct { const uint32_t *img; int w, h, clamp_s, clamp_t, bil, has_a; uint32_t mode, rgbf, alf, src[3], asrc[3], op[3], aop[3]; int rscale, ascale, ec[4]; } m64_cpuenv;
+typedef struct { const uint32_t *img; int w, h, clamp_s, clamp_t, bil, has_a, cube; const uint32_t *face[6]; uint32_t mode, rgbf, alf, src[3], asrc[3], op[3], aop[3]; int rscale, ascale, ec[4]; } m64_cpuenv;
 int mach64_cpu_env(gld_context *, m64_cpuenv *);
 int mach64_env_needs_cpu(uint32_t gli);
 int mach64_copy_tex_sub(gld_context *, void *texobj, int face, uint32_t level, uint32_t xoff, uint32_t yoff, int zoff, uint32_t srcx, uint32_t srcy, int w, int h);
@@ -208,6 +208,7 @@ void mach64_texture_deleted(void *texobj);
 int      mach64_bind_texture(gld_context *ctx);
 void     mach64_tex_select_lod(gld_context *ctx, float pix_area, float uv_area);
 extern float mach64_tex_mscale[2], mach64_tex_mbias[2];
+extern int mach64_tex_cube;
 extern int mach64_fog_on, mach64_spec_mode, mach64_flat_on, mach64_env_add;
 extern uint32_t mach64_tex_vofs[2];
 

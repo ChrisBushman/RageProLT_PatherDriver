@@ -31,7 +31,7 @@ void mach64_pack_vertex(m64_vertex *out, float x, float y, float z, float w, uin
     out->z   = (int32_t)((uint32_t)zi << 15);                            /* 17.15: 16-bit depth in [30:15] */
     out->w   = (int32_t)wb;
     out->s = out->t = 0;
-    out->s2 = out->t2 = out->w2 = 0;
+    out->s2 = out->t2 = out->w2 = 0; out->r = 0;
     out->spec_argb = 0;
     out->argb = argb;
 }
