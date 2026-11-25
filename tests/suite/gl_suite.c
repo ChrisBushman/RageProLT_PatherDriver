@@ -450,13 +450,13 @@ static void t_multitex_min(void)
 }
 
 /* ------------------------------------------------------------ separate specular
- * gli+0x6380 bit 0 = GL_SEPARATE_SPECULAR_COLOR; the secondary colour is R,G,B floats at vertex +0x40/+0x44/+0x48. */
+ * gli+0x6380 bit 0 = GL_SEPARATE_SPECULAR_COLOR; the secondary colour is R,G,B floats at vertex +0x50/+0x54/+0x58. */
 static void tquad_spec(int x0, int y0, int x1, int y1, unsigned argb, float sr, float sg, float sb, int textured)
 {
     unsigned char *vb = VB(4); int i; float S[4] = { 0, 1, 1, 0 }, T[4] = { 0, 0, 1, 1 };
     V(VX(vb, 0), x0, y0, 0, argb); V(VX(vb, 1), x1, y0, 0, argb); V(VX(vb, 2), x1, y1, 0, argb); V(VX(vb, 3), x0, y1, 0, argb);
     for (i = 0; i < 4; i++) {
-        memcpy(VX(vb, i) + 0x40, &sr, 4); memcpy(VX(vb, i) + 0x44, &sg, 4); memcpy(VX(vb, i) + 0x48, &sb, 4);
+        memcpy(VX(vb, i) + 0x50, &sr, 4); memcpy(VX(vb, i) + 0x54, &sg, 4); memcpy(VX(vb, i) + 0x58, &sb, 4);
         if (textured) { memcpy(VX(vb, i) + 0x80, &S[i], 4); memcpy(VX(vb, i) + 0x84, &T[i], 4); }
     }
     SLOT(0x38)(ctx, vb, 4); if (g_endframe) endframe(); free(vb);

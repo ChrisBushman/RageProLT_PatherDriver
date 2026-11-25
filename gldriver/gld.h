@@ -120,7 +120,18 @@ typedef struct {
     int        tex_lvl;
     uint32_t   tex_active;
     uint32_t   triangles;          /* statistics */
+    /* idle repaint (windowed only): WindowServer paints the window white when it is exposed; an app that is not drawing (Chess) never restores it, so a
+     * small asynchronous thread re-presents the last frame once the context has been idle for ~300 ms.  `volatile` counters only: nothing on the hot path. */
+    uint32_t   tsig[9], tsig_valid;/* texture sampler setup of the last emitted state (see mach64_draw_triangle) */
+    volatile uint32_t presents;    /* completed presents (activity together with `triangles`) */
+    volatile uint32_t k2d_touched; /* the thread's blit reprogrammed the engine: the next draw must re-emit the state */
+    volatile int rp_run;
+    int        rp_started;
+    unsigned long rp_thread;       /* pthread_t */
 } mach64_priv;
+
+void mach64_repaint_start(mach64_priv *p);
+void mach64_repaint_stop(mach64_priv *p);
 
 static __inline__ mach64_priv *MACH64_PRIV(gld_context *c) { return (mach64_priv *)c->backend; }
 #define M64_CBPP(p) 2u

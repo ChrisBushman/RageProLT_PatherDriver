@@ -6,6 +6,11 @@
  * by a kernel blit from the target to the scanout (rgb_present).  The kernel serialises: a batch returns without waiting, the next
  * kernel call waits for it.  All numeric work on vertices is integer (rage_vmath.h) -- single-float arithmetic only where noted.
  */
+#include <sys/time.h>
+#include <unistd.h>
+#include <pthread.h>
+#include <stdio.h>
+#include <stdlib.h>
 #include "gld.h"
 
 #define GLI_CLEAR_COLOR 0x6320
@@ -174,6 +179,7 @@ void mach64_clear_zbuffer(gld_context *ctx)
 void mach64_frame_start(gld_context *ctx)
 {
     mach64_priv *p = MACH64_PRIV(ctx);
+    if (p->k2d_touched) { p->k2d_touched = 0; p->dirty |= MACH64_DIRTY_STATE; }       /* the idle-repaint thread blitted in between */
     if (p->frame_new) {
         if (!mach64_mode_check(ctx)) return;
         /* GLEngine sends the driver no clear call; glClear only sets bit 4 of gli+0x308 until the frame's swap (measured: set by glClear with any mask
@@ -202,6 +208,16 @@ int mach64_draw_triangle(gld_context *ctx, const m64_vertex *v0, const m64_verte
     if (!p->batch.buf) m64_cb_init(&p->batch, p->batchbuf, GLD_BATCH_DWORDS);
     need = ((p->dirty & MACH64_DIRTY_STATE) ? 96u : 0u) + 64u;
     if (p->batch.n + need > GLD_BATCH_LIMIT) mach64_flush_batch(ctx);        /* a full buffer is a normal mid-frame flush now (no present semantics) */
+    if ((p->dirty & MACH64_DIRTY_STATE) && p->hw.textured) {
+        /* The engine reads the texture registers while the previous triangles are still being drawn: a texture offset/size/format/filter change inside a
+         * batch makes them sample the NEW texture (Chess board: every dark square drawn light).  Start a new submit whenever the sampler setup changes. */
+        uint32_t sig[9]; const m64_state *s = &p->hw; int i;
+        sig[0] = s->tex_0_off; sig[1] = s->tex_size_pitch; sig[2] = s->tex_fmt; sig[3] = s->tex_cntl; sig[4] = s->tex_scale_3d; sig[5] = s->tex2_off; sig[6] = s->tex2_size_pitch;
+        sig[7] = 0; for (i = 0; i < 11; i++) sig[7] = sig[7] * 31u + s->tex_mip_off[i];
+        sig[8] = (uint32_t)s->tex_mip;
+        if (p->batch.n && p->tsig_valid && __builtin_memcmp(sig, p->tsig, sizeof sig)) mach64_flush_batch(ctx);
+        __builtin_memcpy(p->tsig, sig, sizeof sig); p->tsig_valid = 1;
+    }
     if (p->dirty & MACH64_DIRTY_STATE) { m64_emit_state(&p->batch, &p->hw); p->dirty &= ~MACH64_DIRTY_STATE; }
     p->batch.multitex = p->hw.textured && p->hw.multitex;
     /* Normalise the perspective W so the triangle's largest is 1.0: S,T are raw and the engine computes interp(S*W)/interp(W), so a common scale leaves
@@ -226,29 +242,78 @@ int mach64_draw_triangle(gld_context *ctx, const m64_vertex *v0, const m64_verte
 
 /* ---- present --------------------------------------------------------- */
 /* Everything drawn so far -> the scanout: a kernel blit (clipped to the display) from the target at (0,0) to the window origin. */
+static const char *g_ptrace_fn = (const char *)1;
+static void ptrace_log(const mach64_priv *p, int n, short (*vr)[4])
+{
+    FILE *f = fopen(g_ptrace_fn, "a"); struct timeval tv; int i;
+    if (!f) return;
+    gettimeofday(&tv, 0);
+    fprintf(f, "%ld.%06d pid=%d win=%u/%u at %u,%u %ux%u rects=%d", (long)tv.tv_sec, (int)tv.tv_usec, (int)getpid(), p->cgs_win, p->cgs_surf, p->win_x, p->win_y, p->fb_w, p->fb_h, n);
+    for (i = 0; i < n && i < 4; i++) fprintf(f, " [%d,%d %dx%d]", vr[i][0], vr[i][1], vr[i][2], vr[i][3]);
+    fprintf(f, "\n"); fclose(f);
+}
+/* Blit the target to the scanout: only the part of a window that no window in front covers (CGS z-order), at the window's current position.
+ * Returns 1 if the kernel blit reprogrammed the engine. */
+static int present_rects(mach64_priv *p)
+{
+    if (g_ptrace_fn == (const char *)1) g_ptrace_fn = getenv("RAGE_PTRACE");        /* debug: RAGE_PTRACE=<file> logs every present (checked once) */
+    if (p->win_mode && p->cgs_win) {
+        int wx = 0, wy = 0, ww = 0, wh = 0, n, i; short vr[16][4];
+        if (mach64_cgs_resolve_bounds(p->cgs_win, p->cgs_surf, 0, &wx, &wy, &ww, &wh) && ww == (int)p->fb_w && wh == (int)p->fb_h) {
+            p->win_x = (uint32_t)wx; p->win_y = (uint32_t)wy;
+        }
+        n = mach64_cgs_visible_rects(p->cgs_win, p->cgs_surf, (int)p->win_x, (int)p->win_y, (int)p->fb_w, (int)p->fb_h, vr, 16);
+        if (g_ptrace_fn) ptrace_log(p, n, vr);
+        if (n == 0) return 0;                                         /* completely covered */
+        if (n > 0) {
+            for (i = 0; i < n; i++)
+                rgb_present(&p->rb, vr[i][0] - (int)p->win_x, vr[i][1] - (int)p->win_y, vr[i][2], vr[i][3], vr[i][0], vr[i][1]);
+            return 1;
+        }
+    }
+    rgb_present(&p->rb, 0, 0, (int)p->fb_w, (int)p->fb_h, (int)p->win_x, (int)p->win_y);
+    return 1;
+}
+
 void mach64_present(gld_context *ctx)
 {
     mach64_priv *p = MACH64_PRIV(ctx);
     if (!p || !p->attached) return;
     mach64_flush_batch(ctx);
     if (!mach64_mode_check(ctx)) return;
-    if (p->win_mode && p->cgs_win) {
-        /* a window: follow it (it may have moved) and copy only the part no window in front covers */
-        int wx = 0, wy = 0, ww = 0, wh = 0, n, i; short vr[16][4];
-        if (mach64_cgs_resolve_bounds(p->cgs_win, p->cgs_surf, 0, &wx, &wy, &ww, &wh) && ww == (int)p->fb_w && wh == (int)p->fb_h) {
-            p->win_x = (uint32_t)wx; p->win_y = (uint32_t)wy;
-        }
-        n = mach64_cgs_visible_rects(p->cgs_win, p->cgs_surf, (int)p->win_x, (int)p->win_y, (int)p->fb_w, (int)p->fb_h, vr, 16);
-        if (n == 0) return;                                           /* completely covered */
-        if (n > 0) {
-            for (i = 0; i < n; i++)
-                rgb_present(&p->rb, vr[i][0] - (int)p->win_x, vr[i][1] - (int)p->win_y, vr[i][2], vr[i][3], vr[i][0], vr[i][1]);
-            p->dirty |= MACH64_DIRTY_STATE;
-            return;
-        }
+    if (present_rects(p)) p->dirty |= MACH64_DIRTY_STATE;                /* the kernel blit reprogrammed the engine for 2D */
+    p->presents++;
+}
+
+/* The idle-repaint thread (see mach64_priv).  Every 100 ms: if the context did nothing for three ticks, copy the target again. */
+static void *repaint_thread(void *arg)
+{
+    mach64_priv *p = (mach64_priv *)arg; uint32_t last = 0xffffffffu; int idle = 0;
+    while (p->rp_run) {
+        uint32_t act;
+        usleep(100000);
+        if (!p->rp_run) break;
+        act = p->triangles + p->presents;
+        if (act != last) { last = act; idle = 0; continue; }
+        if (++idle < 3 || !p->attached || !p->win_mode) continue;
+        idle = 0;
+        if (present_rects(p)) p->k2d_touched = 1;
     }
-    rgb_present(&p->rb, 0, 0, (int)p->fb_w, (int)p->fb_h, (int)p->win_x, (int)p->win_y);
-    p->dirty |= MACH64_DIRTY_STATE;                /* the kernel blit reprogrammed the engine for 2D */
+    return 0;
+}
+void mach64_repaint_start(mach64_priv *p)
+{
+    pthread_t t;
+    if (p->rp_started || !p->win_mode) return;
+    p->rp_run = 1;
+    if (pthread_create(&t, 0, repaint_thread, p) == 0) { p->rp_thread = (unsigned long)t; p->rp_started = 1; } else p->rp_run = 0;
+}
+void mach64_repaint_stop(mach64_priv *p)
+{
+    if (!p->rp_started) return;
+    p->rp_run = 0;
+    pthread_join((pthread_t)p->rp_thread, 0);
+    p->rp_started = 0;
 }
 
 int gldFlush(gld_context *ctx)

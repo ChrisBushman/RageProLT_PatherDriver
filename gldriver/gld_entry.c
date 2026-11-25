@@ -56,6 +56,7 @@ int gldAttachDrawable(gld_context *ctx, int type, void *drawable, uint32_t flags
     pv = MACH64_PRIV(ctx);
     if ((type == 0x50 || type == 0x5a || type == 0x36) && !drawable) return 0x2715;
     if (type == 0 || !drawable) {                         /* detach: drain, give the VRAM back */
+        mach64_repaint_stop(pv);
         mach64_flush_batch(ctx);
         rgb_fence(&pv->rb);
         rgb_release(&pv->rb);
@@ -84,6 +85,7 @@ int gldAttachDrawable(gld_context *ctx, int type, void *drawable, uint32_t flags
         if (!width || !height) return 0x2715;
         pv->fb_w = width; pv->fb_h = height;
         if (mach64_build_surface(ctx)) return 0x2720;
+        mach64_repaint_start(pv);                                  /* windowed contexts only */
         /* Surface fields GLEngine reads to consider the drawable renderable (offsets from the reference gldAttachDrawable). */
         *(uint32_t *)(c + 0x20)  = (uint32_t)(uintptr_t)drawable;
         *(uint32_t *)(c + 0x24)  = (flags >> 8) & 0xff;

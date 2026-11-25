@@ -727,7 +727,7 @@ int mach64_bind_texture(gld_context *ctx)
      * so DP_FOG_CLR (which aliases the 2D DP_FRGD_CLR a clear/fill may have trampled)
      * is re-latched every fog draw.  A logic op owns the pipe -> no fog. */
     /* GL_SEPARATE_SPECULAR_COLOR (glLightModeli COLOR_CONTROL): gli+0x6380 bit 0 (recovered with tools/mach64_mtexscan; the same word's bit 8 is fog).  GLEngine then
-     * delivers the secondary colour as floats R,G,B at gli-vertex +0x40/+0x44/+0x48 (the layout the Radeon driver copies).  Decided below once we know if texturing is on. */
+     * delivers the secondary colour as floats R,G,B at gli-vertex +0x50/+0x54/+0x58 (real GLEngine output, Chess; the Radeon reference layout +0x40 is the normal).  Decided below once we know if texturing is on. */
     mach64_spec_mode = (!lop_on && (mach64_gli_u32(ctx, GLI_FOG_ENABLE) & 1u)) ? 2 : 0;
     mach64_fog_on = lop_on ? 0 : mach64_fog_active(ctx);
     if (mach64_fog_on) p->dirty |= MACH64_DIRTY_STATE;
@@ -748,6 +748,22 @@ int mach64_bind_texture(gld_context *ctx)
                 {   static mach64_tex_slot *last_sl[2];                       /* per-unit cache: the slot table is a static array, a slot's identity is its key, so a hit needs no lock and no search */
                     if (last_sl[u] && last_sl[u]->key == key) ub[u] = last_sl[u];
                     else { TEX_LOCK(); ub[u] = slot_find(key); TEX_UNLOCK(); last_sl[u] = ub[u]; }   /* `bound` is this thread's own bound texture */
+                }
+                if (!ub[u]) {                                                                       /* never uploaded: GLEngine stored the image without a dirty call (Chess board) -> upload from its level record */
+                    const unsigned char *s0 = (key > 0x10000 && key <= M64_UADDR_MAX) ? (const unsigned char *)(uintptr_t)key : 0;
+                    if (s0) {
+                        const unsigned char *r0 = s0 + 0x9c + (uint32_t)s0[0x5e] * 0x14;
+                        uint32_t sig = (uint32_t)*(const uint16_t *)r0 | ((uint32_t)*(const uint16_t *)(r0 + 2) << 16), src = *(const uint32_t *)(r0 + 0x10);
+                        if (sig && src > 0x10000) {
+                            static struct { uint32_t key, sig, src; } neg[16]; static int nneg; int k, known = 0;
+                            for (k = 0; k < 16; k++) if (neg[k].key == key && neg[k].sig == sig && neg[k].src == src) { known = 1; break; }
+                            if (!known) {
+                                mach64_upload(ctx, (void *)(uintptr_t)bt);
+                                TEX_LOCK(); ub[u] = slot_find(key); TEX_UNLOCK();
+                                if (!ub[u]) { neg[nneg & 15].key = key; neg[nneg & 15].sig = sig; neg[nneg & 15].src = src; nneg++; }   /* unusable as it stands: do not retry until the record changes */
+                            }
+                        }
+                    }
                 }
                 if (ub[u] && (!ub[u]->rsize || ub[u]->owner != g_cur) && ub[u]->texobj) {           /* evicted: bring it back from GLEngine's copy */
                     mach64_upload(ctx, ub[u]->texobj);

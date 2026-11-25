@@ -101,6 +101,7 @@ int gldDestroyContext(gld_context *ctx)
     p = MACH64_PRIV(ctx);
     mach64_gli_forget(ctx);
     if (p) {
+        mach64_repaint_stop(p);
         mach64_flush_batch(ctx);
         rgb_fence(&p->rb);
         mach64_tex_ctx_gone(&p->rb);
