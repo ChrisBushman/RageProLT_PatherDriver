@@ -345,7 +345,7 @@ int mach64_zs_cpu_draw(gld_context *ctx, const m64_vertex *va, const m64_vertex 
     int notinc[3], i, minx, maxx, miny, maxy, W, Hh, py, px, front, fi, flushed = 0, all_draw;
     uint32_t cov = 0, pass = 0; const zs_face *f; int sten_on, colour_on;
     uint8_t *sb; uint16_t *db; int depth_en; void *cbw = 0; cb_state cbs; const m64_vertex *vq[3]; int swapped = 0, cb_any = 0;
-    fx_plane fpc[4], fpp, fpq, fpr; int fkp = 0, fkr = 0, faff = 0; fx_inv fiv, einv[3];                  /* fixed-point colour / texture-coordinate / cube-direction planes (gld_fxmap.h); fpp, fpq, fpr double as the cube X, Y, Z */
+    fx_plane fpc[4], fpp, fpq, fpr, fpz; int fkp = 0, fkr = 0, faff = 0; fx_inv fiv, einv[3];                  /* fixed-point colour / texture-coordinate / cube-direction planes (gld_fxmap.h); fpp, fpq, fpr double as the cube X, Y, Z */
     if (!z || !z->pl[PL_S].buf) return 0;
     W = (int)p->fb_w; Hh = (int)p->fb_h;
     x[0] = (int16_t)((uint32_t)va->x_y >> 16); y[0] = (int16_t)((uint32_t)va->x_y & 0xffffu); zq[0] = (uint32_t)va->z >> 15;
@@ -384,23 +384,25 @@ int mach64_zs_cpu_draw(gld_context *ctx, const m64_vertex *va, const m64_vertex 
         {   int c, i2; int64_t dxa = x[1] - x[0], dya = y[1] - y[0], dxb = x[2] - x[0], dyb = y[2] - y[0];
             for (c = 0; c < 4; c++) fx_plane_setup(&fpc[c], (int64_t)((vq[0]->argb >> (8 * c)) & 255u) << 22, (int64_t)((vq[1]->argb >> (8 * c)) & 255u) << 22, (int64_t)((vq[2]->argb >> (8 * c)) & 255u) << 22, dxa, dya, dxb, dyb, &fiv);
             if (cbs.tex) {
-                float P[3], Q[3], R[3], mp = 0.0f, mr = 0.0f;
+                float P[3], Q[3], R[3], Z[3] = { 0, 0, 0 }, mp = 0.0f, mr = 0.0f;
                 faff = !cbs.env.cube && vq[0]->w == vq[1]->w && vq[1]->w == vq[2]->w;          /* constant w: the texel position is itself a plane (w cancels), no divide */
                 for (i2 = 0; i2 < 3; i2++) {
                     float sv = gld_flt((uint32_t)vq[i2]->s), tv = gld_flt((uint32_t)vq[i2]->t), wv = gld_flt((uint32_t)vq[i2]->w);
                     if (cbs.env.cube) { P[i2] = sv * wv; Q[i2] = tv * wv; R[i2] = gld_flt((uint32_t)vq[i2]->r) * wv; if (fx_abs(R[i2]) > mp) mp = fx_abs(R[i2]); }
-                    else { float wm = faff ? 1.0f : wv; P[i2] = sv * wm * (float)cbs.env.w * 256.0f; Q[i2] = tv * wm * (float)cbs.env.h * 256.0f; R[i2] = wv; if (fx_abs(wv) > mr) mr = fx_abs(wv); }
+                    else { float wm = faff ? 1.0f : wv; P[i2] = sv * wm * (float)cbs.env.w * 256.0f; Q[i2] = tv * wm * (float)cbs.env.h * 256.0f; R[i2] = wv; if (fx_abs(wv) > mr) mr = fx_abs(wv);
+                          if (cbs.env.vol) { Z[i2] = gld_flt((uint32_t)vq[i2]->r) * wm * (float)cbs.env.depth * 256.0f; if (fx_abs(Z[i2]) > mp) mp = fx_abs(Z[i2]); } }
                     if (fx_abs(P[i2]) > mp) mp = fx_abs(P[i2]); if (fx_abs(Q[i2]) > mp) mp = fx_abs(Q[i2]);
                 }
                 fkp = fx_scale_for(mp); fkr = cbs.env.cube ? fkp : fx_scale_for(mr);
                 fx_plane_setup(&fpp, fx_from_float(P[0], fkp), fx_from_float(P[1], fkp), fx_from_float(P[2], fkp), dxa, dya, dxb, dyb, &fiv);
                 fx_plane_setup(&fpq, fx_from_float(Q[0], fkp), fx_from_float(Q[1], fkp), fx_from_float(Q[2], fkp), dxa, dya, dxb, dyb, &fiv);
+                if (cbs.env.vol) fx_plane_setup(&fpz, fx_from_float(Z[0], fkp), fx_from_float(Z[1], fkp), fx_from_float(Z[2], fkp), dxa, dya, dxb, dyb, &fiv);
                 fx_plane_setup(&fpr, fx_from_float(R[0], fkr), fx_from_float(R[1], fkr), fx_from_float(R[2], fkr), dxa, dya, dxb, dyb, &fiv);
             }
         }
     }
     for (py = miny; py <= maxy; py++) {
-        int64_t qy = 4 * (int64_t)py + 2, qx0 = 4 * (int64_t)minx + 2, fca[4], fpa = 0, fqa = 0, fra = 0, lo, hi; int run = -1;
+        int64_t qy = 4 * (int64_t)py + 2, qx0 = 4 * (int64_t)minx + 2, fca[4], fpa = 0, fqa = 0, fra = 0, fza = 0, lo, hi; int run = -1;
         for (i = 0; i < 3; i++) E[i] = A[i] * (qx0 - x[(i)]) + B[i] * (qy - y[i]) - notinc[i];
         fx_row_extent(E, A, einv, minx, maxx, &lo, &hi);                       /* the covered pixels of this row: no per-pixel edge test, no scan of the empty bounding box */
         if (lo > hi) continue;
@@ -410,7 +412,7 @@ int mach64_zs_cpu_draw(gld_context *ctx, const m64_vertex *va, const m64_vertex 
         if (cbw) {
             int64_t ddx = qx0 - x[0], ddy = qy - y[0]; int c;
             for (c = 0; c < 4; c++) fca[c] = fx_plane_at(&fpc[c], ddx, ddy);
-            if (cbs.tex) { fpa = fx_plane_at(&fpp, ddx, ddy); fqa = fx_plane_at(&fpq, ddx, ddy); fra = fx_plane_at(&fpr, ddx, ddy); }
+            if (cbs.tex) { fpa = fx_plane_at(&fpp, ddx, ddy); fqa = fx_plane_at(&fpq, ddx, ddy); fra = fx_plane_at(&fpr, ddx, ddy); if (cbs.env.vol) fza = fx_plane_at(&fpz, ddx, ddy); }
         }
         for (px = (int)lo; px <= (int)hi; px++) {
             {
@@ -432,6 +434,8 @@ int mach64_zs_cpu_draw(gld_context *ctx, const m64_vertex *va, const m64_vertex 
                             for (c = 0; c < 4; c++) { int64_t v = (fca[c] + ((int64_t)1 << 37)) >> 38; if (v < 0) v = 0; else if (v > 255) v = 255; out |= (uint32_t)v << (8 * c); }      /* vertex colour: incremental plane, no divide */
                             if (cbs.tex) {
                                 if (cbs.env.cube) out = env_apply(&cbs.env, &cbs.ep, out, cube_sample_fx(&cbs.env, (int32_t)(fpa >> 16), (int32_t)(fqa >> 16), (int32_t)(fra >> 16)));
+                                else if (cbs.env.vol) out = env_apply(&cbs.env, &cbs.ep, out, faff ? vol_sample_q8(&cbs.env, ((int32_t)(fpa >> 16)) >> fkp, ((int32_t)(fqa >> 16)) >> fkp, ((int32_t)(fza >> 16)) >> fkp)
+                                                                                          : vol_sample_q8(&cbs.env, fx_div(fpa, fra, fkp - fkr), fx_div(fqa, fra, fkp - fkr), fx_div(fza, fra, fkp - fkr)));
                                 else if (faff) out = env_apply(&cbs.env, &cbs.ep, out, tex_sample_q8(&cbs.env, ((int32_t)(fpa >> 16)) >> fkp, ((int32_t)(fqa >> 16)) >> fkp));
                                 else out = env_apply(&cbs.env, &cbs.ep, out, tex_sample_q8(&cbs.env, fx_div(fpa, fra, fkp - fkr), fx_div(fqa, fra, fkp - fkr)));      /* the chip: address = interp(S*W) / interp(W) */
                             }
@@ -441,7 +445,7 @@ int mach64_zs_cpu_draw(gld_context *ctx, const m64_vertex *va, const m64_vertex 
                 } else if (run >= 0) { rect_run(ctx, z, py, run, px - 1, va, vb, vc, &flushed); run = -1; }
             }
             zacc += 4 * gx;
-            if (cbw) { fca[0] += 4 * fpc[0].gx; fca[1] += 4 * fpc[1].gx; fca[2] += 4 * fpc[2].gx; fca[3] += 4 * fpc[3].gx; if (cbs.tex) { fpa += 4 * fpp.gx; fqa += 4 * fpq.gx; fra += 4 * fpr.gx; } }
+            if (cbw) { fca[0] += 4 * fpc[0].gx; fca[1] += 4 * fpc[1].gx; fca[2] += 4 * fpc[2].gx; fca[3] += 4 * fpc[3].gx; if (cbs.tex) { fpa += 4 * fpp.gx; fqa += 4 * fpq.gx; fra += 4 * fpr.gx; if (cbs.env.vol) fza += 4 * fpz.gx; } }
         }
         if (run >= 0) rect_run(ctx, z, py, run, px - 1, va, vb, vc, &flushed);
     }

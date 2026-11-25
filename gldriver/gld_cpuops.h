@@ -75,6 +75,35 @@ static uint32_t cube_sample_fx(const m64_cpuenv *e, int32_t s, int32_t t, int32_
     fe.img = e->face[f];
     return tex_sample_q8(&fe, fu, fv);
 }
+
+/* 3D texture (GL_TEXTURE_3D): nearest or trilinear lookup in a w*h*depth ARGB volume; fu/fv/fw are texel coordinates in Q8.  REPEAT wraps (mask for powers of two,
+ * otherwise a modulo), CLAMP / CLAMP_TO_EDGE clamp to the outer texels. */
+static inline int vol_wrap(int i, int n, int clamp)
+{
+    if (clamp) return i < 0 ? 0 : i >= n ? n - 1 : i;
+    if ((n & (n - 1)) == 0) return i & (n - 1);
+    i %= n; return i < 0 ? i + n : i;
+}
+static inline uint32_t vol_texel(const m64_cpuenv *e, int x, int y, int z)
+{
+    x = vol_wrap(x, e->w, e->clamp_s); y = vol_wrap(y, e->h, e->clamp_t); z = vol_wrap(z, e->depth, e->clamp_r);
+    return e->vimg[((size_t)z * (size_t)e->h + (size_t)y) * (size_t)e->w + (size_t)x];
+}
+static inline uint32_t vol_lerp(uint32_t a, uint32_t b, int f)           /* per-channel a + (b - a) * f / 256, f 0..255 */
+{
+    uint32_t o = 0; int sh;
+    for (sh = 0; sh < 32; sh += 8) { int ca = (int)((a >> sh) & 255u), cb = (int)((b >> sh) & 255u); o |= (uint32_t)(ca + (((cb - ca) * f) >> 8)) << sh; }
+    return o;
+}
+static uint32_t vol_sample_q8(const m64_cpuenv *e, int32_t fu, int32_t fv, int32_t fw)
+{
+    int x0, y0, z0, fx, fy, fz; uint32_t a, b;
+    if (!e->bil) return vol_texel(e, fu >> 8, fv >> 8, fw >> 8);
+    fu -= 128; fv -= 128; fw -= 128; x0 = fu >> 8; y0 = fv >> 8; z0 = fw >> 8; fx = fu & 255; fy = fv & 255; fz = fw & 255;
+    a = vol_lerp(vol_lerp(vol_texel(e, x0, y0, z0), vol_texel(e, x0 + 1, y0, z0), fx), vol_lerp(vol_texel(e, x0, y0 + 1, z0), vol_texel(e, x0 + 1, y0 + 1, z0), fx), fy);
+    b = vol_lerp(vol_lerp(vol_texel(e, x0, y0, z0 + 1), vol_texel(e, x0 + 1, y0, z0 + 1), fx), vol_lerp(vol_texel(e, x0, y0 + 1, z0 + 1), vol_texel(e, x0 + 1, y0 + 1, z0 + 1), fx), fy);
+    return vol_lerp(a, b, fz);
+}
 static inline float fx_abs(float f) { uint32_t b; __builtin_memcpy(&b, &f, 4); b &= 0x7fffffffu; __builtin_memcpy(&f, &b, 4); return f; }
 static inline int sat255(int v) { return v < 0 ? 0 : v > 255 ? 255 : v; }
 static int env_arg(const m64_cpuenv *e, uint32_t src, uint32_t op, int ch, uint32_t cf, uint32_t ct)    /* ch 0..2 = R,G,B, 3 = A */

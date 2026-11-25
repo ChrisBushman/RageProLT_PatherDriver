@@ -1,11 +1,12 @@
 # GL feature audit (Nov 25)
 
-Evidence: `tools/ragegl/gl_probe` (115 probes) on the G4 MDD against the standalone driver: **105 pass, 8 fail, 2 unsupported**; `gl_suite` 290/290.
+Evidence: `tools/ragegl/gl_probe` (121 probes) on the G4 MDD against the standalone driver: **118 pass, 3 fail** (ADD_SIGNED exactness, ARB fragment program, texture_env_crossbar); `gl_suite` 290/290.
 Status words: **tested** = a probe draws and checks pixels; **accepted-only** = the call is accepted but the effect is not verified (weaker than tested);
 **failing** = probe fails (driver gap); **unsupported** = GLEngine or the chip cannot do it; **untested** = no probe yet.
 
-Note: three blend probes (func_separate, DST_COLOR, SRC_COLOR) failed for a while with wrong hardware-blend output on every driver build, including builds that
-had passed them; a G4 reboot cleared it. Cause not identified (stale chip/engine state after long uptime). Watch for it in the soaks.
+Resolved (Nov 25): three hardware-blend probes (func_separate, DST_COLOR, SRC_COLOR) used to fail after any run that had drawn with two texture units. Bisecting probe
+groups (kext reload heals it) showed `TEX_CNTL` keeps the secondary-unit bits of the last multitexture draw, and untextured draws never rewrote it. They now write
+`TEX_CNTL = 0` whenever their state is emitted (common/mach64_emit.c).
 
 ## OpenGL 1.1 core
 
@@ -24,8 +25,8 @@ had passed them; a G4 reboot cleared it. Cause not identified (stale chip/engine
 | Lighting, two-sided, colour material, spot | tested (spot untested) | lighting, two-sided, colour material |
 | Texture 1D | tested (fixed today) | 1D texture, TexSubImage1D |
 | Texture 2D: wrap, filters, env REPLACE/MODULATE/DECAL/BLEND/ADD | tested | wrap probes, env probes |
-| Mipmaps, base-level clamp (`TEXTURE_MAX_LEVEL`) | mip tested; MAX_LEVEL **failing** | GLEngine passes the clamp, driver ignores it |
-| Texture border | **failing** | driver treats border texels as image texels |
+| Mipmaps, base-level clamp (`TEXTURE_MAX_LEVEL`) | tested | effective max byte at state+0x5f (GLEngine validate 0xd284c) |
+| Texture border | tested (CLAMP and REPEAT) | border texels kept for CLAMP, cropped otherwise; no texel-centre inset |
 | TexSubImage1D/2D, CopyTexImage2D, CopyTexSubImage2D | tested | probes |
 | CopyTexImage1D, CopyTexSubImage1D | untested | |
 | Texture objects, priorities, residency | tested (residency result unchecked) | texture objects |
@@ -34,9 +35,9 @@ had passed them; a G4 reboot cleared it. Cause not identified (stale chip/engine
 | Display lists, vertex arrays, interleaved arrays | tested | |
 | Selection, feedback | tested | |
 | Pixel store, zoom, DrawPixels/ReadPixels, CopyPixels | tested (CopyPixels via suite) | |
-| Pixel transfer scale/bias | **failing** | DrawPixels ignores scale and bias |
-| Pixel maps | untested | |
-| Draw/read buffer FRONT | **unsupported** (GL_INVALID_OPERATION from GLEngine) | single/back-buffer rendering only |
+| Pixel transfer scale/bias, colour matrix, post-matrix scale/bias | tested | DrawPixels, CopyPixels, ReadPixels; integer Q8/Q16 maths; state offsets from GLEngine glPixelTransferf 0x294b8, glMatrixMode 0x22088 |
+| Pixel maps (R/G/B/A to R/G/B/A) | tested (R_TO_R) | tables at gli+0x6470.. (GLEngine 0x26bbc) |
+| Draw/read buffer FRONT/BACK | tested | GLEngine needs descriptor byte +0x1d (copied to gli+0x4611): the double-buffer capability |
 | Accumulation buffer | tested | |
 | Evaluators, rasterpos, bitmaps | untested (GLEngine side) | |
 
@@ -53,7 +54,7 @@ separate_specular_color, texture_mirror_clamp, compiled_vertex_array, abgr, bgra
 | ARB_texture_env_combine | tested | ADD_SIGNED is an approximation by default (hardware has no exact form); exact behind `GLD_EXACT_ADD_SIGNED`, cost unmeasured |
 | ARB_texture_env_dot3 | tested (CPU) | |
 | ARB_texture_env_crossbar | **failing**, not advertised | hardware composite cannot read another unit's texel |
-| ARB_point_parameters | accepted-only, not advertised | attenuation does not change point size |
+| ARB_point_parameters | tested, advertised | per-vertex size from eye distance (clip w / projection slot 3), min/max clamp, fade threshold |
 | ARB_texture_cube_map, texture_rectangle, NPOT | tested (CPU shaded) | |
 | ARB_texture_compression, S3TC | tested (DXT1; DXT3/5 via suite) | |
 | EXT_paletted_texture | tested | |
@@ -66,10 +67,10 @@ separate_specular_color, texture_mirror_clamp, compiled_vertex_array, abgr, bgra
 | ARB_point_sprite | tested | |
 | ARB_occlusion_query, ARB_vertex_program, APPLE_* (fence, flush_render, VAO), multi_draw_arrays, draw_range_elements, SGIS_generate_mipmap, ARB_window_pos | tested | GLEngine-side or driver-assisted |
 | ARB_fragment_program | **failing** | program format not decoded; GLEngine advertises ARB shader names in its fixed list, so they cannot be removed |
-| 3D textures | **unsupported** | GLEngine rejects the upload (0x501) |
+| 3D textures | tested (CPU shaded) | descriptor +0xb4 = MAX_3D_TEXTURE_SIZE; nearest/trilinear, wrap S/T/R; level 0 only |
 | ARB_depth_texture / shadow | accepted-only (upload) | not implemented |
 | ARB_multisample | pixel format offered only | no multisampling |
-| SGI_color_matrix / ARB_imaging | **failing**, not advertised | |
+| SGI_color_matrix | tested for pixel transfer; not advertised (no extension bit identified) | |
 | Register combiners, texture shaders, NV/ATI vendor bits | unsupported | no hardware path |
 | Destination alpha | unsupported | chip is RGB565/1555, ALPHA_BITS 0 |
 

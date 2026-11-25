@@ -452,6 +452,21 @@ static void a_point_fade(void)
     { int r, g, b; px(30, 64, &r, &g, &b); full = r > 240; px(90, 64, &r, &g, &b); dim = r > 10 && r < 90; }
     aq("point parameters: fade threshold dims small points", glerr() ? -1 : (full && dim), 0);
 }
+static void a_tex3d_filter(void)
+{
+    static const unsigned char v[2 * 1 * 2 * 3] = { 255, 0, 0, 255, 0, 0, 0, 255, 0, 0, 255, 0 }; GLuint id; int r, g, b, ok, ok2;
+    reset(0, 0, 0); glEnable(GL_TEXTURE_3D); glGenTextures(1, &id); glBindTexture(GL_TEXTURE_3D, id);
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MIN_FILTER, GL_LINEAR); glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_S, GL_REPEAT); glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_T, GL_REPEAT); glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_EDGE);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1); glTexImage3D(GL_TEXTURE_3D, 0, GL_RGB, 2, 1, 2, 0, GL_RGB, GL_UNSIGNED_BYTE, v); glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+    glColor3f(1, 1, 1);
+    glBegin(GL_QUADS); glTexCoord3f(1.25f, .5f, .5f); glVertex2f(5, 10); glVertex2f(55, 10); glVertex2f(55, 100); glVertex2f(5, 100); glEnd();       /* r 0.5: halfway between the red and green slices */
+    glBegin(GL_QUADS); glTexCoord3f(.5f, .5f, 5.0f); glVertex2f(70, 10); glVertex2f(120, 10); glVertex2f(120, 100); glVertex2f(70, 100); glEnd();      /* r clamps to the last slice: green */
+    px(30, 50, &r, &g, &b); ok = abs(r - 128) < 24 && abs(g - 128) < 24 && b < 24;
+    px(95, 50, &r, &g, &b); ok2 = r < 24 && g > 230 && b < 24;
+    glDisable(GL_TEXTURE_3D); glDeleteTextures(1, &id);
+    aq("3D texture: trilinear, REPEAT s, CLAMP_TO_EDGE r", glerr() ? -1 : (ok && ok2), 0);
+}
 static void a_depth_texture(void)
 {
     static const float d[4] = { 0.1f, 0.4f, 0.7f, 0.9f }; GLuint id; int e;
@@ -474,4 +489,4 @@ static void a_multisample_attr(void)
     { "select", a_select, 0 }, { "feedback", a_feedback, 0 }, { "interleaved", a_interleaved, 0 }, { "fog_modes", a_fog_modes, 0 }, { "depth_funcs", a_depth_funcs, 0 }, \
     { "alpha_funcs", a_alpha_funcs, 0 }, { "logic_ops", a_logic_ops, 0 }, { "multitexture", a_multitexture, "GL_ARB_multitexture" }, { "multitexture_rep", a_multitexture_rep, "GL_ARB_multitexture" }, { "crossbar", a_crossbar, "GL_ARB_texture_env_crossbar" }, \
     { "blend_eq_sep", a_blend_eq_sep, "GL_EXT_blend_equation_separate" }, { "vbo", a_vbo, "GL_ARB_vertex_buffer_object" }, { "cva", a_cva, "GL_EXT_compiled_vertex_array" }, \
-    { "point_atten", a_point_atten, "GL_ARB_point_parameters" }, { "point_fade", a_point_fade, "GL_ARB_point_parameters" }, { "depth_texture", a_depth_texture, "GL_ARB_depth_texture" }, { "multisample", a_multisample_attr, "GL_ARB_multisample" },
+    { "point_atten", a_point_atten, "GL_ARB_point_parameters" }, { "point_fade", a_point_fade, "GL_ARB_point_parameters" }, { "tex3d_filter", a_tex3d_filter, 0 }, { "depth_texture", a_depth_texture, "GL_ARB_depth_texture" }, { "multisample", a_multisample_attr, "GL_ARB_multisample" },

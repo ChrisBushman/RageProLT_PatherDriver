@@ -167,13 +167,14 @@ void mach64_texture_dirtied(void *texobj)
 }
 void mach64_texture_bound(void *texobj) { (void)texobj; }   /* no bind hook; see gli */
 static void cube_cache_drop(uint32_t state);
+static void vol_cache_drop(uint32_t state);
 
 void mach64_texture_deleted(void *texobj)
 {
     mach64_tex_slot *s;
     TEX_LOCK();
     s = slot_find(tex_key(texobj));
-    cube_cache_drop(tex_key(texobj));
+    cube_cache_drop(tex_key(texobj)); vol_cache_drop(tex_key(texobj));
     if (s) { heap_free(s->owner, s->off); s->key = 0; s->owner = 0; s->rsize = 0; free(s->cpu); s->cpu = 0; }   /* reclaim VRAM + slot */
     TEX_UNLOCK();
 }
@@ -356,7 +357,8 @@ static int mach64_upload(gld_context *ctx, void *texobj)
     state = *(const uint32_t *)(t + 0x30);
     if (state < 0x10000 || state > M64_UADDR_MAX) return 0;
     s = (const unsigned char *)(uintptr_t)state;
-    if ((((*(const uint32_t *)s) >> 16) & 0xfu) == 0u) { cube_cache_drop(state); return 0; }      /* cube map (state word 0 target nibble 0): shaded by the CPU, no VRAM copy */
+    if ((((*(const uint32_t *)s) >> 16) & 0xfu) == 0u) { cube_cache_drop(state); return 0; }
+    if (*(const uint16_t *)(s + 0x9c + 4) > 1u) { vol_cache_drop(state); return 0; }                 /* 3D texture (level 0 depth > 1): CPU-sampled volume, no VRAM copy */      /* cube map (state word 0 target nibble 0): shaded by the CPU, no VRAM copy */
     base_lod = s[0x5e];
 
     /* Enumerate the mip chain from the base level down to 1x1 (stops at the first
@@ -594,6 +596,7 @@ static int mach64_upload(gld_context *ctx, void *texobj)
 #define GLI_TEX2D_BIT      0x00000008u
 #define GLI_TEXRECT_BIT    0x00000004u    /* GL_TEXTURE_RECTANGLE_EXT enabled (its bound texobj is the word BEFORE the 2D one: targets are 1D, rect, 2D, 3D, cube at 4-byte steps from 0x15744) */
 #define GLI_TEXCUBE_BIT    0x00000001u     /* GL_TEXTURE_CUBE_MAP enabled; its bound texobj is the word at 0x1573c, 12 bytes before the 2D one */
+#define GLI_TEX3D_BIT      0x00000002u     /* GL_TEXTURE_3D enabled; its bound texobj is the word at 0x15740 (cube 0x1573c, 3D, rect, 2D, 1D at 4-byte steps); CPU-sampled, never on the chip */
 #define GLI_TEX1D_BIT      0x00000010u     /* GL_TEXTURE_1D enabled; its bound texobj is the word AFTER the 2D one (found with RAGE_ENDUMP) */
 #define GLI_TEXANY_BITS    (GLI_TEX2D_BIT | GLI_TEXRECT_BIT | GLI_TEXCUBE_BIT | GLI_TEX1D_BIT)
 #define GLI_UNIT_STRIDE    0x7cu       /* per texture unit: enable word, env-mode word */
@@ -602,6 +605,7 @@ static uint32_t unit_bound(gld_context *ctx, uint32_t u, uint32_t en)      /* th
 {
     uint32_t base = GLI_BOUND_TEXOBJ + u * GLI_BOUND_STRIDE;
     if (en & GLI_TEXCUBE_BIT) return mach64_gli_u32(ctx, base - 12u);
+    if (en & GLI_TEX3D_BIT) return mach64_gli_u32(ctx, base - 8u);
     if (en & GLI_TEX2D_BIT) return mach64_gli_u32(ctx, base);
     if (en & GLI_TEXRECT_BIT) return mach64_gli_u32(ctx, base - 4u);
     if (en & GLI_TEX1D_BIT) return mach64_gli_u32(ctx, base + 4u);
@@ -690,7 +694,9 @@ static uint32_t mach64_blend_dst(uint32_t glf)
  * reads and so had to be made per-context). */
 uint32_t mach64_tex_vofs[2] = { 0x80u, 0u };   /* see gld.h */
 int mach64_tex_cube = 0;       /* a cube map is bound on unit 0: CPU-shaded (gld_stencil.c), the vertex carries the third coordinate */
-static uint32_t g_cube_state;  /* its state object (level records at +0x9c + face * 0x12c) */
+static uint32_t g_cube_state;
+static uint32_t g_vol_state;   /* GL_TEXTURE_3D bound on unit 0 (also sets mach64_tex_cube: the third coordinate rides in the vertex, the CPU shades it) */
+static void vol_cache_drop(uint32_t state);  /* its state object (level records at +0x9c + face * 0x12c) */
 int mach64_tex_noinset;
 float mach64_tex_mscale[2] = { 1.0f, 1.0f }, mach64_tex_mbias[2] = { 0.0f, 0.0f };      /* per-draw S/T coordinate map of the bound texture (see mach64_upload) */
 int mach64_spec_mode = 0;
@@ -953,7 +959,7 @@ int mach64_bind_texture(gld_context *ctx)
      * gli+0x15748+u*0x14 (all recovered with tools/mach64_mtexscan: the software context's gli, diffed while unit 1 was enabled / bound).
      * Both units enabled with textures bound -> ONE-pass compositing (primary = unit 0, secondary = unit 1); only unit 1 enabled -> it simply
      * becomes the primary map (its coordinates are read from the unit-1 vertex fields). */
-    mach64_tex_vofs[0] = 0x80u; mach64_tex_vofs[1] = 0u; mach64_tex_mscale[0] = mach64_tex_mscale[1] = 1.0f; mach64_tex_mbias[0] = mach64_tex_mbias[1] = 0.0f; mach64_tex_noinset = 0; mach64_tex_cube = 0; g_cube_state = 0;
+    mach64_tex_vofs[0] = 0x80u; mach64_tex_vofs[1] = 0u; mach64_tex_mscale[0] = mach64_tex_mscale[1] = 1.0f; mach64_tex_mbias[0] = mach64_tex_mbias[1] = 0.0f; mach64_tex_noinset = 0; mach64_tex_cube = 0; g_cube_state = 0; g_vol_state = 0;
     {   mach64_tex_slot *ub[2]; int u;
         for (u = 0; u < 2; u++) {
             uint32_t en = mach64_gli_u32(ctx, GLI_TEX2D_ENABLE + (uint32_t)u * GLI_UNIT_STRIDE);
@@ -962,6 +968,11 @@ int mach64_bind_texture(gld_context *ctx)
             if (u == 0 && (en & GLI_TEXCUBE_BIT) && bt > 0x10000 && bt <= M64_UADDR_MAX) {          /* cube map: never on the chip; the CPU shades it from GLEngine's six face images */
                 uint32_t cs = *(const uint32_t *)(uintptr_t)(bt + 0x30);
                 if (cs > 0x10000 && cs <= M64_UADDR_MAX) { mach64_tex_cube = 1; g_cube_state = cs; }
+                continue;
+            }
+            if (u == 0 && (en & GLI_TEX3D_BIT) && !(en & GLI_TEXCUBE_BIT) && bt > 0x10000 && bt <= M64_UADDR_MAX) {            /* 3D texture: never on the chip; the CPU shades it from GLEngine's volume image */
+                uint32_t vs = *(const uint32_t *)(uintptr_t)(bt + 0x30);
+                if (vs > 0x10000 && vs <= M64_UADDR_MAX) { mach64_tex_cube = 1; g_vol_state = vs; }
                 continue;
             }
             if ((en & GLI_TEXANY_BITS) && bt > 0x10000 && bt <= M64_UADDR_MAX) {
@@ -1267,8 +1278,8 @@ int mach64_env_needs_cpu(uint32_t gli)
 {
     const uint32_t *w = (const uint32_t *)(uintptr_t)gli;
     uint32_t en = w[0x6748 / 4], mode = w[0x674c / 4] >> 16;
-    if (!(en & GLI_TEXANY_BITS) || (w[(0x6748 + GLI_UNIT_STRIDE) / 4] & GLI_TEXANY_BITS)) return 0;
-    if (en & GLI_TEXCUBE_BIT) return 1;       /* off, or two units (one-pass hardware compositing) */
+    if (!(en & (GLI_TEXANY_BITS | GLI_TEX3D_BIT)) || (w[(0x6748 + GLI_UNIT_STRIDE) / 4] & GLI_TEXANY_BITS)) return 0;
+    if (en & (GLI_TEXCUBE_BIT | GLI_TEX3D_BIT)) return 1;       /* off, or two units (one-pass hardware compositing) */
     if (mode == ENV_BLEND) return 1;
     if (mode != ENV_COMBINE) return 0;
     {   uint32_t rf = w[0x6750 / 4] >> 16, af = w[0x6750 / 4] & 0xffffu;
@@ -1335,12 +1346,51 @@ static int cube_env(gld_context *ctx, m64_cpuenv *o)
     for (k = 0; k < 4; k++) { uint32_t q = fl_to_q8(mach64_gli_u32(ctx, 0x6738u + u + k * 4u)); o->ec[k] = (int)(q > 255u ? 255u : q); }
     return 1;
 }
+
+/* 3D texture for the CPU shader: GLEngine's level-0 volume image (state + 0x9c: w, h, depth u16 at +0, +2, +4; format/type at +0xc/+0xe; source pointer +0x10, slices of w*h texels
+ * one after another) decoded to ARGB8888 and cached until the texture is re-uploaded or deleted.  Wrap S/T = the halves of the word at state+0x10, wrap R = the high half of the
+ * word at state+0x14 (glTexParameter 0x8072 stores at texobj+0x38 = state+0x14, GLEngine 0x4922c); 0x2900 GL_CLAMP and 0x812f CLAMP_TO_EDGE clamp, anything else repeats. */
+static struct { uint32_t state; uint32_t *img; int w, h, d, has_a; } g_vol;
+static void vol_cache_drop(uint32_t state)
+{
+    if (g_vol.state != state || !state) return;
+    free(g_vol.img); g_vol.img = 0; g_vol.state = 0;
+}
+static int vol_env(gld_context *ctx, m64_cpuenv *o)
+{
+    const unsigned char *s = (const unsigned char *)(uintptr_t)g_vol_state; uint32_t u = g_cpu_unit * GLI_UNIT_STRIDE, k; uint32_t ws, wt, wr;
+    if (g_vol.state != g_vol_state) {
+        uint32_t w = *(const uint16_t *)(s + 0x9c), h = *(const uint16_t *)(s + 0x9e), d = *(const uint16_t *)(s + 0x9c + 4), fmt = *(const uint16_t *)(s + 0x9c + 0x0c), type = *(const uint16_t *)(s + 0x9c + 0x0e);
+        uint32_t src = *(const uint32_t *)(s + 0x9c + 0x10), i, n = w * h * d;
+        vol_cache_drop(g_vol.state);
+        if (!w || !h || !d || src < 0x10000u || src > M64_UADDR_MAX || n > (1u << 24)) return 0;
+        g_vol.img = (uint32_t *)malloc((size_t)n * 4u);
+        if (!g_vol.img) return 0;
+        for (i = 0; i < n; i++) g_vol.img[i] = tex_texel_argb((const unsigned char *)(uintptr_t)src, i, (uint16_t)fmt, (uint16_t)type);
+        g_vol.state = g_vol_state; g_vol.w = (int)w; g_vol.h = (int)h; g_vol.d = (int)d; g_vol.has_a = (fmt == 0x1908u || fmt == 0x1906u || fmt == 0x190Au || fmt == 0x8049u);
+    }
+    ws = *(const uint16_t *)(s + 0x10); wt = *(const uint16_t *)(s + 0x12); wr = *(const uint16_t *)(s + 0x14);
+    o->vol = 1; o->vimg = g_vol.img; o->w = g_vol.w; o->h = g_vol.h; o->depth = g_vol.d; o->img = g_vol.img; o->has_a = g_vol.has_a;
+    o->clamp_s = (ws == 0x2900u || ws == 0x812fu); o->clamp_t = (wt == 0x2900u || wt == 0x812fu); o->clamp_r = (wr == 0x2900u || wr == 0x812fu);
+    o->bil = *(const uint16_t *)(s + 0x18) == 0x2601u;
+    o->mode = mach64_gli_u32(ctx, GLI_TEX_ENV_MODE + u) >> 16;
+    { uint32_t a = mach64_gli_u32(ctx, 0x6750u + u); o->rgbf = a >> 16; o->alf = a & 0xffffu; }
+    { uint32_t a = mach64_gli_u32(ctx, 0x6754u + u), b = mach64_gli_u32(ctx, 0x6758u + u), c = mach64_gli_u32(ctx, 0x675cu + u);
+      o->src[0] = a >> 16; o->src[1] = a & 0xffffu; o->src[2] = b >> 16; o->asrc[0] = b & 0xffffu; o->asrc[1] = c >> 16; o->asrc[2] = c & 0xffffu; }
+    { uint32_t a = mach64_gli_u32(ctx, 0x6760u + u), b = mach64_gli_u32(ctx, 0x6764u + u), c = mach64_gli_u32(ctx, 0x6768u + u);
+      o->op[0] = a >> 16; o->op[1] = a & 0xffffu; o->op[2] = b >> 16; o->aop[0] = b & 0xffffu; o->aop[1] = c >> 16; o->aop[2] = c & 0xffffu; }
+    o->rscale = (int)((fl_to_q8(mach64_gli_u32(ctx, 0x676cu + u)) + 128u) >> 8); o->ascale = (int)((fl_to_q8(mach64_gli_u32(ctx, 0x6770u + u)) + 128u) >> 8);
+    if (o->rscale < 1) o->rscale = 1; if (o->ascale < 1) o->ascale = 1;
+    for (k = 0; k < 4; k++) { uint32_t q = fl_to_q8(mach64_gli_u32(ctx, 0x6738u + u + k * 4u)); o->ec[k] = (int)(q > 255u ? 255u : q); }
+    return 1;
+}
 /* Fill *o for the CPU rasteriser: the bound texture's level 0 as ARGB8888 and the environment.  Returns 0 if the texture cannot be sampled on the CPU. */
 int mach64_cpu_env(gld_context *ctx, m64_cpuenv *o)
 {
     mach64_priv *p = MACH64_PRIV(ctx); mach64_tex_slot *sl = g_cpu_slot; uint32_t u = g_cpu_unit * GLI_UNIT_STRIDE, k;
     memset(o, 0, sizeof *o);
     if (g_cube_state) return cube_env(ctx, o);
+    if (g_vol_state) return vol_env(ctx, o);
     if (!sl || g_cpu_multi || !sl->rsize) return 0;
     if (sl->hwfmt == 11u || sl->hwfmt == 12u) return 0;
     if (!sl->cpu) {

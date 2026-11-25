@@ -381,7 +381,7 @@ static void t_tex_3d(void)
     static const unsigned char v[2 * 2 * 2 * 3] = { 255, 0, 0, 255, 0, 0, 255, 0, 0, 255, 0, 0, 0, 255, 0, 0, 255, 0, 0, 255, 0, 0, 255, 0 }; GLuint id;
     reset(0, 0, 0); glEnable(GL_TEXTURE_3D); glGenTextures(1, &id); glBindTexture(GL_TEXTURE_3D, id);
     glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MIN_FILTER, GL_NEAREST); glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-    glTexImage3D(GL_TEXTURE_3D, 0, GL_RGB, 2, 2, 2, 0, GL_RGB, GL_UNSIGNED_BYTE, v);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1); glTexImage3D(GL_TEXTURE_3D, 0, GL_RGB, 2, 2, 2, 0, GL_RGB, GL_UNSIGNED_BYTE, v); glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
     if (glerr()) { report("3D texture", -1, "upload error"); glDisable(GL_TEXTURE_3D); return; }
     glColor3f(1, 1, 1); glBegin(GL_QUADS); glTexCoord3f(.5f, .5f, .25f); glVertex2f(5, 10); glVertex2f(55, 10); glVertex2f(55, 100); glVertex2f(5, 100); glEnd();
     glBegin(GL_QUADS); glTexCoord3f(.5f, .5f, .75f); glVertex2f(70, 10); glVertex2f(120, 10); glVertex2f(120, 100); glVertex2f(70, 100); glEnd();

@@ -1,3 +1,4 @@
+#include <stdio.h>
 #include "rage_backend.h"
 #include <string.h>
 #include <stdlib.h>
