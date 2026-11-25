@@ -323,6 +323,11 @@ static int mach64_upload(gld_context *ctx, void *texobj)
      * would be chosen.  Only the Path B (kext memcpy) upload can pack 16-bit texels. */
     {   uint32_t t0 = lvl[0].type, f0 = lvl[0].fmt;
         int alpha0 = (f0 == 0x1908u || f0 == 0x1906u || f0 == 0x190Au || f0 == 0x8049u);
+        if (f0 == 0x1908u && t0 == 0x1401u) {        /* an RGBA image whose alpha is 255 everywhere (Chess board) carries no alpha: store it as RGB565 so the blend source alpha is the vertex alpha */
+            const unsigned char *px = (const unsigned char *)(uintptr_t)lvl[0].src; uint32_t n = lvl[0].w * lvl[0].h, i;
+            for (i = 0; i < n && px[i * 4 + 3] == 0xffu; i++) {}
+            if (i == n) alpha0 = 0;
+        }
         int attempt;
         hwfmt = 6u; bpt = 4u; slot = 0;
         { mach64_tex_slot *pre; TEX_LOCK(); pre = slot_find(tex_key(texobj)); pre_used = (pre && pre->rsize && pre->owner == g_cur && pre->gen == mach64_batch_gen); TEX_UNLOCK(); }

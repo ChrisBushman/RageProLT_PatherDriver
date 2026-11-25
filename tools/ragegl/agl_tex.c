@@ -63,10 +63,10 @@ int main(void)
     glMatrixMode(GL_PROJECTION); glLoadIdentity();
     glOrtho(-1.0, 1.0, -1.0, 1.0, -1.0, 1.0);
     glMatrixMode(GL_MODELVIEW);  glLoadIdentity();
-    glDisable(GL_DEPTH_TEST);
+    if (getenv("TEX_DEPTH")) glEnable(GL_DEPTH_TEST); else glDisable(GL_DEPTH_TEST);
     {   int mode = getenv("TEX_MODE") ? atoi(getenv("TEX_MODE")) : 1, x, y, N = getenv("TEX_N") ? atoi(getenv("TEX_N")) : 64; GLuint id;  GLenum err;
         for (y = 0; y < N; y++) for (x = 0; x < N; x++) { float dx = (x - (N - 1) / 2.0f) / (N / 2.0f), dy = (y - (N - 1) / 2.0f) / (N / 2.0f), r = dx * dx + dy * dy, v = r < 1.0f ? (1.0f - r) * 255.0f : 0.0f; unsigned char b = (unsigned char)v;
-            lum[y * N + x] = b; la[(y * N + x) * 2] = b; la[(y * N + x) * 2 + 1] = b; rgba[(y * N + x) * 4] = b; rgba[(y * N + x) * 4 + 1] = b / 2; rgba[(y * N + x) * 4 + 2] = 0; rgba[(y * N + x) * 4 + 3] = b; }
+            lum[y * N + x] = b; la[(y * N + x) * 2] = b; la[(y * N + x) * 2 + 1] = b; rgba[(y * N + x) * 4] = b; rgba[(y * N + x) * 4 + 1] = b / 2; rgba[(y * N + x) * 4 + 2] = 0; rgba[(y * N + x) * 4 + 3] = getenv("TEX_OPAQUE") ? 255 : b; }
         if (getenv("TEX_MAGIC")) memset(lum, 0xA7, sizeof lum);
         glGenTextures(1, &id); glBindTexture(GL_TEXTURE_2D, id);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP); glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP);
@@ -78,17 +78,18 @@ int main(void)
         else if (mode == 4) gluBuild2DMipmaps(GL_TEXTURE_2D, GL_LUMINANCE_ALPHA, N, N, GL_LUMINANCE_ALPHA, GL_UNSIGNED_BYTE, la);
         else if (mode == 5) { glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR); glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, N, N, 0, GL_RGBA, GL_UNSIGNED_BYTE, rgba); }
         err = glGetError(); printf("texture mode %d built, glGetError 0x%x\n", mode, (unsigned)err);
-        glEnable(GL_TEXTURE_2D); glTexEnvf(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
+        if (getenv("TEX_FLAT")) glDisable(GL_TEXTURE_2D); else glEnable(GL_TEXTURE_2D); glTexEnvf(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
     }
     if (early) { GLboolean ok = aglSetDrawable(ctx, GetWindowPort(win)); printf("late aglSetDrawable -> %d (err %d)\n", (int)ok, (int)aglGetError()); aglSetCurrentContext(ctx); glViewport(0, 0, 480, 400); glMatrixMode(GL_PROJECTION); glLoadIdentity(); glOrtho(-1.0, 1.0, -1.0, 1.0, -1.0, 1.0); glMatrixMode(GL_MODELVIEW); glLoadIdentity(); glEnable(GL_TEXTURE_2D);
         if (getenv("TEX_REBIND")) { glBindTexture(GL_TEXTURE_2D, 0); glBindTexture(GL_TEXTURE_2D, 1); }
         if (getenv("TEX_SUB")) { glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 8, 8, GL_LUMINANCE, GL_UNSIGNED_BYTE, lum_global); }
         if (getenv("TEX_REUP")) { gluBuild2DMipmaps(GL_TEXTURE_2D, GL_LUMINANCE, 256, 256, GL_LUMINANCE, GL_UNSIGNED_BYTE, lum_global); } }
-    glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE);
+    if (!getenv("TEX_NOBLEND")) glEnable(GL_BLEND); if (getenv("TEX_BF")) glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA); else glBlendFunc(GL_SRC_ALPHA, GL_ONE);
     int i, nfr = getenv("AGL_FRAMES") ? atoi(getenv("AGL_FRAMES")) : 30;
     for (i = 0; i < nfr; i++) {
-        glClearColor(0.0f, 0.0f, 0.2f, 1.0f); glClear(GL_COLOR_BUFFER_BIT);
-        glColor4f(1.0f, 1.0f, 0.5f, 1.0f);
+        glClearColor(getenv("TEX_CC") ? 0.10f : 0.0f, getenv("TEX_CC") ? 0.10f : 0.0f, getenv("TEX_CC") ? 0.15f : 0.2f, 1.0f); glClear(GL_COLOR_BUFFER_BIT);
+        if (getenv("TEX_LI")) glLoadIdentity();
+        glColor4f(1.0f, 1.0f, 0.5f, getenv("TEX_VA") ? (float)atof(getenv("TEX_VA")) : 1.0f);
         glBegin(GL_QUADS);
             glTexCoord2f(0, 0); glVertex2f(-0.6f, -0.6f); glTexCoord2f(1, 0); glVertex2f(0.6f, -0.6f);
             glTexCoord2f(1, 1); glVertex2f(0.6f, 0.6f);  glTexCoord2f(0, 1); glVertex2f(-0.6f, 0.6f);
