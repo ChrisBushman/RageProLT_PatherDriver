@@ -49,7 +49,7 @@ static void rage_fill_descriptor(gld_context *ctx)
         dd[0x38/4] = 0x00000008;                  /* stencil bits: GLEngine glStencilFunc clamps the reference to (1 << dd[0x38]) - 1 (static analysis of GLEngine 0x38528): with 0 every reference was stored as 0 */
         {   /* GL_EXTENSIONS: GLEngine appends one extension per set bit of the 72-bit mask at descriptor +0x104 (GLEngine 0x39188; the bit -> name table is in
              * docs/standalone-driver-design.md).  Only features this driver really delivers: */
-            static const unsigned char bits[] = { 5, 23, 32 /* EXT_paletted_texture */, 10 /* ARB_texture_compression */, 40 /* EXT_texture_compression_s3tc */, 24 /* EXT_blend_color */, 25 /* EXT_blend_minmax */, 26 /* EXT_blend_subtract */, 16 /* ARB_occlusion_query */, 27 /* EXT_texture_lod_bias */,
+            static const unsigned char bits[] = { 5, 23, 17 /* ARB_point_sprite */, 32 /* EXT_paletted_texture */, 10 /* ARB_texture_compression */, 40 /* EXT_texture_compression_s3tc */, 24 /* EXT_blend_color */, 25 /* EXT_blend_minmax */, 26 /* EXT_blend_subtract */, 16 /* ARB_occlusion_query */, 27 /* EXT_texture_lod_bias */,
                                                   30 /* EXT_stencil_wrap */, 34 /* EXT_separate_specular_color */, 36 /* EXT_blend_func_separate */, 38 /* EXT_stencil_two_side */,
                                                   69 /* SGIS_texture_edge_clamp */, 11 /* ARB_texture_mirrored_repeat */, 3 /* ARB_texture_border_clamp */, 42 /* EXT_texture_mirror_clamp */ };
             unsigned i; for (i = 0; i < sizeof bits; i++) dd[0x104 / 4 + bits[i] / 32] |= 1u << (bits[i] & 31);

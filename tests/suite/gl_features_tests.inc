@@ -330,3 +330,16 @@ static void t_copytexsub(void)
     CHECK("copyTexSubImage: the rest of the texture is untouched (black)", isclr(px(100, 100), 0, 0, 0));
     default_state(); sync(); clear_rt(0);
 }
+
+/* GL_POINT_SPRITE with GL_COORD_REPLACE: the texture coordinates run across the point (s left -> right, t top -> bottom) */
+static void t_pointsprite(void)
+{
+    unsigned char *d = quadtex(), *vb; void *t = mktex(8, 8, 0x1907, d, (GL_REPEAT_ << 16) | GL_REPEAT_, 0x2600, 0x2600); unsigned a, b, c, e;
+    default_state(); bindtex(t, GL_REPLACE_ENV); g32(0x6650, 0x00010000u); g32(0x6658, 1u); gf(GLI_POINT_SIZE_OFF, 40.0f); sync(); clear_rt(0);
+    vb = VB(1); V(VX(vb, 0), 80, 80, 0, 0xffffffffu); SLOT(0x18)(ctx, vb, 1); endframe(); free(vb);
+    a = px(68, 68); b = px(92, 68); c = px(68, 92); e = px(92, 92);
+    printf("    (sprite quadrants: %08x %08x / %08x %08x)\n", a, b, c, e);
+    CHECK("point sprite: the four quadrants show four different texels", a != b && a != c && a != e && b != c && b != e && c != e && a && b && c && e);
+    CHECK("point sprite: s increases left to right", (isclr(a, 255, 0, 0) || isclr(a, 0, 0, 255)) && (isclr(b, 0, 255, 0) || isclr(b, 255, 255, 255)));
+    g32(0x6650, 0u); g32(0x6658, 0u); default_state(); sync(); clear_rt(0);
+}

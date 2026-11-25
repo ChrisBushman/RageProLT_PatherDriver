@@ -231,6 +231,8 @@ static void draw_line_smooth(gld_context *ctx, const void *v0, const void *v1, f
 
 /* One point -> a size x size quad (two same-winding triangles) centred on it.
  * s is the half-extent (GL point size is the diameter). */
+#define GLI_POINT_SPRITE 0x6650     /* bit 16 = GL_POINT_SPRITE (bit 24 = GL_POINT_SMOOTH) */
+#define GLI_COORD_REPLACE 0x6658    /* unit 0: GL_COORD_REPLACE */
 static void draw_point(gld_context *ctx, const void *vp, float fb_h, float s)
 {
     mach64_priv *p = MACH64_PRIV(ctx);
@@ -243,6 +245,14 @@ static void draw_point(gld_context *ctx, const void *vp, float fb_h, float s)
     pack_at(vp, x + s, y - s, fb_h, &b, tw, th);
     pack_at(vp, x - s, y + s, fb_h, &c, tw, th);
     pack_at(vp, x + s, y + s, fb_h, &d, tw, th);
+    if (p->hw.textured && (mach64_gli_u32(ctx, GLI_POINT_SPRITE) & 0x00010000u) && (mach64_gli_u32(ctx, GLI_COORD_REPLACE) & 1u)) {     /* GL_POINT_SPRITE + GL_COORD_REPLACE: (s,t) run over the point, t = 0 at the top */
+        m64_vertex *q[4] = { &a, &b, &c, &d }; static const float cs[4] = { 0.0f, 1.0f, 0.0f, 1.0f }, ct[4] = { 1.0f, 1.0f, 0.0f, 0.0f }; int k;
+        for (k = 0; k < 4; k++) {
+            float rs = cs[k] * mach64_tex_mscale[0] + mach64_tex_mbias[0], rt = ct[k] * mach64_tex_mscale[1] + mach64_tex_mbias[1];
+            if (tw > 0) { rs = rs * (float)(tw - 1) / (float)tw + 0.5f / (float)tw; rt = rt * (float)(th - 1) / (float)th + 0.5f / (float)th; }
+            __builtin_memcpy(&q[k]->s, &rs, 4); __builtin_memcpy(&q[k]->t, &rt, 4);
+        }
+    }
     p->nonpoly = 1;
     mach64_draw_triangle(ctx, &a, &b, &c);
     mach64_draw_triangle(ctx, &d, &c, &b);
