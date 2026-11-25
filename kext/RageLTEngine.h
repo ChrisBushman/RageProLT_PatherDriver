@@ -11,6 +11,8 @@
 #define RAGE_R_CRTC_GEN_CNTL   0x041c
 #define RAGE_R_MEM_CNTL        0x04b0
 #define RAGE_R_DST_CNTL        0x0530
+#define RAGE_R_CRTC_H_TOTAL_DISP 0x0400
+#define RAGE_PIXW_555          0x60030363u        /* DP_PIX_WIDTH for ARGB1555 (565 value with the 4s replaced by 3s) */
 #define RAGE_R_GEN_TEST_CNTL   0x04d0          /* bit 8 GEN_GUI_RESETB: a high->low transition resets the GUI engine (RRG 4-21) */
 #define RAGE_PIXW_565          0x60040464u        /* DP_PIX_WIDTH for RGB565 (hardware-proven) */
 #define RAGE_WAIT_SPINS        400000u            /* ~0.4 s of register reads: the bound on every wait */
@@ -105,29 +107,34 @@ static inline int eng_fill16(volatile uint8_t *regs, uint32_t off, uint32_t pitc
     return 0;
 }
 
-/* Blit, 16 bpp, same pitch for source and destination. */
-static inline int eng_blit16(volatile uint8_t *regs, uint32_t src_off, uint32_t dst_off, uint32_t pitch_px, uint32_t sx, uint32_t sy,
-                             uint32_t dx, uint32_t dy, uint32_t w, uint32_t h, uint32_t sc_lr, uint32_t sc_tb)
+/* Blit between two surfaces of the same pixel size (raw copy: DP_PIX_WIDTH is the same for source and destination), own pitch for each. */
+static inline int eng_blit(volatile uint8_t *regs, uint32_t pixw, uint32_t src_off, uint32_t src_pitch, uint32_t dst_off, uint32_t dst_pitch,
+                           uint32_t sx, uint32_t sy, uint32_t dx, uint32_t dy, uint32_t w, uint32_t h, uint32_t sc_lr, uint32_t sc_tb)
 {
-    uint32_t op = (pitch_px / 8u) << 22;
     if (eng_wait_idle(regs)) return -1;
+    eng_wq(regs, 0x0304, 0);                                                 /* SETUP_CNTL (see eng_fill16) */
     eng_wq(regs, MACH64_Z_CNTL, 0);
     eng_wq(regs, MACH64_SCALE_3D_CNTL, 0);
     eng_wq(regs, RAGE_R_DST_CNTL, (1u << 0) | (1u << 1));
-    eng_wq(regs, MACH64_DP_PIX_WIDTH, RAGE_PIXW_565);
+    eng_wq(regs, MACH64_DP_PIX_WIDTH, pixw);
     eng_wq(regs, MACH64_DP_WRITE_MASK, 0xffffffffu);
     eng_wq(regs, MACH64_DP_MIX, MACH64_DP_MIX_DS);
     eng_wq(regs, MACH64_DP_SRC, MACH64_DP_SRC_BLIT);
     eng_wq(regs, MACH64_SC_LEFT_RIGHT, sc_lr);
     eng_wq(regs, MACH64_SC_TOP_BOTTOM, sc_tb);
     eng_wq(regs, MACH64_CLR_CMP_CNTL, 0);
-    eng_wq(regs, MACH64_SRC_OFF_PITCH, op | (src_off >> 3));
-    eng_wq(regs, MACH64_DST_OFF_PITCH, op | (dst_off >> 3));
+    eng_wq(regs, MACH64_SRC_OFF_PITCH, ((src_pitch / 8u) << 22) | (src_off >> 3));
+    eng_wq(regs, MACH64_DST_OFF_PITCH, ((dst_pitch / 8u) << 22) | (dst_off >> 3));
     eng_wq(regs, MACH64_SRC_WIDTH1, w);
     eng_wq(regs, MACH64_SRC_Y_X, (sx << 16) | sy);
     eng_wq(regs, MACH64_DST_Y_X, (dx << 16) | dy);
     eng_wq(regs, MACH64_DST_WIDTH_HEIGHT, (h << 16) | w);                    /* trigger */
     return 0;
+}
+static inline int eng_blit16(volatile uint8_t *regs, uint32_t src_off, uint32_t dst_off, uint32_t pitch_px, uint32_t sx, uint32_t sy,
+                             uint32_t dx, uint32_t dy, uint32_t w, uint32_t h, uint32_t sc_lr, uint32_t sc_tb)
+{
+    return eng_blit(regs, RAGE_PIXW_565, src_off, pitch_px, dst_off, pitch_px, sx, sy, dx, dy, w, h, sc_lr, sc_tb);
 }
 
 /* Flat-colour triangle into a 16 bpp RGB565 surface through the 3D setup engine (recipe: docs/re-notes/3d-triangle.md, SETUP_CNTL 0 as Mesa).

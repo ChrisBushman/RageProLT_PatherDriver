@@ -43,6 +43,18 @@ static inline int rage_vram_reserve(struct rage_vram *v, uint32_t off, uint32_t 
     return rage_vram_insert(v, i, off, len, RAGE_OWNER_RESERVED);
 }
 
+/* Drop a permanent reservation made with rage_vram_reserve() (exact offset).  Used when the display mode changes and the old scanout block is released. */
+static inline int rage_vram_unreserve(struct rage_vram *v, uint32_t off)
+{
+    uint32_t i, j;
+    for (i = 0; i < v->n; i++) if (v->e[i].off == off && v->e[i].owner == RAGE_OWNER_RESERVED) {
+        for (j = i; j + 1 < v->n; j++) v->e[j] = v->e[j + 1];
+        v->n--;
+        return 0;
+    }
+    return -1;
+}
+
 /* Best-fit allocation of len bytes, aligned to align (power of two, >= 8).  owner must be non-zero.  Returns 0 and *out on success. */
 static inline int rage_vram_alloc(struct rage_vram *v, uint32_t len, uint32_t align, uint32_t owner, uint32_t *out)
 {

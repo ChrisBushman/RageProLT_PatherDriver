@@ -117,6 +117,26 @@ IOReturn RageLTDevice::engineSelfTest(uint32_t mask, uint32_t *passmask, uint32_
     logEvent(RAGE_EV_MARK, owner, 0xe0000002u, off0, BLOCK_BYTES, 0, 0);
 
 
+    if (mask & 0x20000000u) {                          /* ---- mode-change protocol (simulated will/did events; the G4 framebuffer never changes mode) ---- */
+        uint32_t pass = 0, g0 = modeGen(), offA = off0, t2 = 0, base0 = fDisp.base; struct rage_display d0 = fDisp;
+        uint32_t one[2] = { MACH64_DP_FRGD_CLR, 1 };
+        engineEnable();
+        if (setRenderTarget(owner, offA, 256, 2, 256, 256) == kIOReturnSuccess && fillRect(owner, 0, 0, 10, 10, 0x1234) == kIOReturnSuccess) pass |= 1u << 0;
+        modeWillChange();
+        if ((modeGen() & 1u) && modeGen() == g0 + 1) pass |= 1u << 1;                                   /* odd while changing */
+        if (fillRect(owner, 0, 0, 10, 10, 0x1234) == kIOReturnNotReady && submitBatch(owner, one, 1) == kIOReturnNotReady) pass |= 1u << 2;   /* refused */
+        if (setRenderTarget(owner, offA, 256, 2, 256, 256) == kIOReturnNotReady) pass |= 1u << 3;
+        modeDidChange();
+        if (!(modeGen() & 1u) && modeGen() == g0 + 2) pass |= 1u << 4;                                  /* even, new generation */
+        if (fDispReserved && fDisp.base == base0 && fDisp.pitch_px == d0.pitch_px && fDisp.h == d0.h) pass |= 1u << 5;   /* reservation re-established */
+        if (fillRect(owner, 0, 0, 10, 10, 0x1234) == kIOReturnNotReady) pass |= 1u << 6;                 /* old target stays invalid until set again */
+        if (setRenderTarget(owner, offA, 256, 2, 256, 256) == kIOReturnSuccess && fillRect(owner, 0, 0, 10, 10, 0x1234) == kIOReturnSuccess) pass |= 1u << 7;
+        if (vramAlloc(owner, 4096, 4096, &t2) == kIOReturnSuccess && t2 >= 0x1000 && vramFree(owner, t2) == kIOReturnSuccess) pass |= 1u << 8;
+        *passmask = pass; *inside = 0; *outside = 0;
+        releaseOwner(owner);
+        return kIOReturnSuccess;
+    }
+
     if (mask & 0x40000000u) {                          /* ---- engine API suite: contexts, kernel-owned target/scissor, validated batches, fence ---- */
         uint32_t a, b2 = 0, offA = 0, offB = 0, pass = 0, o, x0 = 0;
         uint32_t ownB = newOwner(); uint32_t col = 0, bad_outside = 0;

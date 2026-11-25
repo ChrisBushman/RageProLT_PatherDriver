@@ -330,3 +330,15 @@ triangle batch clipped by the kernel scissor; kernel-owned register batch refuse
 Known gaps recorded for the next steps: per-client 3D state (SCALE_3D_CNTL, SETUP_CNTL, TEX_*, DP_*) is not saved per context, so each client batch must carry its
 full state; TEX_n_OFF are not yet settable (texture binding selector comes with the GL bundle; stale texture bases can only point at memory the engine could already read);
 32 bpp fills and kernel blit/present are not done yet.
+
+### 11.14 Phase 3 step 2: GL user client, present, mode changes, VRAM transfers (G4, Nov 24)
+
+* **GL client** (`RAGE_CLIENT_GL`, kext/RageLTGLClient.cpp, contract in common/rage_abi.h): info, alloc/free, set target/scissor/Z, fill, validated submit, fence, present, VRAM
+  read/write, display info; debug-only scan-out read.  User memory is copied with an IOMemoryDescriptor of the calling task (never raw).  First client open is where the chip is first read.
+* **Present** (RageLTMode.cpp): kernel blit target -> scanout, clipped on both sides, raw copy (16 bpp now; 32 bpp / scaled = FS_SCALE work).
+* **Mode changes**: IOFramebuffer notifications of the Rage's framebuffer; will = odd generation, drain, invalidate every target and release the scanout reservation; did = restore
+  BUS_EXT_REG_EN, re-init engine, re-read CRTC, re-reserve; even generation.  Clients get kIOReturnNotReady until they re-read DISPLAY and set the target again.  Simulated events: 9/9.
+* **VRAM transfers**: byte image of the buffer == byte image in VRAM, with optional SWAP16/SWAP32 (the kernel owns texel byte order; O4 stays about which swap a given source needs).
+* **Hardware results**: `tools/ragegl/ragegl_test` (user space through IOConnect) 27/27 on the G4 incl. refusals (unowned target, overrun, scanout write, unaligned, bad flags, scissor register in a batch),
+  exact contained fill, triangle through the batch path (27355 px vs ~27350 expected), present read back from the scan-out (6000/6000), 5 repeated runs and a killed client: IOMalloc unchanged, owner released.
+  ENGTEST: mode-change 9/9, engine API 7/7, triangles 6/6, 2D 17/17.

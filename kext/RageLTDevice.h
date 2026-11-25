@@ -5,6 +5,7 @@
 #include <IOKit/IOService.h>
 #include <IOKit/IOLocks.h>
 #include <IOKit/pci/IOPCIDevice.h>
+#include <IOKit/graphics/IOFramebuffer.h>
 #include "features.h"
 #include "rage_vram.h"
 #include "rage_abi.h"
@@ -18,6 +19,9 @@ struct rage_ctx {
     uint32_t z_off, z_pitch, z_set;
 };
 #define RAGE_MAX_CTX 16u
+#define RAGE_MAX_FB  4u
+
+struct rage_display { uint32_t base, pitch_px, w, h, bpp, depth; };   /* live scanout as read from the CRTC (kernel-owned copy) */
 
 class RageLTDevice : public IOService
 {
@@ -34,6 +38,12 @@ class RageLTDevice : public IOService
     uint32_t               fRefused;     /* batches refused by the guard (diagnostic) */
     bool                 fDispReserved; /* scanout + cursor block reserved in the allocator (done once, permanent) */
     struct rage_ctx      fCtx[RAGE_MAX_CTX];
+    struct rage_display  fDisp;
+    uint32_t               fModeGen, fModeDepth;               /* odd gen = a mode change is in progress; all targets invalid */
+    IONotifier          *fFBPublish;
+    IOFramebuffer       *fFBs[RAGE_MAX_FB];
+    IONotifier          *fFBNotify[RAGE_MAX_FB];
+    uint32_t               fNumFB;
     uint32_t               fFenceSubmitted, fFenceCompleted;   /* PIO phase: completes before submit returns; DMA keeps the same counters */
     struct rage_log     *fLog;         /* event ring (RAGE_FEAT_PANIC_LOG), allocated at start */
     IOSimpleLock        *fLogLock;     /* short spin lock: logging must be safe from any context, including an interrupt filter */
@@ -57,6 +67,20 @@ public:
     IOReturn     setScissor(uint32_t owner, int32_t l, int32_t r, int32_t t, int32_t b);
     IOReturn     setZBuffer(uint32_t owner, uint32_t off, uint32_t pitch_px);
     IOReturn     fillRect(uint32_t owner, int32_t x, int32_t y, int32_t w, int32_t h, uint32_t color565);
+    IOReturn     present(uint32_t owner, uint32_t sx, uint32_t sy, uint32_t w, uint32_t h, uint32_t dx, uint32_t dy);
+    IOReturn     vramCopyIn(uint32_t owner, uint32_t off, const uint8_t *src, uint32_t len, uint32_t flags);     /* src = kernel buffer */
+    IOReturn     vramCopyOut(uint32_t owner, uint32_t off, uint8_t *dst, uint32_t len, uint32_t flags);
+    IOReturn     scanoutCopyOut(uint32_t byteOff, uint8_t *dst, uint32_t len);                                    /* debug */
+    IOReturn     displayInfo(struct rage_display *out, uint32_t *gen);
+    uint32_t       modeGen(void) const { return fModeGen; }
+    /* mode changes (RageLTMode.cpp) */
+    void         modeWillChange(void);
+    void         modeDidChange(void);
+    bool         fbPublished(IOService *svc);
+    IOReturn     fbEvent(IOFramebuffer *fb, IOIndex event, void *info);
+    void         modeStop(void);
+    void         modeStart(void);
+    IOReturn     modeRegsRead(void);                 /* reads the CRTC into fDisp */
     uint32_t       fenceSubmitted(void) const { return fFenceSubmitted; }
     uint32_t       fenceCompleted(void) const { return fFenceCompleted; }
     IOReturn     waitFence(uint32_t seq);            /* bounded; kIOReturnTimeout on a stuck engine (which is reset) */

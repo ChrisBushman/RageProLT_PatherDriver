@@ -6,6 +6,31 @@
 #include "rage_log.h"
 
 #define RAGE_CLIENT_LOG   0x4c4f4700u            /* 'LOG': diagnostics client (Phase 2) */
+#define RAGE_CLIENT_GL    0x474c0100u            /* 'GL' v1: the new GL bundle's client (Phase 3) */
+
+/* GL client selectors (kIOUCScalarIScalarO; "in"/"out" = scalar counts).  Every call that needs a render target returns kIOReturnNotReady while the
+ * display mode is changing or after it changed (the target was invalidated): re-read DISPLAY, set the target again.  All offsets are VRAM byte offsets
+ * the client owns; the kernel owns scissor, addresses and pixel width.  User memory is passed as an address + length and copied with an
+ * IOMemoryDescriptor of the calling task (never dereferenced raw). */
+enum {
+    RAGE_GL_INFO = 0,        /* in 0, out 4: mode_gen, feature bits, usable VRAM end, flags (bit0 engine live) */
+    RAGE_GL_ALLOC = 1,       /* in 2 {length, align}, out 1 {offset} */
+    RAGE_GL_FREE = 2,        /* in 1 {offset} */
+    RAGE_GL_SET_TARGET = 3,  /* in 5 {offset, pitch_px, bpp(2|4), width, height} */
+    RAGE_GL_SET_SCISSOR = 4, /* in 4 {left, right, top, bottom} signed, inclusive; clamped to the target */
+    RAGE_GL_SET_Z = 5,       /* in 2 {offset, pitch_px} (16-bit Z, height of the target) */
+    RAGE_GL_FILL = 6,        /* in 5 {x, y, w, h, rgb565}; 16 bpp targets */
+    RAGE_GL_SUBMIT = 7,      /* in 2 {user address of {reg,val} pairs, number of pairs} */
+    RAGE_GL_FENCE = 8,       /* in 1 {sequence}, out 1 {completed}; waits (bounded) */
+    RAGE_GL_PRESENT = 9,     /* in 6 {sx, sy, w, h, dx, dy}: target -> scanout, clipped on both sides */
+    RAGE_GL_VRAM_WRITE = 10, /* in 4 {offset, user address, length, flags}; offset/length multiples of 4, <= 1 MB */
+    RAGE_GL_VRAM_READ = 11,  /* in 4 {offset, user address, length, flags} */
+    RAGE_GL_DISPLAY = 12,    /* in 0, out 6: mode_gen, width, height, pitch_px, bpp, scanout base */
+    RAGE_GL_SCANOUT_READ = 13, /* debug builds only (RAGE_DEBUG_ENGTEST): in 3 {byte offset into the scanout block, user address, length} */
+    RAGE_GL_SEL_COUNT = 14
+};
+#define RAGE_XFER_SWAP16 1u      /* VRAM_WRITE/READ flag: swap bytes inside every 16-bit unit */
+#define RAGE_XFER_SWAP32 2u      /* ... inside every 32-bit unit */
 
 enum { RAGE_LOG_SEL_INFO = 0, RAGE_LOG_SEL_READ = 1, RAGE_LOG_SEL_MARK = 2, RAGE_LOG_SEL_COUNT = 3, RAGE_LOG_SEL_PANIC = 3 /* only with RAGE_DEBUG_PANIC */, RAGE_LOG_SEL_ENGTEST = 4 /* only with RAGE_DEBUG_ENGTEST */ };
 

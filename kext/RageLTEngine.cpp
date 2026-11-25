@@ -43,21 +43,20 @@ IOReturn RageLTDevice::engineEnable(void)
 
 IOReturn RageLTDevice::reserveDisplay(void)
 {
-    uint32_t gen, crtcOP, vtd, pitch_px, base, lines, depth, bpp, bytes; int rc = 0;
+    uint32_t bytes; int rc = 0;
     IOLockLock(fLock);
     if (fDispReserved) { IOLockUnlock(fLock); return kIOReturnSuccess; }
     IOLockUnlock(fLock);
-    gen = eng_rd(fRegs, RAGE_R_CRTC_GEN_CNTL); crtcOP = eng_rd(fRegs, MACH64_CRTC_OFF_PITCH); vtd = eng_rd(fRegs, MACH64_CRTC_V_TOTAL_DISP);
-    pitch_px = ((crtcOP >> 22) & 0x3ffu) * 8u; base = (crtcOP & 0xfffffu) * 8u; lines = ((vtd >> 16) & 0x7ffu) + 1u;
-    depth = (gen >> 8) & 7u; bpp = depth == 2 ? 1 : depth == 3 || depth == 4 ? 2 : depth == 5 ? 3 : 4;
-    bytes = (pitch_px * lines * bpp + 0xfffu) & ~0xfffu;
+    modeRegsRead();
+    bytes = (fDisp.pitch_px * fDisp.h * fDisp.bpp + 0xfffu) & ~0xfffu;
     IOLockLock(fLock);
     if (!fDispReserved) {
-        rc = rage_vram_reserve(&fVram, base, bytes) || rage_vram_reserve(&fVram, 0x770000u, RAGE_VRAM_USABLE_END - 0x770000u);
-        if (!rc) fDispReserved = true;
+        rc = rage_vram_reserve(&fVram, fDisp.base, bytes) || rage_vram_reserve(&fVram, 0x770000u, RAGE_VRAM_USABLE_END - 0x770000u);
+        if (rc) rage_vram_unreserve(&fVram, fDisp.base);
+        else fDispReserved = true;
     }
     IOLockUnlock(fLock);
-    logEvent(RAGE_EV_MARK, 0, 0xe0040000u, base, pitch_px, lines, bpp);
+    logEvent(RAGE_EV_MARK, 0, 0xe0040000u, fDisp.base, fDisp.pitch_px, (fDisp.w << 16) | (fDisp.h & 0xffffu), fDisp.bpp);
     return rc ? kIOReturnNoSpace : kIOReturnSuccess;
 }
 
@@ -65,6 +64,7 @@ IOReturn RageLTDevice::setRenderTarget(uint32_t owner, uint32_t off, uint32_t pi
 {
     struct rage_ctx *c; IOReturn r = kIOReturnBadArgument;
     uint64_t len = (uint64_t)pitch_px * h * bpp;
+    if (fModeGen & 1u) return kIOReturnNotReady;
     IOLockLock(fLock);
     if ((bpp == 2 || bpp == 4) && w && h && w <= pitch_px && !(pitch_px & 7u) && pitch_px <= 8184u && !(off & 7u) && h <= 8191u &&
         rage_vram_owns(&fVram, off, (uint32_t)len, owner) && len < 0x800000u && (c = ctxFor(owner, true)) != 0) {
@@ -142,7 +142,7 @@ IOReturn RageLTDevice::submitBatch(uint32_t owner, const uint32_t *pairs, uint32
         logEvent(RAGE_EV_BATCH_REFUSED, owner, npairs, pairs ? pairs[0] : 0, pairs ? pairs[1] : 0, fRefused, 0);
         return kIOReturnBadArgument;
     }
-    if (!fEngineLive) return kIOReturnNotReady;
+    if (!fEngineLive || (fModeGen & 1u)) return kIOReturnNotReady;
     IOLockLock(fLock);
     { struct rage_ctx *p = ctxFor(owner, false); if (!p || !p->tgt_bpp) { IOLockUnlock(fLock); return kIOReturnNotReady; } c = *p; }
     logEvent(RAGE_EV_BATCH, owner, npairs, pairs[0], pairs[1], 0, 0);
@@ -162,7 +162,7 @@ IOReturn RageLTDevice::submitBatch(uint32_t owner, const uint32_t *pairs, uint32
 IOReturn RageLTDevice::fillRect(uint32_t owner, int32_t x, int32_t y, int32_t w, int32_t h, uint32_t color565)
 {
     struct rage_ctx c; IOReturn rc; uint32_t seq; int32_t x1, y1;
-    if (!fEngineLive) return kIOReturnNotReady;
+    if (!fEngineLive || (fModeGen & 1u)) return kIOReturnNotReady;
     IOLockLock(fLock);
     { struct rage_ctx *p = ctxFor(owner, false); if (!p || p->tgt_bpp != 2) { IOLockUnlock(fLock); return kIOReturnNotReady; } c = *p; }
     if (w <= 0 || h <= 0) { IOLockUnlock(fLock); return kIOReturnSuccess; }

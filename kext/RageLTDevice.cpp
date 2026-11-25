@@ -8,6 +8,7 @@
 #include <ppc/proc_reg.h>      /* eieio */
 #include <kern/clock.h>
 #include "RageLTLogClient.h"
+#include "RageLTGLClient.h"
 
 #define super IOService
 OSDefineMetaClassAndStructors(RageLTDevice, IOService)
@@ -43,6 +44,7 @@ bool RageLTDevice::start(IOService *provider)
     fDispReserved = false;
     { uint32_t k; for (k = 0; k < RAGE_MAX_CTX; k++) fCtx[k].owner = 0; }
     fFenceSubmitted = fFenceCompleted = 0;
+    modeStart();
 
     logEvent(RAGE_EV_START, 0, RAGE_FEATURE_BITS, 0, 0, 0, 0);
     setProperty("RageLTFeatures", (unsigned long long)RAGE_FEATURE_BITS, 32);
@@ -53,6 +55,7 @@ bool RageLTDevice::start(IOService *provider)
 
 void RageLTDevice::stop(IOService *provider)
 {
+    modeStop();
     fEngineLive = false;
     logEvent(RAGE_EV_STOP, 0, 0, 0, 0, 0, 0);
     super::stop(provider);
@@ -147,19 +150,20 @@ IOReturn RageLTDevice::logRead(uint32_t fromSeq, struct rage_log_read_out *out)
     return kIOReturnSuccess;
 }
 
+#else
+void RageLTDevice::logEvent(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t) {}
+IOReturn RageLTDevice::logInfo(uint32_t *, uint32_t *, uint32_t *, uint32_t *) { return kIOReturnUnsupported; }
+IOReturn RageLTDevice::logRead(uint32_t, struct rage_log_read_out *) { return kIOReturnUnsupported; }
+#endif
+
 IOReturn RageLTDevice::newUserClient(task_t owningTask, void *securityID, UInt32 type, IOUserClient **handler)
 {
-    RageLTLogClient *c;
-    if (type != RAGE_CLIENT_LOG) return kIOReturnUnsupported;
-    c = new RageLTLogClient;
+    IOUserClient *c;
+    if (type == RAGE_CLIENT_LOG && RAGE_FEAT_PANIC_LOG) c = new RageLTLogClient;
+    else if (type == RAGE_CLIENT_GL) c = new RageLTGLClient;
+    else return kIOReturnUnsupported;
     if (!c) return kIOReturnNoMemory;
     if (!c->initWithTask(owningTask, securityID, type) || !c->attach(this) || !c->start(this)) { c->release(); return kIOReturnError; }
     *handler = c;
     return kIOReturnSuccess;
 }
-#else
-void RageLTDevice::logEvent(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t) {}
-IOReturn RageLTDevice::logInfo(uint32_t *, uint32_t *, uint32_t *, uint32_t *) { return kIOReturnUnsupported; }
-IOReturn RageLTDevice::logRead(uint32_t, struct rage_log_read_out *) { return kIOReturnUnsupported; }
-IOReturn RageLTDevice::newUserClient(task_t, void *, UInt32, IOUserClient **) { return kIOReturnUnsupported; }
-#endif
