@@ -31,3 +31,11 @@ Three runs, same result: found 0x80000154 / 0x80000115, after enable+ack 0x81000
 ## Per-primitive bind memo (Nov 25)
 `mach64_bind_texture` (gld_texture.c) re-decoded ~100 gli words and the bound slots on every primitive, and its per-level register reset made `mach64_tex_select_lod` re-dirty the state each time (an extra 96-dword state block per primitive). It is now a memo around `bind_texture_full`: valid while the gli regions it reads (0x62e0-0x6800 and the bound-texobj words 0x1573c-0x15780), the texture epoch (bumped by slot alloc/evict, upload, delete, invalidate, cpu_free), the batch generation, the target and the context are unchanged and no upload is pending. `RAGE_NO_MEMO=1` turns it off; `RAGE_VERIFY_MEMO=1` runs the full decode on every hit and compares `p->hw` (minus the per-triangle LOD registers, which select_lod owns), the globals and the result.
 Evidence: Sonic R demo run in verify mode: ~1.87M hits, 217K misses, 0 mismatches; gl_suite 290/290 and gl_probe 128/1 with verify on and off.
+
+## CPU cuts, round 2 (Nov 25)
+- `rage_f2byte`: 32-bit round (`(p>>sh) + ((p>>(sh-1))&1)`), forced inline; identical to the 64-bit version over all 2^32 inputs (this removed `__lshrdi3`/`__ashldi3` calls from the vertex path).
+- `mach64_read_vertex`: the four colour words compared with the previous vertex's; a hit reuses the packed colour.
+- `rgb_flush`: per-register routing through a one-load class table instead of up to ten compares per word.
+- Bind memo compares only the gli ranges the bind reads (107 words instead of 328); verify mode on Sonic R: 1.89M hits, 0 mismatches.
+- Measured (demo race, one sample): main thread kernel wait 58%, our driver CPU 22.6% (was 23.9%), game+system 19%; 12.5 presents/s. Remaining driver CPU: emit_tri_rv 3.2%, read_vertex 1.8%, rgb_flush 1.6%, m64_emit_triangle 1.4%, pack_vertex 1.4%, tex_select_lod 1.2%.
+- Plugin driver baseline: it draws wrong textures on the G4 in both title and race, so it is not a usable performance baseline.

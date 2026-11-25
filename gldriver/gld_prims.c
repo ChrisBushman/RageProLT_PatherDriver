@@ -69,10 +69,11 @@ void mach64_read_vertex(const void *vp, m64_vertex *o, float fb_h)
     float ndcz  = *(const float *)(v + 0x18) * w;   /* w == 1/w_clip (from +0x0c) */
     float depth = ndcz * 0.5f + 0.5f;
     if (mach64_zforce >= 0.0f) depth = mach64_zforce;       /* stencil emulation: constant depth */
-    uint32_t argb = (chan(*(const float *)(v + 0x3c)) << 24)   /* vertex colour alpha */
-                  | (chan(*(const float *)(v + GVOFF_R)) << 16)
-                  | (chan(*(const float *)(v + GVOFF_G)) <<  8)
-                  |  chan(*(const float *)(v + GVOFF_B));
+    /* colour: the four raw words against the previous vertex's (flat-shaded and shared-colour meshes repeat them); same conversion on a miss */
+    static uint32_t c_a, c_r, c_g, c_b, c_argb; static int c_ok;
+    uint32_t wa = *(const uint32_t *)(v + 0x3c), wr = *(const uint32_t *)(v + GVOFF_R), wg = *(const uint32_t *)(v + GVOFF_G), wb_ = *(const uint32_t *)(v + GVOFF_B), argb;
+    if (c_ok && wa == c_a && wr == c_r && wg == c_g && wb_ == c_b) argb = c_argb;
+    else { argb = (rage_f2byte(wa) << 24) | (rage_f2byte(wr) << 16) | (rage_f2byte(wg) << 8) | rage_f2byte(wb_); c_a = wa; c_r = wr; c_g = wg; c_b = wb_; c_argb = argb; c_ok = 1; }
     mach64_pack_vertex(o, x, fb_h - y, depth, w, argb);  /* GL y-up -> FB y-down */
     /* Per-vertex texcoords.  GLEngine hands us PERSPECTIVE-PREMULTIPLIED coords: +0x80/+0x84
      * hold S/w and T/w, and +0x0c holds 1/w (HW-proven via the cube test).  But the mach64

@@ -85,7 +85,7 @@ static inline int32_t rage_f2q(uint32_t xb)
 }
 
 /* (int)(c*255 + 0.5) clamped to [0,255], evaluated exactly (the float formula rounds c*255 to 24 bits first: results differ by at most 1, see the test) */
-static inline uint32_t rage_f2byte(uint32_t cb)
+static inline __attribute__((always_inline)) uint32_t rage_f2byte(uint32_t cb)
 {
     uint32_t e = (cb >> 23) & 255u, sh, p;
     if ((cb & 0x80000000u) || e == 0) return 0;
@@ -94,7 +94,7 @@ static inline uint32_t rage_f2byte(uint32_t cb)
     if (sh > 32u) return 0;                                            /* below 2^-9: rounds to 0 */
     p = (0x800000u | (cb & 0x7fffffu)) * 255u;                         /* < 2^32 */
     if (sh == 32u) return 0;                                           /* p < 2^32 so c*255 < 1 -> +0.5 < 2 : only >= 0.5 rounds up; p>>31 <=1 */
-    return (uint32_t)(((uint64_t)p + (1ull << (sh - 1))) >> sh);
+    return (p >> sh) + ((p >> (sh - 1u)) & 1u);                        /* sh in 24..31: (p + 2^(sh-1)) >> sh without the 64-bit shifts (p + 2^30 can wrap 32 bits, the round bit cannot) */
 }
 
 #endif

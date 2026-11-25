@@ -69,22 +69,44 @@ void rgb_release(rgb_t *b)
 int rgb_scissor(rgb_t *b, int l, int r, int t, int bt)
 { return (int)CALL(RAGE_GL_SET_SCISSOR, 4, 0, (uint32_t)l, (uint32_t)r, (uint32_t)t, (uint32_t)bt); }
 
+/* Register routing, one byte per register (reg>>2): 0 = pass to the kernel as a {reg,val} pair, 1 = DP_PIX_WIDTH (texel formats), 2 = primary texture register (sent with the
+ * submit), 3 = secondary texture offset, 4 = kernel-owned (dropped).  Replaces a chain of up to ten compares per word with one load; built once. */
+#define RT_N 0x300u
+static unsigned char rt_class[RT_N]; static int rt_ready;
+static void rt_build(void)
+{
+    uint32_t r;
+    for (r = 0; r < RT_N * 4u; r += 4u) {
+        unsigned char c = 0;
+        if (r == MACH64_DP_PIX_WIDTH) c = 1;
+        else if (r >= MACH64_TEX_0_OFF && r <= MACH64_TEX_0_OFF + 40u) c = 2;
+        else if (r == MACH64_SECONDARY_TEX_OFF) c = 3;
+        else if (r == MACH64_DST_OFF_PITCH || r == MACH64_Z_OFF_PITCH || r == MACH64_SC_LEFT_RIGHT || r == MACH64_SC_TOP_BOTTOM || r == MACH64_SRC_CNTL) c = 4;
+        rt_class[r >> 2] = c;
+    }
+    rt_ready = 1;
+}
+
 /* Decode a host-order packet stream into {reg,val} pairs, routing the kernel-owned registers. */
 int rgb_flush(rgb_t *b, const m64_cmdbuf *cb)
 {
     static uint32_t *stage; static size_t stage_cap;                                    /* one growing staging buffer: no malloc/free per flush */
     uint32_t *pairs, np = 0, tfmt = 0, tfmt2 = 0, tex[24], ntex = 0; size_t i = 0; int rc = 0; uint32_t *base, *p; int first = 1;
     if (stage_cap < 2u * (cb->n + 1u)) { free(stage); stage_cap = 2u * (cb->n + 1u) + 4096u; stage = (uint32_t *)malloc(sizeof(uint32_t) * stage_cap); if (!stage) { stage_cap = 0; return -1; } }
-    pairs = base = stage;
+    pairs = base = stage; if (!rt_ready) rt_build();
     while (i < cb->n) {
         uint32_t h = cb->buf[i++], idx = h & 0x1ffu, cnt = ((h >> 16) & 0x3ffu) + 1u, k;
         uint32_t reg = (idx & 0x100u) ? ((idx & 0xffu) << 2) : (0x400u + (idx << 2));
         for (k = 0; k < cnt && i < cb->n; k++, reg += 4u) {
             uint32_t v = cb->buf[i++];
-            if (reg == MACH64_DP_PIX_WIDTH) { tfmt = v >> 28; tfmt2 = (v >> 4) & 0xfu; continue; }                 /* kernel owns the width; texel formats go via SET_TEXTURE */
-            if (reg >= MACH64_TEX_0_OFF && reg <= MACH64_TEX_0_OFF + 40u) { if (ntex < 12u) { tex[2 * ntex] = (reg - MACH64_TEX_0_OFF) >> 2; tex[2 * ntex + 1] = v; ntex++; } continue; }   /* sent with the submit */
-            if (reg == MACH64_SECONDARY_TEX_OFF) { if (ntex < 12u) { tex[2 * ntex] = 11u; tex[2 * ntex + 1] = v; ntex++; } continue; }
-            if (reg == MACH64_DST_OFF_PITCH || reg == MACH64_Z_OFF_PITCH || reg == MACH64_SC_LEFT_RIGHT || reg == MACH64_SC_TOP_BOTTOM || reg == MACH64_SRC_CNTL) { b->dropped++; continue; }
+            unsigned cls = (reg >> 2) < RT_N ? rt_class[reg >> 2] : 0u;
+            if (cls) {
+                if (cls == 1u) { tfmt = v >> 28; tfmt2 = (v >> 4) & 0xfu; }                                         /* kernel owns the width; texel formats go via SET_TEXTURE */
+                else if (cls == 2u) { if (ntex < 12u) { tex[2 * ntex] = (reg - MACH64_TEX_0_OFF) >> 2; tex[2 * ntex + 1] = v; ntex++; } }   /* sent with the submit */
+                else if (cls == 3u) { if (ntex < 12u) { tex[2 * ntex] = 11u; tex[2 * ntex + 1] = v; ntex++; } }
+                else b->dropped++;
+                continue;
+            }
             pairs[2 * np] = reg; pairs[2 * np + 1] = v; np++;
         }
     }
