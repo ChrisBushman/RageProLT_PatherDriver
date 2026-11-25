@@ -35,6 +35,7 @@ typedef struct {
     uint32_t lvl_off[12], lvl_w[12], lvl_h[12];   /* per level L (0 = base): VRAM offset and size */
     uint32_t hwfmt, bpt;                   /* hardware texel datatype (6 ARGB8888, 4 RGB565, 3 ARGB1555, 15 ARGB4444) and bytes per texel */
     uint32_t tick;                         /* last-use stamp (LRU eviction) */
+    uint32_t *cpu;                         /* lazily decoded ARGB8888 copy of level 0 for the CPU rasteriser (mach64_cpu_env); freed on re-upload/delete */
     uint32_t h1, h2, hlen;                 /* content hash of the source image(s) at the last upload: an unchanged re-upload is skipped */
     uint32_t gen;                          /* mach64_batch_gen when last bound: still referenced by the pending (unsubmitted) batch if == current */
     void    *texobj;                       /* GLEngine texobj, for re-upload after eviction */
@@ -170,10 +171,11 @@ void mach64_texture_deleted(void *texobj)
     mach64_tex_slot *s;
     TEX_LOCK();
     s = slot_find(tex_key(texobj));
-    if (s) { heap_free(s->owner, s->off); s->key = 0; s->owner = 0; s->rsize = 0; }   /* reclaim VRAM + slot */
+    if (s) { heap_free(s->owner, s->off); s->key = 0; s->owner = 0; s->rsize = 0; free(s->cpu); s->cpu = 0; }   /* reclaim VRAM + slot */
     TEX_UNLOCK();
 }
 
+static mach64_tex_slot *g_cpu_slot; static uint32_t g_cpu_unit; static int g_cpu_multi;
 static uint32_t ilog2u(uint32_t v) { uint32_t r = 0; while (v > 1) { v >>= 1; r++; } return r; }
 
 /* Convert texel `i` of `src` (in GLEngine's base fmt/type) to native ARGB8888. */
@@ -423,6 +425,7 @@ static int mach64_upload(gld_context *ctx, void *texobj)
     if (pre_used || g_evict_used) mach64_flush_batch(ctx);
     p->dirty |= MACH64_DIRTY_STATE;   /* the upload's 2D blit clobbers engine state; the next triangle re-emits it */
     if (!slot) { int k; for (k = 0; k < 12; k++) free(mir_bufs[k]); return 0; }
+    free(slot->cpu); slot->cpu = 0;
     slot->hwfmt = hwfmt; slot->bpt = bpt; slot->texobj = texobj; slot->tick = ++g_tick;
     {   uint16_t f0 = (uint16_t)lvl[0].fmt;      /* alpha-bearing: RGBA / ALPHA / LUM_ALPHA / INTENSITY (RGB565 has none, whatever the source) */
         slot->has_alpha = (f0 == 0x1908u || f0 == 0x1906u || f0 == 0x190Au || f0 == 0x8049u) && hwfmt != 4u;
@@ -862,6 +865,7 @@ int mach64_bind_texture(gld_context *ctx)
         if (bound) { mach64_tex_mscale[0] = bound->wscale[0]; mach64_tex_mscale[1] = bound->wscale[1]; mach64_tex_mbias[0] = bound->wbias[0]; mach64_tex_mbias[1] = bound->wbias[1]; }
     }
     tex_on = bound != 0;
+    g_cpu_slot = bound; g_cpu_unit = (uint32_t)punit; g_cpu_multi = bound2 != 0;
 
     if (!bound || !tex_on) {               /* no bound texture, or texturing off */
         /* Untextured gouraud: honour glEnable(GL_BLEND) on the shade pipe.  The
@@ -1111,4 +1115,73 @@ void mach64_tex_select_lod(gld_context *ctx, float pix_area, float uv_area)
         st->tex_scale_3d   = nsc;
         p->dirty |= MACH64_DIRTY_STATE;
     }
+}
+
+
+/* ---- CPU texturing support (gld_stencil.c's compositing rasteriser) ------------------------------------------------------------------------------------------ */
+#define ENV_REPLACE 0x1e01u
+#define ENV_MODULATE 0x2100u
+#define ENV_DECAL 0x2101u
+#define ENV_BLEND 0x0be2u
+#define ENV_ADD 0x0104u
+#define ENV_COMBINE 0x8570u
+/* Does the bound texture environment need the CPU?  gli words of unit 0 (see docs): mode 0x674c >> 16; combine: rgb func 0x6750 hi, alpha func lo, sources 0x6754/58/5c, operands 0x6760/64/68, scales 0x676c/0x6770. */
+int mach64_env_needs_cpu(uint32_t gli)
+{
+    const uint32_t *w = (const uint32_t *)(uintptr_t)gli;
+    uint32_t en = w[0x6748 / 4], mode = w[0x674c / 4] >> 16;
+    if (!(en & GLI_TEX2D_BIT) || (w[(0x6748 + GLI_UNIT_STRIDE) / 4] & GLI_TEX2D_BIT)) return 0;       /* off, or two units (one-pass hardware compositing) */
+    if (mode == ENV_BLEND) return 1;
+    if (mode != ENV_COMBINE) return 0;
+    {   uint32_t rf = w[0x6750 / 4] >> 16, af = w[0x6750 / 4] & 0xffffu;
+#ifndef GLD_EXACT_ADD_SIGNED
+        if (rf == 0x8574u && (af == ENV_MODULATE || af == ENV_REPLACE)) return 0;     /* Sonic R's overbright ADD_SIGNED stays on the hardware approximation (see bind_texture): the CPU path would cost its frame rate */
+#endif
+        (void)af; (void)rf;
+        return 1;
+    }
+}
+static uint32_t fl_to_q8(uint32_t bits) { float f; __builtin_memcpy(&f, &bits, 4); return f <= 0.0f ? 0u : f >= 16.0f ? 16u * 256u : (uint32_t)(f * 256.0f + 0.5f); }
+static void cpu_decode(const mach64_tex_slot *sl, const unsigned char *raw, uint32_t n, uint32_t *out)
+{
+    uint32_t i;
+    for (i = 0; i < n; i++) {
+        uint32_t v, a = 255, r, g, b;
+        switch (sl->hwfmt) {
+        case 4u:  v = ((uint32_t)raw[i*2] << 8) | raw[i*2+1]; r = (v >> 11) & 31u; g = (v >> 5) & 63u; b = v & 31u; r = (r << 3) | (r >> 2); g = (g << 2) | (g >> 4); b = (b << 3) | (b >> 2); break;
+        case 15u: v = ((uint32_t)raw[i*2] << 8) | raw[i*2+1]; a = ((v >> 12) & 15u) * 17u; r = ((v >> 8) & 15u) * 17u; g = ((v >> 4) & 15u) * 17u; b = (v & 15u) * 17u; break;
+        case 3u:  v = ((uint32_t)raw[i*2] << 8) | raw[i*2+1]; a = (v & 0x8000u) ? 255u : 0u; r = (v >> 10) & 31u; g = (v >> 5) & 31u; b = v & 31u; r = (r << 3) | (r >> 2); g = (g << 3) | (g >> 2); b = (b << 3) | (b >> 2); break;
+        case 8u:  r = g = b = raw[i]; break;
+        default:  v = ((uint32_t)raw[i*4] << 24) | ((uint32_t)raw[i*4+1] << 16) | ((uint32_t)raw[i*4+2] << 8) | raw[i*4+3]; out[i] = v; continue;
+        }
+        out[i] = (a << 24) | (r << 16) | (g << 8) | b;
+    }
+}
+/* Fill *o for the CPU rasteriser: the bound texture's level 0 as ARGB8888 and the environment.  Returns 0 if the texture cannot be sampled on the CPU. */
+int mach64_cpu_env(gld_context *ctx, m64_cpuenv *o)
+{
+    mach64_priv *p = MACH64_PRIV(ctx); mach64_tex_slot *sl = g_cpu_slot; uint32_t u = g_cpu_unit * GLI_UNIT_STRIDE, k;
+    if (!sl || g_cpu_multi || !sl->rsize) return 0;
+    if (sl->hwfmt == 11u || sl->hwfmt == 12u) return 0;
+    if (!sl->cpu) {
+        uint32_t w = sl->lvl_w[0], h = sl->lvl_h[0], n = w * h, bytes = (n * sl->bpt + 3u) & ~3u, done = 0; unsigned char *raw; int rc = 0;
+        if (!w || !h || !sl->bpt) return 0;
+        raw = (unsigned char *)malloc(bytes); sl->cpu = (uint32_t *)malloc((size_t)n * 4u);
+        if (!raw || !sl->cpu) { free(raw); free(sl->cpu); sl->cpu = 0; return 0; }
+        mach64_flush_batch(ctx);
+        while (done < bytes && !rc) { uint32_t c = bytes - done; if (c > 0x80000u) c = 0x80000u; rc = rgb_readback2(&p->rb, sl->lvl_off[0] + done, raw + done, c, sl->bpt == 4u ? 2u : sl->bpt == 2u ? 1u : 0u); done += c; }
+        if (rc) { free(raw); free(sl->cpu); sl->cpu = 0; return 0; }
+        cpu_decode(sl, raw, n, sl->cpu); free(raw);
+    }
+    o->img = sl->cpu; o->w = (int)sl->lvl_w[0]; o->h = (int)sl->lvl_h[0]; o->clamp_s = (int)sl->clamp_s; o->clamp_t = (int)sl->clamp_t; o->bil = (int)sl->bilinear_mag; o->has_a = (int)sl->has_alpha;
+    o->mode = mach64_gli_u32(ctx, GLI_TEX_ENV_MODE + u) >> 16;
+    { uint32_t f = mach64_gli_u32(ctx, 0x6750u + u); o->rgbf = f >> 16; o->alf = f & 0xffffu; }
+    { uint32_t a = mach64_gli_u32(ctx, 0x6754u + u), b = mach64_gli_u32(ctx, 0x6758u + u), c = mach64_gli_u32(ctx, 0x675cu + u);
+      o->src[0] = a >> 16; o->src[1] = a & 0xffffu; o->src[2] = b >> 16; o->asrc[0] = b & 0xffffu; o->asrc[1] = c >> 16; o->asrc[2] = c & 0xffffu; }
+    { uint32_t a = mach64_gli_u32(ctx, 0x6760u + u), b = mach64_gli_u32(ctx, 0x6764u + u), c = mach64_gli_u32(ctx, 0x6768u + u);
+      o->op[0] = a >> 16; o->op[1] = a & 0xffffu; o->op[2] = b >> 16; o->aop[0] = b & 0xffffu; o->aop[1] = c >> 16; o->aop[2] = c & 0xffffu; }
+    o->rscale = (int)((fl_to_q8(mach64_gli_u32(ctx, 0x676cu + u)) + 128u) >> 8); o->ascale = (int)((fl_to_q8(mach64_gli_u32(ctx, 0x6770u + u)) + 128u) >> 8);
+    if (o->rscale < 1) o->rscale = 1; if (o->ascale < 1) o->ascale = 1;
+    for (k = 0; k < 4; k++) { uint32_t q = fl_to_q8(mach64_gli_u32(ctx, 0x6738u + u + k * 4u)); o->ec[k] = (int)(q > 255u ? 255u : q); }
+    return 1;
 }

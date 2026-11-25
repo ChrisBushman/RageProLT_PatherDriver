@@ -47,6 +47,7 @@ typedef struct {
     uint32_t stride, rows;
     zs_face face[2];
     int fen[2], two, front_ccw, depth_en, dfunc, dmask, m1_ref, m1_func, m1_op;
+    int envcpu;                   /* a texture environment the chip cannot do (GL_BLEND, GL_COMBINE): textured triangles are shaded on the CPU */
     int cb;                       /* blending the chip cannot do (subtract / min / max equations, constant-colour or saturate factors): untextured triangles are composited on the CPU */
     int rn; zrect r[MAXRECT];
 } zs_state;
@@ -261,9 +262,10 @@ void mach64_zs_sync(gld_context *ctx, uint32_t gli)
         uint32_t fs = *(const uint32_t *)(uintptr_t)(gli + 0x62e8), sf = fs >> 16, df = fs & 0xffffu;
         z->cb = (bl & 0x01000000u) && (eq == 0x800au || eq == 0x800bu || eq == 0x8007u || eq == 0x8008u || sf == 0x308u || (sf >= 0x8001u && sf <= 0x8004u) || (df >= 0x8001u && df <= 0x8004u) || df == 0x308u);
     }
-    if (z->fen[0] || (z->two && z->fen[1]) || p->query || z->cb) {
+    z->envcpu = mach64_env_needs_cpu(gli);
+    if (z->fen[0] || (z->two && z->fen[1]) || p->query || z->cb || z->envcpu) {
         mode = 2;
-        if (!p->query && !z->cb && !z->depth_en && !z->two && z->fen[0] && p->rb.z_off && mode1_ok(&z->face[0], &ref, &zf, &wop)) mode = 1;
+        if (!p->query && !z->cb && !z->envcpu && !z->depth_en && !z->two && z->fen[0] && p->rb.z_off && mode1_ok(&z->face[0], &ref, &zf, &wop)) mode = 1;
     }
     p->zs_mode = mode;
     if (mode == 1) {
@@ -324,7 +326,7 @@ static void rect_run(gld_context *ctx, zs_state *z, int y, int x0, int x1, const
 
 
 /* ---- CPU compositing: the blend unit for the equations/factors the chip lacks.  8-bit integer maths; the destination has no alpha (Ad = 1). ---- */
-typedef struct { uint32_t sf, df, eq; int cc[4]; } cb_state;
+typedef struct { uint32_t sf, df, eq; int cc[4]; int blend_on, tex; m64_cpuenv env; } cb_state;
 static int mul255(int a, int b) { int t = a * b + 128; return (t + (t >> 8)) >> 8; }
 static int bfac(uint32_t f, int ch, const int *cs, int as, const int *cd, const int *cc)
 {
@@ -347,10 +349,85 @@ static int bfac(uint32_t f, int ch, const int *cs, int as, const int *cd, const 
     default:      return 255;
     }
 }
+static int texel_at(const m64_cpuenv *e, int x, int y)
+{
+    if (e->clamp_s) { if (x < 0) x = 0; else if (x >= e->w) x = e->w - 1; } else x &= (e->w - 1);
+    if (e->clamp_t) { if (y < 0) y = 0; else if (y >= e->h) y = e->h - 1; } else y &= (e->h - 1);
+    return (int)(e->img[(size_t)y * (size_t)e->w + (size_t)x]);
+}
+static uint32_t tex_sample(const m64_cpuenv *e, float u, float v)
+{
+    float fu = u * (float)e->w, fv = v * (float)e->h;
+    if (!e->bil) {
+        int x = (int)fu, y = (int)fv; if (fu < 0.0f) x = (int)(fu - 1.0f); if (fv < 0.0f) y = (int)(fv - 1.0f);
+        return (uint32_t)texel_at(e, x, y);
+    }
+    {   float gu = fu - 0.5f, gv = fv - 0.5f; int x0 = (int)gu, y0 = (int)gv, ax, ay, sh; uint32_t out = 0;
+        if (gu < 0.0f) x0 = (int)(gu - 1.0f); if (gv < 0.0f) y0 = (int)(gv - 1.0f);
+        ax = (int)((gu - (float)x0) * 256.0f); ay = (int)((gv - (float)y0) * 256.0f);
+        {   uint32_t c00 = (uint32_t)texel_at(e, x0, y0), c10 = (uint32_t)texel_at(e, x0 + 1, y0), c01 = (uint32_t)texel_at(e, x0, y0 + 1), c11 = (uint32_t)texel_at(e, x0 + 1, y0 + 1);
+            for (sh = 0; sh < 32; sh += 8) {
+                int a = (int)((c00 >> sh) & 255u), b = (int)((c10 >> sh) & 255u), c = (int)((c01 >> sh) & 255u), d = (int)((c11 >> sh) & 255u);
+                int top = a * (256 - ax) + b * ax, bot = c * (256 - ax) + d * ax;
+                out |= (uint32_t)((top * (256 - ay) + bot * ay + 32768) >> 16) << sh;
+            }
+        }
+        return out;
+    }
+}
+static int sat255(int v) { return v < 0 ? 0 : v > 255 ? 255 : v; }
+static int env_arg(const m64_cpuenv *e, uint32_t src, uint32_t op, int ch, uint32_t cf, uint32_t ct)    /* ch 0..2 = R,G,B, 3 = A */
+{
+    uint32_t c = src == 0x1702u ? ct : src == 0x8576u ? (((uint32_t)e->ec[3] << 24) | ((uint32_t)e->ec[0] << 16) | ((uint32_t)e->ec[1] << 8) | (uint32_t)e->ec[2]) : cf;     /* TEXTURE / CONSTANT / PRIMARY and PREVIOUS (unit 0) */
+    int v;
+    if (op == 0x0302u || op == 0x0303u) v = (int)(c >> 24); else v = (int)((c >> (ch == 0 ? 16 : ch == 1 ? 8 : ch == 2 ? 0 : 24)) & 255u);
+    return (op == 0x0301u || op == 0x0303u) ? 255 - v : v;
+}
+static int env_fn(uint32_t fn, int a0, int a1, int a2)
+{
+    switch (fn) {
+    case 0x1e01u: return a0;
+    case 0x2100u: return mul255(a0, a1);
+    case 0x0104u: return a0 + a1;
+    case 0x8574u: return a0 + a1 - 128;
+    case 0x8575u: return mul255(a0, a2) + mul255(a1, 255 - a2);
+    case 0x84e7u: return a0 - a1;
+    default:      return a0;
+    }
+}
+static uint32_t env_apply(const m64_cpuenv *e, uint32_t cf, uint32_t ct)
+{
+    int af = (int)(cf >> 24), at = e->has_a ? (int)(ct >> 24) : 255, ch, r[3], a;
+    int fr[3], tr[3], cc[3];
+    for (ch = 0; ch < 3; ch++) { int sh = ch == 0 ? 16 : ch == 1 ? 8 : 0; fr[ch] = (int)((cf >> sh) & 255u); tr[ch] = (int)((ct >> sh) & 255u); cc[ch] = e->ec[ch]; }
+    switch (e->mode) {
+    case 0x1e01u: for (ch = 0; ch < 3; ch++) r[ch] = tr[ch]; a = e->has_a ? at : af; break;
+    case 0x2100u: for (ch = 0; ch < 3; ch++) r[ch] = mul255(fr[ch], tr[ch]); a = mul255(af, at); break;
+    case 0x2101u: if (!e->has_a) { for (ch = 0; ch < 3; ch++) r[ch] = tr[ch]; } else for (ch = 0; ch < 3; ch++) r[ch] = mul255(fr[ch], 255 - at) + mul255(tr[ch], at); a = af; break;
+    case 0x0be2u: for (ch = 0; ch < 3; ch++) r[ch] = mul255(fr[ch], 255 - tr[ch]) + mul255(cc[ch], tr[ch]); a = mul255(af, at); break;
+    case 0x0104u: for (ch = 0; ch < 3; ch++) r[ch] = fr[ch] + tr[ch]; a = mul255(af, at); break;
+    default: {                                                                     /* GL_COMBINE */
+        uint32_t ctt = (ct & 0x00ffffffu) | ((uint32_t)at << 24);
+        if (e->rgbf == 0x86aeu || e->rgbf == 0x86afu) {
+            int sum = 0; for (ch = 0; ch < 3; ch++) sum += (env_arg(e, e->src[0], e->op[0], ch, cf, ctt) - 128) * (env_arg(e, e->src[1], e->op[1], ch, cf, ctt) - 128);
+            { int d = sat255((4 * sum) / 255); r[0] = r[1] = r[2] = d; if (e->rgbf == 0x86afu) a = d; else a = -1; }
+        } else {
+            for (ch = 0; ch < 3; ch++) r[ch] = env_fn(e->rgbf, env_arg(e, e->src[0], e->op[0], ch, cf, ctt), env_arg(e, e->src[1], e->op[1], ch, cf, ctt), env_arg(e, e->src[2], e->op[2], ch, cf, ctt));
+            a = -1;
+        }
+        for (ch = 0; ch < 3; ch++) r[ch] = sat255(r[ch] * e->rscale);
+        if (a < 0) a = env_fn(e->alf, env_arg(e, e->asrc[0], e->aop[0], 3, cf, ctt), env_arg(e, e->asrc[1], e->aop[1], 3, cf, ctt), env_arg(e, e->asrc[2], e->aop[2], 3, cf, ctt));
+        a = sat255(a * e->ascale);
+        return ((uint32_t)a << 24) | ((uint32_t)r[0] << 16) | ((uint32_t)r[1] << 8) | (uint32_t)r[2];
+    }
+    }
+    return ((uint32_t)sat255(a) << 24) | ((uint32_t)sat255(r[0]) << 16) | ((uint32_t)sat255(r[1]) << 8) | (uint32_t)sat255(r[2]);
+}
 static void cb_load(gld_context *ctx, cb_state *c)
 {
     uint32_t fs = mach64_gli_u32(ctx, 0x62e8); int i;
     c->sf = fs >> 16; c->df = fs & 0xffffu; c->eq = mach64_gli_u32(ctx, 0x6300) >> 16;
+    c->blend_on = (mach64_gli_u32(ctx, 0x6304) & 0x01000000u) != 0;
     for (i = 0; i < 4; i++) {
         uint32_t u = mach64_gli_u32(ctx, 0x62f0u + (uint32_t)i * 4u); float f; __builtin_memcpy(&f, &u, 4);
         c->cc[i] = f <= 0.0f ? 0 : f >= 1.0f ? 255 : (int)(f * 255.0f + 0.5f);
@@ -410,7 +487,8 @@ int mach64_zs_cpu_draw(gld_context *ctx, const m64_vertex *va, const m64_vertex 
         minx = (int)(mnx >> 2); maxx = (int)(mxx >> 2); miny = (int)(mny >> 2); maxy = (int)(mxy >> 2);
         if (minx < 0) minx = 0; if (miny < 0) miny = 0; if (maxx > W - 1) maxx = W - 1; if (maxy > Hh - 1) maxy = Hh - 1; }
     z->rn = 0;
-    if (z->cb && !p->hw.textured && maxy >= miny) {
+    cbs.tex = 0;
+    if ((z->cb || z->envcpu) && maxy >= miny && (!p->hw.textured ? z->cb != 0 : (mach64_cpu_env(ctx, &cbs.env) != 0 && (cbs.tex = 1)))) {
         mach64_flush_batch(ctx); cbw = mach64_cb_open(ctx, miny, maxy - miny + 1); cb_load(ctx, &cbs);
         { const m64_vertex *t = vb; vq[0] = va; vq[1] = (swapped ? vc : vb); vq[2] = (swapped ? t : vc); }
     }
@@ -441,7 +519,15 @@ int mach64_zs_cpu_draw(gld_context *ctx, const m64_vertex *va, const m64_vertex 
                                 int64_t v = (w0 * (int64_t)((vq[0]->argb >> sh) & 255u) + w1 * (int64_t)((vq[1]->argb >> sh) & 255u) + w2 * (int64_t)((vq[2]->argb >> sh) & 255u) + area / 2) / area;
                                 if (v > 255) v = 255; out |= (uint32_t)v << sh;
                             }
-                            *dp = cb_blend(ctx, &cbs, out, *dp); cb_any = 1;
+                            if (cbs.tex) {
+                                float f0 = (float)w0, f1 = (float)w1, f2 = (float)w2, sw, tw, ww;
+                                sw = f0 * gld_flt((uint32_t)vq[0]->s) * gld_flt((uint32_t)vq[0]->w) + f1 * gld_flt((uint32_t)vq[1]->s) * gld_flt((uint32_t)vq[1]->w) + f2 * gld_flt((uint32_t)vq[2]->s) * gld_flt((uint32_t)vq[2]->w);   /* the chip: address = interp(S*W) / interp(W) */
+                                tw = f0 * gld_flt((uint32_t)vq[0]->t) * gld_flt((uint32_t)vq[0]->w) + f1 * gld_flt((uint32_t)vq[1]->t) * gld_flt((uint32_t)vq[1]->w) + f2 * gld_flt((uint32_t)vq[2]->t) * gld_flt((uint32_t)vq[2]->w);
+                                ww = f0 * gld_flt((uint32_t)vq[0]->w) + f1 * gld_flt((uint32_t)vq[1]->w) + f2 * gld_flt((uint32_t)vq[2]->w);
+                                if (ww != 0.0f) { sw /= ww; tw /= ww; }
+                                out = env_apply(&cbs.env, out, tex_sample(&cbs.env, sw, tw));
+                            }
+                            *dp = cbs.blend_on ? cb_blend(ctx, &cbs, out, *dp) : mach64_cb_pack(ctx, (out >> 16) & 255u, (out >> 8) & 255u, out & 255u); cb_any = 1;
                         }
                     } else if (colour_on && run < 0) run = px;
                 } else if (run >= 0) { rect_run(ctx, z, py, run, px - 1, va, vb, vc, &flushed); run = -1; }

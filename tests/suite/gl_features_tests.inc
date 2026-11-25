@@ -244,3 +244,36 @@ static void t_cblend(void)
     v = cb_run(0x8006u, 0x0308u, 1, 0x80ff0000u, 0, 0, 0, 0); CHECK("blend SRC_ALPHA_SATURATE (Ad = 1 -> factor 0): the destination stays", isclr(v, 128, 128, 128));
     default_state(); sync(); clear_rt(0);
 }
+
+/* Textured triangles shaded on the CPU: texture environments the chip lacks (BLEND, COMBINE) and blend equations on a texture. */
+static void env_combine_set(uint32_t rgbf, uint32_t s0, uint32_t s1, uint32_t s2)
+{
+    g32(0x674c, 0x8570u << 16); g32(0x6750, (rgbf << 16) | 0x2100u); g32(0x6754, (s0 << 16) | s1); g32(0x6758, (s2 << 16) | 0x1702u); g32(0x675c, 0x85788576u);
+    g32(0x6760, 0x03000300u); g32(0x6764, 0x03020302u); g32(0x6768, 0x03020302u); gf(0x676c, 1.0f); gf(0x6770, 1.0f);
+}
+static void t_cputex(void)
+{
+    unsigned char *d = quadtex(); void *t = mktex(8, 8, 0x1907, d, (GL_REPEAT_ << 16) | GL_REPEAT_, 0x2600, 0x2600); unsigned v;
+    /* GL_BLEND env: C = Cf (1 - Ct) + Cc Ct, Cc = (0, 0, 1) */
+    default_state(); bindtex(t, 0x0be2u); gf(0x6738, 0.0f); gf(0x673c, 0.0f); gf(0x6740, 1.0f); gf(0x6744, 1.0f); sync(); clear_rt(0);
+    tquad(20, 20, 148, 148, 0.0f, 0.0f, 1.0f, 1.0f, 0xffffffffu);
+    CHECK("texture env BLEND: red texel -> (0,255,255)", isclr(px(36, 36), 0, 255, 255));
+    CHECK("texture env BLEND: white texel -> the env colour (0,0,255)", isclr(px(132, 132), 0, 0, 255));
+    CHECK("texture env BLEND: green texel -> (255,0,255)", isclr(px(132, 36), 255, 0, 255));
+    /* COMBINE SUBTRACT: texture - primary */
+    default_state(); bindtex(t, 0x8570u); env_combine_set(0x84e7u, 0x1702u, 0x8577u, 0x8576u); sync(); clear_rt(0);
+    tquad(20, 20, 148, 148, 0.0f, 0.0f, 1.0f, 1.0f, 0xff400000u);
+    CHECK("combine SUBTRACT: red texel - (64,0,0) = (191,0,0)", isclr(px(36, 36), 191, 0, 0));
+    CHECK("combine SUBTRACT: white texel -> (191,255,255)", isclr(px(132, 132), 191, 255, 255));
+    /* COMBINE ADD_SIGNED exact (the suite drives the CPU path directly only when GLD_EXACT_ADD_SIGNED; here check INTERPOLATE instead: texture*C2 + primary*(1-C2), C2 = constant alpha) */
+    default_state(); bindtex(t, 0x8570u); env_combine_set(0x8575u, 0x1702u, 0x8577u, 0x8576u); g32(0x6764, 0x03030302u); g32(0x6758, 0x85761702u);
+    gf(0x6738, 0.0f); gf(0x673c, 0.0f); gf(0x6740, 0.0f); gf(0x6744, 0.5f); sync(); clear_rt(0);
+    tquad(20, 20, 148, 148, 0.0f, 0.0f, 1.0f, 1.0f, 0xff000000u);
+    v = px(36, 36); CHECK("combine INTERPOLATE (arg2 = constant alpha 0.5, operand SRC_ALPHA): red texel*0.5 + black*0.5 = (128,0,0)", ((v >> 16) & 255) >= 120 && ((v >> 16) & 255) <= 136 && (v & 255) < 8);
+    /* a blend equation on a textured quad: REPLACE env, SUBTRACT blend over grey 128: white texel 255 - 128 = 127 */
+    default_state(); bindtex(t, GL_REPLACE_ENV); g32(0x6304, 0x01000000u); g32(0x62e8, (1u << 16) | 1u); g32(0x6300, 0x800a800au); sync(); clear_rt(0xff808080u);
+    tquad(20, 20, 148, 148, 0.0f, 0.0f, 1.0f, 1.0f, 0xffffffffu);
+    CHECK("textured SUBTRACT blend: white texel - grey = (127,127,127)", isclr(px(132, 132), 127, 127, 127) || isclr(px(132, 132), 123, 125, 123) || (((px(132, 132) >> 8) & 255) >= 119 && ((px(132, 132) >> 8) & 255) <= 133));
+    CHECK("textured SUBTRACT blend: red texel - grey = (127,0,0)", ((px(36, 36) >> 16) & 255) >= 119 && ((px(36, 36) >> 16) & 255) <= 133 && ((px(36, 36) >> 8) & 255) == 0);
+    default_state(); sync(); clear_rt(0);
+}
