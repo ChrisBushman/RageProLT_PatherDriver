@@ -51,7 +51,7 @@ static void rage_fill_descriptor(gld_context *ctx)
              * docs/standalone-driver-design.md).  Only features this driver really delivers: */
             static const unsigned char bits[] = { 5 /* ARB_texture_env_add */, 23 /* EXT_texture_env_add */, 16 /* ARB_occlusion_query */, 27 /* EXT_texture_lod_bias */,
                                                   30 /* EXT_stencil_wrap */, 34 /* EXT_separate_specular_color */, 36 /* EXT_blend_func_separate */, 38 /* EXT_stencil_two_side */,
-                                                  69 /* SGIS_texture_edge_clamp */ };
+                                                  69 /* SGIS_texture_edge_clamp */, 11 /* ARB_texture_mirrored_repeat */ };
             unsigned i; for (i = 0; i < sizeof bits; i++) dd[0x104 / 4 + bits[i] / 32] |= 1u << (bits[i] & 31);
         }
         *(uint16_t *)(uintptr_t)(descp + 0xb2) = 1024;

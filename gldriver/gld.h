@@ -195,6 +195,7 @@ void mach64_texture_deleted(void *texobj);
 /* gld_texture.c */
 int      mach64_bind_texture(gld_context *ctx);
 void     mach64_tex_select_lod(gld_context *ctx, float pix_area, float uv_area);
+extern float mach64_tex_mscale[2];
 extern int mach64_fog_on, mach64_spec_mode, mach64_flat_on, mach64_env_add;
 extern uint32_t mach64_tex_vofs[2];
 

@@ -28,6 +28,7 @@ typedef struct {
     uint32_t mip_off[12];
     int      nlevels;
     uint32_t clamp_s, clamp_t;
+    uint32_t mirror_s, mirror_t;           /* GL_MIRRORED_REPEAT: the stored image is the original followed by its mirror (twice the size); coordinates are halved */
     uint32_t bilinear_mag, bilinear_min;   /* GL_LINEAR mag / linear-within-level min filter */
     uint32_t min_filter;                   /* GL_TEXTURE_MIN_FILTER enum */
     uint32_t mipmapped;                    /* MIN filter is one of the four *_MIPMAP_* modes and >1 level is loaded */
@@ -279,6 +280,7 @@ static int mach64_upload(gld_context *ctx, void *texobj)
     mach64_tex_slot *slot;
     int nlevels = 0, L, pre_used = 0;
     uint32_t tex_new_h1 = 0, tex_new_h2 = 0, tex_new_hl = 0;   /* hash of the image being uploaded (stored in the slot on success) */
+    int mir_s = 0, mir_t = 0; unsigned char *mir_bufs[12] = { 0 };
 
     if (!t) return 0;
     state = *(const uint32_t *)(t + 0x30);
@@ -308,6 +310,7 @@ static int mach64_upload(gld_context *ctx, void *texobj)
                 uint32_t nb = tex_src_bytes(lvl[k].w, lvl[k].h, (uint16_t)lvl[k].fmt, (uint16_t)lvl[k].type), a1, a2;
                 tex_hash((const unsigned char *)(uintptr_t)lvl[k].src, nb, &a1, &a2); h1 = (h1 * 31u) ^ a1; h2 = (h2 * 31u) ^ a2; hl += nb;
             }
+            h1 ^= *(const uint32_t *)(s + 0x10) * 0x9e3779b1u;       /* the wrap modes shape the stored image (mirrored repeat) */
             TEX_LOCK(); ex = slot_find(tex_key(texobj));
             if (ex && ex->rsize && ex->owner == g_cur && ex->hlen == hl && ex->h1 == h1 && ex->h2 == h2 && ex->w == lvl[0].w && ex->h == lvl[0].h && ex->nlevels == nlevels) {
                 ex->texobj = texobj; ex->tick = ++g_tick; TEX_UNLOCK();
@@ -318,6 +321,24 @@ static int mach64_upload(gld_context *ctx, void *texobj)
         }
     }
 
+    /* GL_MIRRORED_REPEAT (0x8370): the chip only repeats or clamps, so store the image followed by its mirror image along that axis (REPEAT on the doubled
+     * texture, coordinates halved at draw time) -- exact for every filter.  Skipped (plain repeat) when the doubled size would exceed 1024. */
+    mir_s = mir_t = 0;
+    {   uint32_t wrap = *(const uint32_t *)(s + 0x10);
+        mir_s = ((wrap >> 16) == 0x8370u) && lvl[0].w * 2u <= 1024u; mir_t = ((wrap & 0xffffu) == 0x8370u) && lvl[0].h * 2u <= 1024u;
+        if (mir_s || mir_t) {
+            for (L = 0; L < nlevels; L++) {
+                uint32_t bpp = tex_src_bytes(1, 1, (uint16_t)lvl[L].fmt, (uint16_t)lvl[L].type), w = lvl[L].w, h = lvl[L].h, nw = mir_s ? w * 2u : w, nh = mir_t ? h * 2u : h, x, y;
+                const unsigned char *src = (const unsigned char *)(uintptr_t)lvl[L].src; unsigned char *dst = (unsigned char *)malloc((size_t)nw * nh * bpp);
+                if (!dst) { mir_s = mir_t = 0; break; }
+                for (y = 0; y < nh; y++) {
+                    uint32_t sy = (mir_t && y >= h) ? (2u * h - 1u - y) : y;
+                    for (x = 0; x < nw; x++) { uint32_t sx = (mir_s && x >= w) ? (2u * w - 1u - x) : x; memcpy(dst + ((size_t)y * nw + x) * bpp, src + ((size_t)sy * w + sx) * bpp, bpp); }
+                }
+                lvl[L].w = nw; lvl[L].h = nh; lvl[L].src = (uint32_t)(uintptr_t)dst; mir_bufs[L] = dst;
+            }
+        }
+    }
     /* Texel format.  Packed 16-bit sources (5_6_5, 4_4_4_4, 5_5_5_1) are stored natively as RGB565 / ARGB4444 / ARGB1555 (half the VRAM, exact); everything
      * else is ARGB8888 -- and if an ARGB8888 texture does not fit the heap it is retried as 16-bit (RGB565 without alpha, ARGB4444 with), the way a compact texture format
      * would be chosen.  Only the Path B (kext memcpy) upload can pack 16-bit texels. */
@@ -353,7 +374,7 @@ static int mach64_upload(gld_context *ctx, void *texobj)
      * pending batch bound (re-upload of a bound slot, or an eviction victim bound in this batch); a fresh region cannot be read by queued triangles. */
     if (pre_used || g_evict_used) mach64_flush_batch(ctx);
     p->dirty |= MACH64_DIRTY_STATE;   /* the upload's 2D blit clobbers engine state; the next triangle re-emits it */
-    if (!slot) return 0;
+    if (!slot) { int k; for (k = 0; k < 12; k++) free(mir_bufs[k]); return 0; }
     slot->hwfmt = hwfmt; slot->bpt = bpt; slot->texobj = texobj; slot->tick = ++g_tick;
     {   uint16_t f0 = (uint16_t)lvl[0].fmt;      /* alpha-bearing: RGBA / ALPHA / LUM_ALPHA / INTENSITY (RGB565 has none, whatever the source) */
         slot->has_alpha = (f0 == 0x1908u || f0 == 0x1906u || f0 == 0x190Au || f0 == 0x8049u) && hwfmt != 4u;
@@ -367,6 +388,9 @@ static int mach64_upload(gld_context *ctx, void *texobj)
         uint16_t magf = *(const uint16_t *)(s + 0x18);   /* GL_TEXTURE_MAG_FILTER (u16) */
         slot->clamp_s = ((wrap >> 16) != 0x2901u);
         slot->clamp_t = ((wrap & 0xffffu) != 0x2901u);
+        slot->mirror_s = (uint32_t)mir_s; slot->mirror_t = (uint32_t)mir_t;
+        if (mir_s) slot->clamp_s = 0;
+        if (mir_t) slot->clamp_t = 0;
         /* GL filter enums (state-object offsets: 0x2600 NEAREST,
          * 0x2601 LINEAR, 0x2700..0x2703 the mipmap variants (odd low bit = LINEAR within a level).
          * mag GL_LINEAR -> hardware bilinear (SCALE_3D_CNTL BILINEAR_TEX_EN bit25, HW-verified).
@@ -393,6 +417,7 @@ static int mach64_upload(gld_context *ctx, void *texobj)
 
     p->dirty |= MACH64_DIRTY_STATE;      /* new texels -> re-emit tex state       */
     slot->h1 = tex_new_h1; slot->h2 = tex_new_h2; slot->hlen = tex_new_hl;
+    { int k; for (k = 0; k < 12; k++) free(mir_bufs[k]); }
     return 1;
 }
 
@@ -484,6 +509,7 @@ static uint32_t mach64_blend_dst(uint32_t glf)
  * multiple contexts without per-context storage (unlike the pixel-store gc, which a later pixel op
  * reads and so had to be made per-context). */
 uint32_t mach64_tex_vofs[2] = { 0x80u, 0u };   /* see gld.h */
+float mach64_tex_mscale[2] = { 1.0f, 1.0f };      /* per-draw S/T coordinate scale of the bound texture (0.5 on a mirrored-repeat axis) */
 int mach64_spec_mode = 0;
 int mach64_env_add = 0;       /* GL_TEXTURE_ENV_MODE GL_ADD on this draw: primary colour rides the specular add, the diffuse colour becomes white */
 int mach64_fog_on = 0;                    /* consumed by mach64_read_vertex       */
@@ -744,7 +770,7 @@ int mach64_bind_texture(gld_context *ctx)
      * gli+0x15748+u*0x14 (all recovered with tools/mach64_mtexscan: the software context's gli, diffed while unit 1 was enabled / bound).
      * Both units enabled with textures bound -> ONE-pass compositing (primary = unit 0, secondary = unit 1); only unit 1 enabled -> it simply
      * becomes the primary map (its coordinates are read from the unit-1 vertex fields). */
-    mach64_tex_vofs[0] = 0x80u; mach64_tex_vofs[1] = 0u;
+    mach64_tex_vofs[0] = 0x80u; mach64_tex_vofs[1] = 0u; mach64_tex_mscale[0] = mach64_tex_mscale[1] = 1.0f;
     {   mach64_tex_slot *ub[2]; int u;
         for (u = 0; u < 2; u++) {
             uint32_t en = mach64_gli_u32(ctx, GLI_TEX2D_ENABLE + (uint32_t)u * GLI_UNIT_STRIDE);
@@ -785,6 +811,7 @@ int mach64_bind_texture(gld_context *ctx)
         else if (ub[1]) { bound = ub[1]; punit = 1; }
         if (bound2) mach64_tex_vofs[1] = 0x90u;
         mach64_tex_vofs[0] = 0x80u + (uint32_t)punit * 0x10u;
+        if (bound) { mach64_tex_mscale[0] = bound->mirror_s ? 0.5f : 1.0f; mach64_tex_mscale[1] = bound->mirror_t ? 0.5f : 1.0f; }
     }
     tex_on = bound != 0;
 

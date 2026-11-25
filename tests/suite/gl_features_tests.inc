@@ -171,3 +171,18 @@ static void t_query(void)
     gldDestroyFence(ctx, f);
     default_state(); sync(); g_endframe = 1; clear_rt(0);
 }
+
+/* GL_MIRRORED_REPEAT (wrap enum 0x8370): the chip repeats or clamps only, so the driver stores the image plus its mirror and halves the coordinates. */
+static void t_mirror(void)
+{
+    unsigned char *d = quadtex(); void *t = mktex(8, 8, 0x1907, d, (0x8370u << 16) | 0x8370u, 0x2600, 0x2600);
+    default_state(); bindtex(t, GL_REPLACE_ENV); sync(); clear_rt(0);
+    tquad(20, 20, 148, 84, 0.0f, 0.0f, 2.0f, 1.0f, 0xffffffffu);                         /* s 0..2 over 128 px: two 64 px periods, the second mirrored */
+    printf("    (mirror row: %08x %08x %08x %08x)\n", px(36, 36), px(68, 36), px(100, 36), px(132, 36));
+    CHECK("mirrored repeat: period 1 reads the image (red, then green)", isclr(px(36, 36), 255, 0, 0) && isclr(px(60, 36), 0, 255, 0));
+    CHECK("mirrored repeat: period 2 is the image reversed in S (green, then red)", isclr(px(84, 36), 0, 255, 0) && isclr(px(132, 36), 255, 0, 0));
+    clear_rt(0); tquad(20, 20, 84, 148, 0.0f, 0.0f, 1.0f, 2.0f, 0xffffffffu);              /* t 0..2 over 128 px: period 64 */
+    printf("    (T col: %08x %08x %08x %08x)\n", px(36, 36), px(36, 68), px(36, 84), px(36, 132));
+    CHECK("mirrored repeat in T: the second period is the image upside down", isclr(px(36, 36), 255, 0, 0) && isclr(px(36, 68), 0, 0, 255) && isclr(px(36, 84), 0, 0, 255) && isclr(px(36, 132), 255, 0, 0));
+    default_state(); sync(); clear_rt(0);
+}
