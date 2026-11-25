@@ -277,3 +277,23 @@ static void t_cputex(void)
     CHECK("textured SUBTRACT blend: red texel - grey = (127,0,0)", ((px(36, 36) >> 16) & 255) >= 119 && ((px(36, 36) >> 16) & 255) <= 133 && ((px(36, 36) >> 8) & 255) == 0);
     default_state(); sync(); clear_rt(0);
 }
+
+/* S3TC textures: decoded to RGBA at upload (DXT1 colour interpolation, DXT5 opaque alpha block) */
+static void t_s3tc(void)
+{
+    static const unsigned char dxt1[8] = { 0x00, 0xf8, 0x1f, 0x00, 0xe4, 0, 0, 0 };                     /* c0 = red, c1 = blue; row 0 indices 0,1,2,3 */
+    static const unsigned char dxt5[16] = { 255, 255, 0, 0, 0, 0, 0, 0, 0x00, 0xf8, 0x1f, 0x00, 0xe4, 0, 0, 0 };   /* opaque alpha block, same colours */
+    void *t = mktex(4, 4, 0x83f0, dxt1, (GL_REPEAT_ << 16) | GL_REPEAT_, 0x2600, 0x2600);
+    default_state(); bindtex(t, GL_REPLACE_ENV); sync(); clear_rt(0);
+    tquad(0, 0, 128, 128, 0.0f, 0.0f, 1.0f, 1.0f, 0xffffffffu);
+    printf("    (dxt1 row: %08x %08x %08x %08x)\n", px(16, 16), px(48, 16), px(80, 16), px(112, 16));
+    CHECK("DXT1: texel 0 is colour 0 (red)", isclr(px(16, 16), 255, 0, 0));
+    CHECK("DXT1: texel 1 is colour 1 (blue)", isclr(px(48, 16), 0, 0, 255));
+    CHECK("DXT1: texel 2 is 2/3 c0 + 1/3 c1", ((px(80, 16) >> 16) & 255) >= 160 && ((px(80, 16) >> 16) & 255) <= 190 && (px(80, 16) & 255) >= 70 && (px(80, 16) & 255) <= 100);
+    CHECK("DXT1: texel 3 is 1/3 c0 + 2/3 c1", ((px(112, 16) >> 16) & 255) >= 70 && ((px(112, 16) >> 16) & 255) <= 100 && (px(112, 16) & 255) >= 160 && (px(112, 16) & 255) <= 190);
+    t = mktex(4, 4, 0x83f3, dxt5, (GL_REPEAT_ << 16) | GL_REPEAT_, 0x2600, 0x2600);
+    default_state(); bindtex(t, GL_REPLACE_ENV); sync(); clear_rt(0);
+    tquad(0, 0, 128, 128, 0.0f, 0.0f, 1.0f, 1.0f, 0xffffffffu);
+    CHECK("DXT5: colour block decodes like DXT1", isclr(px(16, 16), 255, 0, 0) && isclr(px(48, 16), 0, 0, 255));
+    default_state(); sync(); clear_rt(0);
+}

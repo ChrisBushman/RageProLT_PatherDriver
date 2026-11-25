@@ -267,9 +267,46 @@ static void tex_hash(const unsigned char *p, uint32_t n, uint32_t *h1, uint32_t 
 static uint32_t tex_src_bytes(uint32_t w, uint32_t h, uint16_t fmt, uint16_t type)
 {
     uint32_t bpp;
+    if (fmt >= 0x83F0u && fmt <= 0x83F3u) return ((w + 3u) / 4u) * ((h + 3u) / 4u) * (fmt == 0x83F0u || fmt == 0x83F1u ? 8u : 16u);     /* S3TC blocks */
     if (type == 0x8363u || type == 0x8033u || type == 0x8034u) bpp = 2;
     else switch (fmt) { case 0x1908u: bpp = 4; break; case 0x1909u: case 0x1906u: case 0x8049u: bpp = 1; break; case 0x190Au: case 0x85B9u: bpp = 2; break; default: bpp = 3; }
     return w * h * bpp;
+}
+/* S3TC (DXT1/3/5) block decode to RGBA bytes (R,G,B,A order = GL_RGBA / UNSIGNED_BYTE).  Integer maths. */
+static void s3tc_565(uint32_t c, int *r, int *g, int *b) { int r5 = (int)((c >> 11) & 31u), g6 = (int)((c >> 5) & 63u), b5 = (int)(c & 31u); *r = (r5 << 3) | (r5 >> 2); *g = (g6 << 2) | (g6 >> 4); *b = (b5 << 3) | (b5 >> 2); }
+static unsigned char *s3tc_decode(const unsigned char *src, uint32_t w, uint32_t h, uint32_t fmt)
+{
+    uint32_t bx, by, bw = (w + 3u) / 4u, bh = (h + 3u) / 4u, bsz = (fmt == 0x83F0u || fmt == 0x83F1u) ? 8u : 16u;
+    unsigned char *out = (unsigned char *)malloc((size_t)w * h * 4u);
+    if (!out) return 0;
+    for (by = 0; by < bh; by++) for (bx = 0; bx < bw; bx++) {
+        const unsigned char *b = src + (size_t)(by * bw + bx) * bsz, *cb = b + (bsz == 16u ? 8 : 0);
+        uint32_t c0 = ((uint32_t)cb[0] << 8) | cb[1], c1 = ((uint32_t)cb[2] << 8) | cb[3], idx, x, y;
+        int pal[4][4], i;
+        /* the colour endpoints are little-endian 16-bit words in the stream: byte 0 is the low byte */
+        c0 = (uint32_t)cb[0] | ((uint32_t)cb[1] << 8); c1 = (uint32_t)cb[2] | ((uint32_t)cb[3] << 8);
+        idx = (uint32_t)cb[4] | ((uint32_t)cb[5] << 8) | ((uint32_t)cb[6] << 16) | ((uint32_t)cb[7] << 24);
+        s3tc_565(c0, &pal[0][0], &pal[0][1], &pal[0][2]); s3tc_565(c1, &pal[1][0], &pal[1][1], &pal[1][2]); pal[0][3] = pal[1][3] = 255;
+        if (c0 > c1 || bsz == 16u) { for (i = 0; i < 3; i++) { pal[2][i] = (2 * pal[0][i] + pal[1][i]) / 3; pal[3][i] = (pal[0][i] + 2 * pal[1][i]) / 3; } pal[2][3] = pal[3][3] = 255; }
+        else { for (i = 0; i < 3; i++) { pal[2][i] = (pal[0][i] + pal[1][i]) / 2; pal[3][i] = 0; } pal[2][3] = 255; pal[3][3] = 0; }
+        for (y = 0; y < 4; y++) for (x = 0; x < 4; x++) {
+            uint32_t px = bx * 4u + x, py = by * 4u + y; int a = pal[(idx >> (2u * (y * 4u + x))) & 3u][3];
+            unsigned char *o;
+            if (px >= w || py >= h) continue;
+            if (fmt == 0x83F2u) { uint32_t k = y * 4u + x; a = (int)((b[k >> 1] >> ((k & 1u) * 4u)) & 15u) * 17; }
+            else if (fmt == 0x83F3u) {
+                int a0 = b[0], a1 = b[1]; uint64_t bits = 0; uint32_t sel, k = y * 4u + x; int j;
+                for (j = 0; j < 6; j++) bits |= (uint64_t)b[2 + j] << (8 * j);
+                sel = (uint32_t)((bits >> (3u * k)) & 7u);
+                if (sel == 0) a = a0; else if (sel == 1) a = a1;
+                else if (a0 > a1) a = ((8 - (int)sel) * a0 + ((int)sel - 1) * a1) / 7;
+                else if (sel == 6) a = 0; else if (sel == 7) a = 255; else a = ((6 - (int)sel) * a0 + ((int)sel - 1) * a1) / 5;
+            }
+            o = out + ((size_t)py * w + px) * 4u;
+            o[0] = (unsigned char)pal[(idx >> (2u * (y * 4u + x))) & 3u][0]; o[1] = (unsigned char)pal[(idx >> (2u * (y * 4u + x))) & 3u][1]; o[2] = (unsigned char)pal[(idx >> (2u * (y * 4u + x))) & 3u][2]; o[3] = (unsigned char)a;
+        }
+    }
+    return out;
 }
 /* one texel of the border colour in the source image's own format (UNSIGNED_BYTE RGB/RGBA/LUMINANCE/ALPHA/LUMINANCE_ALPHA/INTENSITY or a packed 16-bit type) */
 static void tex_border_pixel(uint16_t fmt, uint16_t type, const float *c, unsigned char *o)
@@ -300,7 +337,7 @@ static int mach64_upload(gld_context *ctx, void *texobj)
     mach64_tex_slot *slot;
     int nlevels = 0, L, pre_used = 0;
     uint32_t tex_new_h1 = 0, tex_new_h2 = 0, tex_new_hl = 0;   /* hash of the image being uploaded (stored in the slot on success) */
-    int wmode_s = 0, wmode_t = 0; float wscale_s = 1.0f, wscale_t = 1.0f, wbias_s = 0.0f, wbias_t = 0.0f; unsigned char *mir_bufs[12] = { 0 };
+    int wmode_s = 0, wmode_t = 0; float wscale_s = 1.0f, wscale_t = 1.0f, wbias_s = 0.0f, wbias_t = 0.0f; unsigned char *mir_bufs[12] = { 0 }, *dec_bufs[12] = { 0 };
 
     if (!t) return 0;
     state = *(const uint32_t *)(t + 0x30);
@@ -341,6 +378,16 @@ static int mach64_upload(gld_context *ctx, void *texobj)
         }
     }
 
+    for (L = 0; L < nlevels; L++) {          /* compressed (S3TC) levels: decode to RGBA bytes; the rest of the upload sees an ordinary GL_RGBA image */
+        if (lvl[L].fmt >= 0x83F0u && lvl[L].fmt <= 0x83F3u) {
+            unsigned char *d = s3tc_decode((const unsigned char *)(uintptr_t)lvl[L].src, lvl[L].w, lvl[L].h, lvl[L].fmt);
+            if (!d) { int k; for (k = 0; k < 12; k++) { free(dec_bufs[k]); } return 0; }
+            lvl[L].src = (uint32_t)(uintptr_t)d; lvl[L].fmt = (lvl[L].fmt == 0x83F0u) ? 0x1907u : 0x1908u; lvl[L].type = 0x1401u; dec_bufs[L] = d;
+            if (lvl[L].fmt == 0x1907u) {                         /* RGB: drop the (opaque) alpha bytes into a packed RGB array */
+                uint32_t n = lvl[L].w * lvl[L].h, i; for (i = 0; i < n; i++) { d[i * 3] = d[i * 4]; d[i * 3 + 1] = d[i * 4 + 1]; d[i * 3 + 2] = d[i * 4 + 2]; }
+            }
+        }
+    }
     /* Wrap modes the chip lacks (it repeats or clamps only): the stored image is rebuilt so plain REPEAT/CLAMP gives the GL result, and the coordinates are mapped by
      * a per-axis scale and bias at draw time (mach64_tex_mscale/mbias).
      *   GL_MIRRORED_REPEAT: [image | mirror], REPEAT, s' = s / 2
@@ -424,7 +471,7 @@ static int mach64_upload(gld_context *ctx, void *texobj)
      * pending batch bound (re-upload of a bound slot, or an eviction victim bound in this batch); a fresh region cannot be read by queued triangles. */
     if (pre_used || g_evict_used) mach64_flush_batch(ctx);
     p->dirty |= MACH64_DIRTY_STATE;   /* the upload's 2D blit clobbers engine state; the next triangle re-emits it */
-    if (!slot) { int k; for (k = 0; k < 12; k++) free(mir_bufs[k]); return 0; }
+    if (!slot) { int k; for (k = 0; k < 12; k++) { free(mir_bufs[k]); free(dec_bufs[k]); } return 0; }
     free(slot->cpu); slot->cpu = 0;
     slot->hwfmt = hwfmt; slot->bpt = bpt; slot->texobj = texobj; slot->tick = ++g_tick;
     {   uint16_t f0 = (uint16_t)lvl[0].fmt;      /* alpha-bearing: RGBA / ALPHA / LUM_ALPHA / INTENSITY (RGB565 has none, whatever the source) */
@@ -468,7 +515,7 @@ static int mach64_upload(gld_context *ctx, void *texobj)
 
     p->dirty |= MACH64_DIRTY_STATE;      /* new texels -> re-emit tex state       */
     slot->h1 = tex_new_h1; slot->h2 = tex_new_h2; slot->hlen = tex_new_hl;
-    { int k; for (k = 0; k < 12; k++) free(mir_bufs[k]); }
+    { int k; for (k = 0; k < 12; k++) { free(mir_bufs[k]); free(dec_bufs[k]); } }
     return 1;
 }
 
