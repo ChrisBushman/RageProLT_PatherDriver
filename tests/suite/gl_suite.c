@@ -311,6 +311,7 @@ static unsigned count_nz(unsigned off) { unsigned n = 0, q; for (q = 0; q < W * 
 static void *mktex(int w, int h, unsigned fmt, const unsigned char *data, unsigned wrap, unsigned minf, unsigned magf)
 {
     unsigned char *st = calloc(1, 0x400), *t = calloc(1, 0x40), *r = st + 0x9c;
+    *(uint16_t *)(st + 0x3e) = 1000;                                 /* GL_TEXTURE_MAX_LEVEL default, set by GLEngine at texture creation (0xc18cc) */
     *(uint32_t *)st = 0x10030000u | 0x1907u;                         /* state word 0: target nibble 3 = 2D (2 = rectangle, 0 = cube map), as GLEngine writes it */
     *(uint32_t *)(st + 0x10) = wrap; *(uint16_t *)(st + 0x16) = (uint16_t)minf; *(uint16_t *)(st + 0x18) = (uint16_t)magf;
     *(uint16_t *)(r + 0) = (uint16_t)w; *(uint16_t *)(r + 2) = (uint16_t)h; *(uint16_t *)(r + 0xc) = (uint16_t)fmt; *(uint16_t *)(r + 0xe) = 0x1401;
@@ -492,6 +493,7 @@ static void t_specular(void)
 static void *mktex_typed(int w, int h, unsigned fmt, unsigned type, const void *data)
 {
     unsigned char *st = calloc(1, 0x400), *t = calloc(1, 0x40), *r = st + 0x9c;
+    *(uint16_t *)(st + 0x3e) = 1000;
     *(uint32_t *)st = 0x10030000u;
     *(uint32_t *)(st + 0x10) = (GL_REPEAT_ << 16) | GL_REPEAT_; *(uint16_t *)(st + 0x16) = 0x2600; *(uint16_t *)(st + 0x18) = 0x2600;
     *(uint16_t *)(r + 0) = (uint16_t)w; *(uint16_t *)(r + 2) = (uint16_t)h; *(uint16_t *)(r + 0xc) = (uint16_t)fmt; *(uint16_t *)(r + 0xe) = (uint16_t)type;
@@ -837,6 +839,7 @@ static void *mktex_mip(int nlev, unsigned minf, unsigned magf, unsigned char **b
 {
     static const unsigned char col[7][3] = { {255,0,0}, {0,255,0}, {0,0,255}, {255,255,255}, {255,255,0}, {0,255,255}, {255,0,255} };
     unsigned char *st = calloc(1, 0x400), *t = calloc(1, 0x40); int L, i, w = 64;
+    *(uint16_t *)(st + 0x3e) = 1000;
     *(uint32_t *)st = 0x10030000u;
     *(uint32_t *)(st + 0x10) = (GL_CLAMP_E << 16) | GL_CLAMP_E; *(uint16_t *)(st + 0x16) = (uint16_t)minf; *(uint16_t *)(st + 0x18) = (uint16_t)magf;
     for (L = 0; L < nlev; L++, w >>= 1) {
@@ -854,6 +857,7 @@ static void *mktex_mip_nonsq(unsigned minf, unsigned char **bufs)
 {
     static const unsigned char col[7][3] = { {255,0,0}, {0,255,0}, {0,0,255}, {255,255,255}, {255,255,0}, {0,255,255}, {255,0,255} };
     unsigned char *st = calloc(1, 0x400), *t = calloc(1, 0x40); int L, i, w = 64, h = 16;
+    *(uint16_t *)(st + 0x3e) = 1000;
     *(uint32_t *)st = 0x10030000u;
     *(uint32_t *)(st + 0x10) = (GL_CLAMP_E << 16) | GL_CLAMP_E; *(uint16_t *)(st + 0x16) = (uint16_t)minf; *(uint16_t *)(st + 0x18) = 0x2600;
     for (L = 0; L < 7; L++, w = w > 1 ? w >> 1 : 1, h = h > 1 ? h >> 1 : 1) {

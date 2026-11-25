@@ -365,7 +365,7 @@ static int mach64_upload(gld_context *ctx, void *texobj)
      * empty/invalid record -- a non-mipmapped texture yields a single level). */
     {   /* GLEngine's texture validate (0xd284c) derives the effective base level (state +0x5e) and max level (+0x5f), the latter clamped to the complete chain and >= base;
          * the raw GL_TEXTURE_MAX_LEVEL (default 1000) is the halfword at +0x3e. */
-        uint32_t effmax = s[0x5f];
+        uint32_t effmax = *(const uint16_t *)(s + 0x3e);      /* raw GL_TEXTURE_MAX_LEVEL (default 1000): the effective byte s[0x5f] is only derived when GLEngine validates the texture for a draw, which is after this upload, so it still reads 0 here; the chain enumeration below ends the levels at 1x1 */
         maxlim = effmax >= base_lod ? (int)(effmax - base_lod) + 1 : 1; if (maxlim > 12) maxlim = 12; }
     for (L = 0; L < maxlim; L++) {
         const unsigned char *r = s + 0x9c + (base_lod + (uint32_t)L) * 0x14;
