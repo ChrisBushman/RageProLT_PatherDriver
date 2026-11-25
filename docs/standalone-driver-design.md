@@ -409,3 +409,14 @@ Suggested next step (needs your OK as it changes what Phase 4 can test): write t
 * Bundle rules learned: kernel 2D ops (fill, clearZ, present) reprogram the engine, so the bundle sets `dirty |= STATE` after each; after a single-buffered flush-present `frame_new` is 1, so a following slot-0x60 frame start runs the deferred clear (tests that read pixels after a flush must not call the swap hook).
 * **`tests/suite/gl_suite` (ported from the 190-check reference) = 161 checks, 161 pass, stable over repeated runs on the G4.**  Removed with evidence: tests of Path B / Apple-kext internals (dma, guards, regaudit, soak, ...), DST_ALPHA blend (RGB565 target has no destination alpha), SCALE_3D bit 8 "on" (old MACH64_SC_BIT8 experiment knob).  Colour tolerance is +-16 (565 step 8 + dither; worst measured 15).
 * Still open: kernel type-0/type-1 accelerator clients for windowed GL under the real GLEngine/WindowServer (item 3 above); items 4 and 5 above.
+
+### 11.20 Windowed GL under CGL/WindowServer (Nov 25) -- working
+
+* The kext is an `IOAccelerator` subclass named `ATIRagePro` (the bundle finds its display by "ATIRagePro" in the framebuffer's `IOAccelTypes`). Personality: `IOMatchCategory` IOAccelerator, `IOGLBundleName` ATIRageProGLDriver; no `IOCFPlugInTypes` (no GA plugin until Phase 5).
+* `foundFramebuffer` equivalent (`publishFramebuffer`): sets `IOAccelTypes` (accelerator registry path), `IOAccelIndex`, `IOAccelRevision=2` on the IOFramebuffer. CGL follows that path, reads `IOGLBundleName`, loads `/System/Library/Extensions/<name>.bundle`. `tools/ragegl/cgl_probe` shows our accelerated renderer.
+* Type-0 (`kIOAccelSurfaceClientType`) surface client: 16 methods + kernel surface table (bounds/rects per surface). Type-1 stock layout is not implemented (our bundle uses its own client type).
+* Bundle must be built `-DGLD_DBUF` or CGL rejects double-buffered pixel formats; AGL needs an explicit GDevice for the Rage display.
+* **Target format follows the scanout depth.** The G4's scanout is 15-bit 1555; a raw blit of a 565 target gave wrong colours (the blit does not convert; `0x60040463` was tried and is a no-op). `RAGE_INFO_TGT555` (INFO flags bit 2) -> targets are created 1555: DP_PIX_WIDTH 555, fill colour converted, write mask 15 bit, ALPHA_DST_SEL=1 (alpha 0xff written; with 4 the RGBA-blend test read transparent). present is a same-format copy and refuses if the depth changed under the target.
+* Present: the bundle follows the window (CGS) each frame and blits only the rects not covered by windows in front (`mach64_cgs_visible_rects`). Verified with two overlapping windows (front covers back; both keep animating).
+* Test note: `~/rungui.sh` kills Terminal on each launch, so two GUI apps must be started from one script.
+* gl_suite 164/164 on the G4 (3 runs). Old SonicR bundle backup: `/Library/RageLT-backup/ATIRageProGLDriver.bundle.sonicr`.
