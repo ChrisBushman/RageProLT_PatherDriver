@@ -146,7 +146,11 @@ static void pack_at(const void *vp, float gx, float gy, float fb_h, m64_vertex *
 #define GLI_POINT_SIZE  0x6630
 #define GLI_LINE_WIDTH  0x6394
 #define GLI_POLYMODE    0x66e4      /* glPolygonMode: (front enum << 16) | back enum, GL_POINT 0x1b00 / GL_LINE 0x1b01 / GL_FILL 0x1b02 (found by gli diff) */
-#define GLI_FRONTFACE   0x66e8      /* halfword: 0x900 GL_CW, 0x901 GL_CCW */
+#define GLI_FRONTFACE   0x66e8
+#define GLI_OFFSET_FACTOR 0x66dc    /* glPolygonOffset factor, units (floats); gli+0x66f0 bit 16 = GL_POLYGON_OFFSET_FILL */
+#define GLI_OFFSET_UNITS  0x66e0
+#define GLI_OFFSET_EN     0x66f0
+static float gli_f(gld_context *ctx, uint32_t off) { uint32_t b = mach64_gli_u32(ctx, off); float f; __builtin_memcpy(&f, &b, 4); return f; }      /* halfword: 0x900 GL_CW, 0x901 GL_CCW */
 
 #define FBH_OF(ctx) ((float)*(const uint32_t *)((const unsigned char *)(ctx) + 0x1f4))
 /* Read a gli float field (glPointSize@0x6630 / glLineWidth@0x6394), defaulting
@@ -181,7 +185,36 @@ static void draw_point(gld_context *ctx, const void *vp, float fb_h, float s)
 
 /* One line v0->v1 -> a width-2 quad, offset perpendicular to the major axis
  * (offset in Y for x-major lines, in X for y-major), per Mesa mach64_draw_line. */
-static void draw_line(gld_context *ctx, const void *v0, const void *v1,
+static void draw_line_solid(gld_context *ctx, const void *v0, const void *v1, float fb_h, float wdt);
+#define GLI_STIPPLE_FACTOR 0x6398   /* glLineStipple factor (word), pattern in the high half of +0x639c; +0x63a0 bit 24 = GL_LINE_STIPPLE */
+#define GLI_STIPPLE_EN     0x63a0
+/* Vertex v0 + t * (v1 - v0) over every float of the gli vertex (x, y, 1/w, z, colour, texcoords: all linear in screen space). */
+static void vlerp(unsigned char *o, const unsigned char *a, const unsigned char *b, float t)
+{
+    int i; for (i = 0; i < (int)MACH64_GLIVERTEX_STRIDE; i += 4) { float fa = *(const float *)(a + i), fb = *(const float *)(b + i); *(float *)(o + i) = fa + (fb - fa) * t; }
+}
+/* A stippled line: walk the major axis one pixel at a time, bit (i / factor) & 15 of the pattern (LSB first) decides on/off; each run of on pixels is a
+ * solid segment between interpolated vertices. */
+static void draw_line(gld_context *ctx, const void *v0, const void *v1, float fb_h, float wdt)
+{
+    uint32_t pat, fac; float x0, y0, x1, y1, len; int n, i, run = -1;
+    if (!(mach64_gli_u32(ctx, GLI_STIPPLE_EN) & 0x01000000u)) { draw_line_solid(ctx, v0, v1, fb_h, wdt); return; }
+    pat = mach64_gli_u32(ctx, GLI_STIPPLE_FACTOR + 4) >> 16; fac = mach64_gli_u32(ctx, GLI_STIPPLE_FACTOR); if (fac < 1) fac = 1; if (fac > 256) fac = 256;
+    x0 = *(const float *)((const unsigned char *)v0 + GVOFF_X); y0 = *(const float *)((const unsigned char *)v0 + GVOFF_Y);
+    x1 = *(const float *)((const unsigned char *)v1 + GVOFF_X); y1 = *(const float *)((const unsigned char *)v1 + GVOFF_Y);
+    len = (x1 - x0 < 0 ? x0 - x1 : x1 - x0); if ((y1 - y0 < 0 ? y0 - y1 : y1 - y0) > len) len = (y1 - y0 < 0 ? y0 - y1 : y1 - y0);
+    n = (int)(len + 0.5f); if (n < 1) n = 1; if (n > 8192) n = 8192;
+    for (i = 0; i <= n; i++) {
+        int on = i < n && ((pat >> ((uint32_t)i / fac & 15u)) & 1u);
+        if (on && run < 0) run = i;
+        if (!on && run >= 0) {
+            unsigned char a[MACH64_GLIVERTEX_STRIDE], b[MACH64_GLIVERTEX_STRIDE];
+            vlerp(a, (const unsigned char *)v0, (const unsigned char *)v1, (float)run / (float)n); vlerp(b, (const unsigned char *)v0, (const unsigned char *)v1, (float)i / (float)n);
+            draw_line_solid(ctx, a, b, fb_h, wdt); run = -1;
+        }
+    }
+}
+static void draw_line_solid(gld_context *ctx, const void *v0, const void *v1,
                       float fb_h, float wdt)
 {
     float x0 = *(const float *)((const unsigned char *)v0 + GVOFF_X);
@@ -280,6 +313,22 @@ static void emit_tri_rv(gld_context *ctx, const m64_vertex *r0, const m64_vertex
     /* glShadeModel(GL_FLAT): flatten to the provoking (GL default = LAST) vertex's colour so
      * the 3D scaler interpolates a constant.  For GL_TRIANGLES v2 is the provoking vertex. */
     if (mach64_flat_on) { OWN(); v0.argb = v2.argb; v1.argb = v2.argb; }
+    if (mach64_gli_u32(ctx, GLI_OFFSET_EN) & 0x00010000u) {      /* GL_POLYGON_OFFSET_FILL: z += factor * max(|dz/dx|, |dz/dy|) + units * r (r = one resolvable depth step) */
+        float fx0 = (float)((int16_t)((uint32_t)q0->x_y >> 16)), fy0 = (float)((int16_t)(q0->x_y & 0xffff)), fx1 = (float)((int16_t)((uint32_t)q1->x_y >> 16)), fy1 = (float)((int16_t)(q1->x_y & 0xffff));
+        float fx2 = (float)((int16_t)((uint32_t)q2->x_y >> 16)), fy2 = (float)((int16_t)(q2->x_y & 0xffff));
+        float z0 = (float)(q0->z >> 15), z1 = (float)(q1->z >> 15), z2 = (float)(q2->z >> 15);
+        float det = (fx1 - fx0) * (fy2 - fy0) - (fx2 - fx0) * (fy1 - fy0), m = 0.0f, off, fac = gli_f(ctx, GLI_OFFSET_FACTOR), units = gli_f(ctx, GLI_OFFSET_UNITS);
+        if (det != 0.0f) {
+            float dzdx = ((z1 - z0) * (fy2 - fy0) - (z2 - z0) * (fy1 - fy0)) / det * 4.0f, dzdy = ((z2 - z0) * (fx1 - fx0) - (z1 - z0) * (fx2 - fx0)) / det * 4.0f;   /* per pixel (coordinates are in quarter pixels) */
+            if (dzdx < 0) dzdx = -dzdx; if (dzdy < 0) dzdy = -dzdy; m = dzdx > dzdy ? dzdx : dzdy;
+        }
+        off = fac * m + units * 2.0f;   /* r = one resolvable step: the chip keeps depth >> 1 */
+        if (off != 0.0f) {
+            int32_t zz[3]; int k; float zf[3]; zf[0] = z0 + off; zf[1] = z1 + off; zf[2] = z2 + off;
+            for (k = 0; k < 3; k++) zz[k] = zf[k] < 0.0f ? 0 : zf[k] > 65535.0f ? 65535 : (int32_t)zf[k];
+            OWN(); v0.z = (int32_t)((uint32_t)zz[0] << 15); v1.z = (int32_t)((uint32_t)zz[1] << 15); v2.z = (int32_t)((uint32_t)zz[2] << 15);
+        }
+    }
     if (p->hw.textured && p->tex_slot) {        /* software mip level / min filter for this triangle */
         const unsigned char *g0 = (const unsigned char *)gv0, *g1 = (const unsigned char *)gv1, *g2 = (const unsigned char *)gv2;
         float x0 = *(const float *)(g0 + GVOFF_X), y0 = *(const float *)(g0 + GVOFF_Y);

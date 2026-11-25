@@ -36,3 +36,63 @@ static void t_polymode(void)
     free(vb);
     default_state(); sync(); clear_rt(0);
 }
+
+/* glPolygonOffset (gli 0x66dc factor, 0x66e0 units, 0x66f0 bit 16 = fill enable): coplanar redraw wins with a negative offset, loses with a positive one,
+ * and the factor scales with the triangle's depth slope. */
+static void po_quad(float z0, float z1, unsigned col)         /* a quad whose depth ramps z0 (left) -> z1 (right) */
+{
+    unsigned char *vb = VB(4);
+    V(VX(vb, 0), 20, 100, z0, col); V(VX(vb, 1), 100, 100, z1, col); V(VX(vb, 2), 100, 20, z1, col); V(VX(vb, 3), 20, 20, z0, col);
+    SLOT(0x38)(ctx, vb, 4); free(vb);
+}
+/* red quad with the offset OFF, then the blue one with it on (the app enables GL_POLYGON_OFFSET_FILL between the draws) */
+static void po_pair(float factor, float units, int on, float z0, float z1)
+{
+    default_state(); g32(0x6340, 0x01000000u); g32(0x63b8, 0x01000000u); gf(0x66dc, factor); gf(0x66e0, units); sync(); g_endframe = 0; clear_rt(0);
+    po_quad(z0, z1, 0xffff0000u);
+    if (on) g32(0x66f0, 0x00010000u);
+    po_quad(z0, z1, 0xff0000ffu); endframe();
+}
+static void t_polyoffset(void)
+{
+    po_pair(0, 0, 0, 0.5f, 0.5f);
+    CHECK("polygon offset off: a coplanar redraw fails GL_LESS (first draw stays)", (px(60, 60) & 0xffffff) == 0xff0000);
+    po_pair(0, -2.0f, 1, 0.5f, 0.5f);
+    CHECK("polygon offset units -2: the coplanar redraw wins", (px(60, 60) & 0xffffff) == 0x0000ff);
+    po_pair(0, 2.0f, 1, 0.5f, 0.5f);
+    CHECK("polygon offset units +2: the coplanar redraw still loses", (px(60, 60) & 0xffffff) == 0xff0000);
+    po_pair(0, -2.0f, 0, 0.5f, 0.5f);
+    CHECK("polygon offset set but not enabled: no effect", (px(60, 60) & 0xffffff) == 0xff0000);
+    po_pair(-1.0f, 0, 1, 0.2f, 0.8f);
+    CHECK("polygon offset factor -1 on a sloped plane: the coplanar redraw wins", (px(30, 60) & 0xffffff) == 0x0000ff && (px(95, 60) & 0xffffff) == 0x0000ff);
+    po_pair(-1.0f, 0, 1, 0.5f, 0.5f);
+    CHECK("polygon offset factor on a flat plane contributes nothing (slope 0)", (px(60, 60) & 0xffffff) == 0xff0000);
+    default_state(); sync(); g_endframe = 1; clear_rt(0);
+}
+
+/* glLineStipple (gli 0x6398 factor, 0x639c pattern << 16, 0x63a0 bit 24 enable): dashes of the right length, factor-scaled, and off = solid. */
+static int stipple_run(int x0, int x1, int y, int *runs)       /* lit pixel count across [x0, x1) on rows y-1..y+1, and the number of lit runs */
+{
+    int x, lit = 0, prev = 0; *runs = 0;
+    for (x = x0; x < x1; x++) { int on = px(x, y - 1) != 0 || px(x, y) != 0 || px(x, y + 1) != 0; lit += on; if (on && !prev) (*runs)++; prev = on; }
+    return lit;
+}
+static void stipple_line(unsigned pattern, unsigned factor, int enable, int x0, int x1)
+{
+    unsigned char *vb;
+    default_state(); g32(0x6398, factor); g32(0x639c, pattern << 16); if (enable) g32(0x63a0, 0x01000000u); sync(); clear_rt(0);
+    vb = VB(2); V(VX(vb, 0), x0, 60, 0, 0xffffffffu); V(VX(vb, 1), x1, 60, 0, 0xffffffffu); SLOT(0x1c)(ctx, vb, 2); endframe(); free(vb);
+}
+static void t_linestipple(void)
+{
+    int runs, lit;
+    stipple_line(0x0f0f, 1, 1, 10, 74); lit = stipple_run(8, 76, 60, &runs);
+    CHECK("line stipple 0x0f0f factor 1: 8 dashes of 4 px, half the pixels lit", runs == 8 && lit >= 30 && lit <= 36);
+    stipple_line(0x00ff, 3, 1, 10, 106); lit = stipple_run(8, 108, 60, &runs);
+    CHECK("line stipple 0x00ff factor 3: dashes are 24 px long (2 dashes + the start of a 3rd gap)", runs == 2 && lit >= 46 && lit <= 50);
+    stipple_line(0xaaaa, 2, 1, 10, 74); lit = stipple_run(8, 76, 60, &runs);
+    CHECK("line stipple 0xaaaa factor 2: alternating 2-px dashes (LSB first: off, on, ...)", runs >= 15 && runs <= 17 && lit >= 30 && lit <= 36);
+    stipple_line(0x0f0f, 1, 0, 10, 74); lit = stipple_run(8, 76, 60, &runs);
+    CHECK("line stipple disabled: the line is solid", runs == 1 && lit >= 62);
+    default_state(); sync(); clear_rt(0);
+}

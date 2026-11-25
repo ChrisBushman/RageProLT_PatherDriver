@@ -140,6 +140,14 @@ static void t_line_stipple(void)
     for (x = 10; x < 74; x++) { int on; px(x, 64, &r, &g, &b); on = r > 128; lit += on; if (prev >= 0 && on != prev) trans++; prev = on; }
     { char n[64]; snprintf(n, sizeof n, "%d of 64 lit, %d transitions", lit, trans); report("line stipple", glerr() ? -1 : (lit > 20 && lit < 44 && trans >= 6), n); }
 }
+static void t_line_stipple3(void)
+{
+    int x, lit = 0, trans = 0, prev = -1, r, g, b;
+    reset(0, 0, 0); glEnable(GL_LINE_STIPPLE); glLineStipple(3, 0x00ff); glColor4f(1, 1, 1, 1);
+    glBegin(GL_LINES); glVertex2f(10, 64.5f); glVertex2f(100, 64.5f); glEnd();
+    for (x = 10; x < 100; x++) { int on; px(x, 64, &r, &g, &b); on = r > 128; lit += on; if (prev >= 0 && on != prev) trans++; prev = on; }
+    { char n[64]; snprintf(n, sizeof n, "%d of 90 lit, %d transitions (want 4 runs of 24)", lit, trans); report("line stipple factor 3", glerr() ? -1 : (lit > 38 && lit < 52 && trans >= 3), n); }
+}
 static void t_polygon_offset(void)
 {
     reset(0, 0, 0); glEnable(GL_DEPTH_TEST); glDepthFunc(GL_LESS);
@@ -482,7 +490,7 @@ static const struct { const char *name; tfn fn; const char *ext; } TESTS[] = {
     { "clearcolor", t_clearcolor, 0 }, { "blend_subtract", t_blend_subtract, "GL_EXT_blend_subtract" }, { "blend_revsub", t_blend_revsub, "GL_EXT_blend_subtract" }, { "blend_min", t_blend_min, "GL_EXT_blend_minmax" },
     { "blend_max", t_blend_max, "GL_EXT_blend_minmax" }, { "blend_color", t_blend_color, "GL_EXT_blend_color" }, { "blend_sep", t_blend_sep, "GL_EXT_blend_func_separate" },
     { "blend_dstcolor", t_blend_dstcolor, 0 }, { "blend_srccolor", t_blend_srccolor_dst, 0 }, { "blend_satur", t_blend_satur, 0 },
-    { "line_smooth", t_line_smooth, 0 }, { "point_smooth", t_point_smooth, 0 }, { "line_stipple", t_line_stipple, 0 }, { "polygon_offset", t_polygon_offset, 0 },
+    { "line_smooth", t_line_smooth, 0 }, { "point_smooth", t_point_smooth, 0 }, { "line_stipple", t_line_stipple, 0 }, { "line_stipple3", t_line_stipple3, 0 }, { "polygon_offset", t_polygon_offset, 0 },
     { "polymode_line", t_polygon_mode_line, 0 }, { "polymode_point", t_polygon_mode_point, 0 }, { "cull", t_cull, 0 }, { "scissor", t_scissor, 0 }, { "clip_plane", t_clip_plane, 0 },
     { "logic", t_alpha_logic, 0 },
     { "tex_npot", t_tex_npot, "GL_ARB_texture_non_power_of_two" }, { "tex_rect", t_tex_rect, "GL_EXT_texture_rectangle" }, { "tex_cube", t_tex_cube, "GL_ARB_texture_cube_map" },
