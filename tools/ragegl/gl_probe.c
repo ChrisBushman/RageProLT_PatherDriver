@@ -457,7 +457,7 @@ static void t_secondary_color(void)
 {
     reset(0, 0, 0); glEnable(GL_COLOR_SUM_EXT); glColor3f(0.5f, 0, 0); glSecondaryColor3fEXT(0, 0.5f, 0); quad(10, 10, 100, 100, 0.5f, 0, 0, 1);
     glDisable(GL_COLOR_SUM_EXT);
-    report("secondary colour (colour sum)", glerr() ? -1 : near3(50, 50, 128, 0, 0, 40), "untextured: sum has no effect without a texture/with sum off is acceptable");
+    report("secondary colour (colour sum)", glerr() ? -1 : near3(50, 50, 128, 128, 0, 30), "colour sum: primary (0.5,0,0) + secondary (0,0.5,0)");
 }
 static void t_stencil_basic(void)
 {
