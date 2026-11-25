@@ -1,6 +1,6 @@
 # Build on the Panther host: make -C tools/ragegl
 CFLAGS ?= -O2 -Wall -I../../common
-BUNDLE_SRC = ../../gldriver/gld_core.c ../../gldriver/gld_context.c ../../gldriver/gld_entry.c ../../gldriver/gld_prims.c ../../gldriver/gld_dispatch.c ../../gldriver/gld_pixelformat.c ../../gldriver/gld_cgs.c ../../gldriver/gld_glue.c ../../gldriver/gld_pixels.c ../../gldriver/gld_texture.c ../../gldriver/rage_backend.c ../../common/mach64_emit.c
+BUNDLE_SRC = ../../gldriver/gld_core.c ../../gldriver/gld_context.c ../../gldriver/gld_entry.c ../../gldriver/gld_prims.c ../../gldriver/gld_dispatch.c ../../gldriver/gld_pixelformat.c ../../gldriver/gld_cgs.c ../../gldriver/gld_glue.c ../../gldriver/gld_pixels.c ../../gldriver/gld_texture.c ../../gldriver/gld_stencil.c ../../gldriver/rage_backend.c ../../common/mach64_emit.c
 all: scanshot ragegl_test ragegl_bench gldcore_test bundle_test gl_suite
 ragegl_test: ragegl_test.c ragegl.h
 	cc $(CFLAGS) -o $@ ragegl_test.c -framework IOKit -framework CoreFoundation

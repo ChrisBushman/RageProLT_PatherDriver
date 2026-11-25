@@ -107,6 +107,7 @@ int gldDestroyContext(gld_context *ctx)
         mach64_tex_ctx_gone(&p->rb);
         rgb_release(&p->rb);
         rgb_close(&p->rb);
+        mach64_zs_free(p);
         free(p);
         ctx->backend = 0;
     }

@@ -197,7 +197,7 @@ static void t_alphatest(void)
 static void t_pixelops(void)
 {
     unsigned char rd[4 * 4 * 4], img[4 * 4 * 4], bm[4]; float rp[3]; int i; unsigned short z2[2];
-    default_state(); sync(); clear_rt(0);
+    default_state(); g32(0x6340, 0x01000000u); g32(0x63b8, 0x01000000u); sync(); clear_rt(0);      /* depth test + write: the depth plane is only written then */
     tri(20, 16, 0xffff0000u, 140, 16, 0xffff0000u, 80, 130, 0xffff0000u, 0.0f); mach64_flush_batch(ctx); rgb_fence(&P->rb);
     memset(rd, 0, sizeof rd);
     mach64_ctl08(ctx, 80, (int)P->rb.h - 1 - 50, 1, 1, 0x1908u, 0x1401u, rd);       /* GL y = H-1-fb row */
@@ -1376,7 +1376,12 @@ static void free_tex(void *t) { if (!t) return; free((void *)(uintptr_t)*(uint32
 
 
 
+#include "gl_stencil_tests.inc"
+
 static const struct { const char *name; void (*fn)(void); } TESTS[] = {
+    {"stencil_raster_rule", t_stencil_raster_rule}, {"stencil_ops", t_stencil_ops}, {"stencil_funcs", t_stencil_funcs}, {"stencil_masks", t_stencil_masks},
+    {"stencil_depth", t_stencil_depth}, {"stencil_volume", t_stencil_volume}, {"stencil_twoside", t_stencil_twoside}, {"stencil_watertight", t_stencil_watertight},
+    {"stencil_agree", t_stencil_agree}, {"stencil_random", t_stencil_random}, {"stencil_persist", t_stencil_persist}, {"stencil_clear", t_stencil_clear}, {"stencil_scissor", t_stencil_scissor},
     {"gouraud", t_gouraud}, {"flat", t_flat}, {"colormask", t_colormask}, {"depth", t_depth}, {"blend", t_blend},
     {"alphatest", t_alphatest}, {"prims", t_prims}, {"pixelops", t_pixelops}, {"gourbig", t_gourbig}, {"clear", t_clear}, {"prims2", t_prims2}, {"fog", t_fog}, {"stipple", t_stipple}, {"logicop", t_logicop}, {"tex_replace", t_tex_replace}, {"multitex", t_multitex}, {"dstalpha", t_dstalpha}, {"texfmt8", t_texfmt8}, {"texfmt", t_texfmt}, {"texfmt_fallback", t_texfmt_fallback}, {"texfmt_mt", t_texfmt_mt}, {"specular", t_specular}, {"multitex_min", t_multitex_min}, {"tex_alpha", t_tex_alpha}, {"tex_wrap", t_tex_wrap}, {"tex_filter", t_tex_filter}, {"tex_alpha_edge", t_tex_alpha_edge}, {"tex_alpha_decal_probe", t_tex_alpha_decal_probe}, {"tex_alpha_bilinear", t_tex_alpha_bilinear}, {"tex_churn", t_tex_churn}, {"tex_highptr", t_tex_highptr}, {"tex_mip", t_tex_mip}, {"tex_mip_nonsq", t_tex_mip_nonsq}, {"tex_bit8", t_tex_bit8}, {"tex_lodbias", t_tex_lodbias}, {"tex_mip_prims", t_tex_mip_prims}, {"tex_mip_fog", t_tex_mip_fog}, {"tex_mip_gouraud", t_tex_mip_gouraud}, {"tex_hwmip", t_tex_hwmip}, {"tex_minlin", t_tex_minlin}, {"multictx", t_multictx}, 
 };

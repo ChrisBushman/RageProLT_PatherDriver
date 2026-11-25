@@ -122,7 +122,9 @@ typedef struct {
     uint32_t   triangles;          /* statistics */
     /* idle repaint (windowed only): WindowServer paints the window white when it is exposed; an app that is not drawing (Chess) never restores it, so a
      * small asynchronous thread re-presents the last frame once the context has been idle for ~300 ms.  `volatile` counters only: nothing on the hot path. */
-    uint32_t   stencil_mode;       /* 0 none, 1 = stencil write, 2 = stencil test, emulated in the Z buffer (see mach64_sync_depth_from_gli) */
+    void      *zs;                 /* stencil/depth emulation state (gld_stencil.c) */
+    uint32_t   zs_mode;            /* 0 stencil off, 1 hardware Z-as-stencil, 2 CPU stencil (gld_stencil.c) */
+    uint32_t   nonpoly;            /* 1 while a point/line quad is drawn: it uses the front-face stencil state */
     uint32_t   tsig[9], tsig_valid;/* texture sampler setup of the last emitted state (see mach64_draw_triangle) */
     volatile uint32_t presents;    /* completed presents (activity together with `triangles`) */
     volatile uint32_t k2d_touched; /* the thread's blit reprogrammed the engine: the next draw must re-emit the state */
@@ -132,6 +134,18 @@ typedef struct {
 } mach64_priv;
 
 extern float mach64_zforce;             /* >= 0: every vertex gets this window depth (stencil emulation) */
+/* gld_stencil.c */
+void     mach64_zs_free(mach64_priv *p);
+void     mach64_zs_reset(mach64_priv *p);
+void     mach64_zs_sync(gld_context *ctx, uint32_t gli);
+void     mach64_zs_prepare(gld_context *ctx);
+void     mach64_zs_note_hw(gld_context *ctx);
+int      mach64_zs_cpu_draw(gld_context *ctx, const m64_vertex *a, const m64_vertex *b, const m64_vertex *c);
+void     mach64_zs_clear_depth(gld_context *ctx);
+void     mach64_zs_depth_to_hw(gld_context *ctx);
+void     mach64_zs_clear_stencil(gld_context *ctx, uint32_t v);
+uint32_t mach64_zs_peek(gld_context *ctx, int which, int x, int y);     /* which 0 = stencil, 1 = depth (tests) */
+int      mach64_hw_tri(gld_context *ctx, const m64_vertex *v0, const m64_vertex *v1, const m64_vertex *v2);
 void mach64_repaint_start(mach64_priv *p);
 void mach64_repaint_stop(mach64_priv *p);
 

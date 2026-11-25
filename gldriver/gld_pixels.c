@@ -116,6 +116,7 @@ int mach64_ctl08(void *rb_ctx, int x, int y, int w, int h, unsigned format, unsi
         int elem;
         if (!p->rb.z_off) return 0;
         switch (type) { case 0x1403u: elem = 2; break; case 0x1405u: case 0x1406u: elem = 4; break; default: return 0; }
+        mach64_zs_depth_to_hw(c);                       /* the depth plane may live in the CPU copy (stencil emulation) */
         if (win_get(p, p->rb.z_off, fr0, nr, &win)) return 0;
         row_stride = (elem >= p_align) ? l * elem : p_align * ((l * elem + p_align - 1) / p_align);
         base += p_skiprows * row_stride + p_skippix * elem;

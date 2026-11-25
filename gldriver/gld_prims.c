@@ -167,8 +167,10 @@ static void draw_point(gld_context *ctx, const void *vp, float fb_h, float s)
     pack_at(vp, x + s, y - s, fb_h, &b, tw, th);
     pack_at(vp, x - s, y + s, fb_h, &c, tw, th);
     pack_at(vp, x + s, y + s, fb_h, &d, tw, th);
+    p->nonpoly = 1;
     mach64_draw_triangle(ctx, &a, &b, &c);
     mach64_draw_triangle(ctx, &d, &c, &b);
+    p->nonpoly = 0;
 }
 
 /* One line v0->v1 -> a width-2 quad, offset perpendicular to the major axis
@@ -191,8 +193,10 @@ static void draw_line(gld_context *ctx, const void *v0, const void *v1,
     pack_at(v1, x1 - ix, y1 - iy, fb_h, &B, tw, th);
     pack_at(v0, x0 + ix, y0 + iy, fb_h, &C, tw, th);
     pack_at(v1, x1 + ix, y1 + iy, fb_h, &D, tw, th);
+    p->nonpoly = 1;
     mach64_draw_triangle(ctx, &A, &B, &C);
     mach64_draw_triangle(ctx, &D, &C, &B);
+    p->nonpoly = 0;
 }
 
 /* Half-texel inset: remap the texcoord so u in [0,1] samples texel CENTRES

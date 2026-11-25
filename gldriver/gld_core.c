@@ -59,81 +59,13 @@ uint32_t mach64_gli_u32(gld_context *ctx, uint32_t off)
 
 float mach64_zforce = -1.0f;
 
-/* GL depth state -> Z_CNTL.  gli+0x6340 bit24 = GL_DEPTH_TEST, +0x633c >> 16 = glDepthFunc, +0x63b8 bit24 = glDepthMask.
- *
- * STENCIL.  The chip has no stencil planes.  GLEngine's per-face stencil state (static analysis of glStencilFunc at GLEngine 0x38528 and glGetIntegerv; the face is
- * gli[0x4612 + 0x10000], 0 = front; every field below is at face*0x10 + the offset): +0x670c value mask, +0x6710 reference (clamped to (1 << desc[0x38]) - 1, see
- * rage_fill_descriptor), +0x6714 func (halfword), +0x6716 sfail, +0x6718 dpfail, +0x671a dppass (halfwords); write mask gli[0x63ac + face*4], clear value gli[0x6334],
- * enable = bit `face` of gli[0x6734].
- *
- * With the depth test off the Z buffer is free and holds the stencil value s (0..255) as z = s * 257.  A stencil-tested draw gives every vertex the constant depth
- * ref * 257 and Z-tests it with the GL function (frag FUNC stored, the same orientation as GL's ref FUNC stencil); the pass op is applied by the Z write (z = ref for
- * REPLACE, z = 0 for ZERO when nothing is compared; KEEP: no write).  Exact for: any func, value mask and write mask 0xff, ops KEEP/REPLACE (and ZERO with ALWAYS or
- * ref 0), sfail KEEP (or any op when the func is ALWAYS).  Everything else (INCR/DECR/INVERT, partial masks, depth test with stencil) needs the CPU-side stencil
- * buffer (docs/standalone-driver-design.md, stencil) and is ignored here until that lands.  Z is filled with the clear value when the emulation starts and wiped to
- * far when it ends. */
-#define GL_KEEP_    0x1e00u
-#define GL_REPLACE_ 0x1e01u
-#define GL_ZERO_    0x0000u
-static uint32_t stencil_decode(gld_context *ctx, uint32_t gli, uint32_t *ref, uint32_t *zfunc, uint32_t *writeop)
-{
-    uint32_t face = (uint32_t)*(const unsigned char *)(uintptr_t)(gli + 0x10000u + 0x4612u) & 1u, fb = gli + 0x6700u + face * 0x10u;
-    uint32_t en = (*(const uint32_t *)(uintptr_t)(gli + 0x6734) >> face) & 1u, func, sf, dpp, r, vm, wm;
-    (void)ctx;
-    if (!en) return 0;
-    func = *(const uint16_t *)(uintptr_t)(fb + 0x14); sf = *(const uint16_t *)(uintptr_t)(fb + 0x16); dpp = *(const uint16_t *)(uintptr_t)(fb + 0x1a);
-    r = *(const uint32_t *)(uintptr_t)(fb + 0x10) & 0xffu; vm = *(const uint32_t *)(uintptr_t)(fb + 0x0c) & 0xffu; wm = *(const uint32_t *)(uintptr_t)(gli + 0x63acu + face * 4u) & 0xffu;
-    if (func < 0x0200u || func > 0x0207u || vm != 0xffu || wm != 0xffu) return 0;
-    if (func != 0x0207u && sf != GL_KEEP_) return 0;                        /* a failing fragment would have to write */
-    if (func == 0x0207u && sf != GL_KEEP_ && sf != GL_REPLACE_ && sf != GL_ZERO_) return 0;
-    if (dpp == GL_ZERO_ && func != 0x0207u && r != 0) return 0;
-    if (dpp != GL_KEEP_ && dpp != GL_REPLACE_ && dpp != GL_ZERO_) return 0;
-    *ref = r; *zfunc = func; *writeop = dpp;
-    return 1;
-}
+/* GL depth + stencil state -> Z_CNTL and the stencil/depth emulation (gld_stencil.c).  gli+0x6340 bit24 = GL_DEPTH_TEST, +0x633c >> 16 = glDepthFunc,
+ * +0x63b8 bit24 = glDepthMask; the stencil words are documented in gld_stencil.c. */
 void mach64_sync_depth_from_gli(gld_context *ctx)
 {
-    mach64_priv *p = MACH64_PRIV(ctx);
-    uint32_t gli = gli_find(ctx), z = 0, smode = 0, sref = 0, sfunc = 0, sop = 0;
+    uint32_t gli = gli_find(ctx);
     if (!gli) return;
-    if (!((*(const uint32_t *)(uintptr_t)(gli + 0x6340)) & 0x01000000u) && p->rb.z_off && stencil_decode(ctx, gli, &sref, &sfunc, &sop)) smode = 1;
-    if (smode != p->stencil_mode) {
-        if (smode == 0 || p->stencil_mode == 0) {                           /* entering (stencil = clear value) or leaving (restore a clean Z) */
-            uint32_t v = smode ? ((*(const uint32_t *)(uintptr_t)(gli + 0x6334) & 0xffu) * 257u) : 0xffffu;
-            mach64_flush_batch(ctx);
-            rgb_clear_z(&p->rb, v);
-            p->dirty |= MACH64_DIRTY_STATE;
-        }
-        p->stencil_mode = smode;
-    }
-    if (smode) {
-        uint32_t wr = (sop == GL_KEEP_) ? 0u : MACH64_Z_MASK_EN, zc;
-        static const uint32_t zt[8] = { MACH64_Z_TEST_NEVER, MACH64_Z_TEST_LESS, MACH64_Z_TEST_EQUAL, MACH64_Z_TEST_LEQUAL, MACH64_Z_TEST_GREATER, MACH64_Z_TEST_NOTEQUAL, MACH64_Z_TEST_GEQUAL, MACH64_Z_TEST_ALWAYS };
-        float zf = (sop == GL_ZERO_ && sfunc == 0x0207u) ? 0.0f : (float)sref / 255.0f;
-        zc = MACH64_Z_EN | zt[sfunc - 0x0200u] | wr;
-        mach64_zforce = zf;
-        if (p->hw.z_cntl != zc) { p->hw.z_cntl = zc; p->dirty |= MACH64_DIRTY_STATE; }
-        return;
-    }
-    mach64_zforce = -1.0f;
-    if ((*(const uint32_t *)(uintptr_t)(gli + 0x6340)) & 0x01000000u) {
-        uint32_t func = (*(const uint32_t *)(uintptr_t)(gli + 0x633c)) >> 16;
-        uint32_t mask = (*(const uint32_t *)(uintptr_t)(gli + 0x63b8)) & 0x01000000u;
-        z = MACH64_Z_EN;
-        switch (func) {
-        case 0x0200: z |= MACH64_Z_TEST_NEVER;    break;
-        case 0x0201: z |= MACH64_Z_TEST_LESS;     break;
-        case 0x0202: z |= MACH64_Z_TEST_EQUAL;    break;
-        case 0x0203: z |= MACH64_Z_TEST_LEQUAL;   break;
-        case 0x0204: z |= MACH64_Z_TEST_GREATER;  break;
-        case 0x0205: z |= MACH64_Z_TEST_NOTEQUAL; break;
-        case 0x0206: z |= MACH64_Z_TEST_GEQUAL;   break;
-        case 0x0207: z |= MACH64_Z_TEST_ALWAYS;   break;
-        default:     z |= MACH64_Z_TEST_LESS;     break;
-        }
-        if (mask) z |= MACH64_Z_MASK_EN;
-    }
-    if (p->hw.z_cntl != z) { p->hw.z_cntl = z; p->dirty |= MACH64_DIRTY_STATE; }
+    mach64_zs_sync(ctx, gli);
 }
 
 /* ---- state ----------------------------------------------------------- */
@@ -168,6 +100,7 @@ int mach64_build_surface(gld_context *ctx)
     p->rb.gen = rgb_gen(&p->rb);
     p->mode_gen = p->rb.gen;
     p->attached = 1;
+    mach64_zs_reset(p);
     p->frame_new = 1;
     p->init_clear = 1;
     p->dirty |= MACH64_DIRTY_STATE;
@@ -222,9 +155,7 @@ void mach64_clear_zbuffer(gld_context *ctx)
 {
     mach64_priv *p = MACH64_PRIV(ctx);
     if (!p->rb.z_off) return;
-    mach64_flush_batch(ctx);
-    rgb_clear_z(&p->rb, 0xffffu);
-    p->dirty |= MACH64_DIRTY_STATE;
+    mach64_zs_clear_depth(ctx);                       /* lazy unless the chip's Z currently holds the depth plane */
 }
 
 /* The deferred per-frame clear (armed by frame_new; GLEngine dispatches no clear entry point for our surface).  Colour on the frame's first draw;
@@ -239,25 +170,34 @@ void mach64_frame_start(gld_context *ctx)
          * incl. 0, absent when the app never clears, per frame).  Apps that accumulate (Flurry fades the last frame with a quad) must keep the colour
          * buffer, so clear it only when the app asked to (or once for a new, undefined surface). */
         if (p->init_clear || (mach64_gli_u32(ctx, 0x308) & 0x10u)) colour_clear(ctx);
+        if (p->init_clear || (mach64_gli_u32(ctx, 0x308) & 0x10u)) mach64_zs_clear_stencil(ctx, mach64_gli_u32(ctx, 0x6334));   /* glClear also owes the stencil plane */
         p->init_clear = 0;
         p->z_clear_pending = 1;
         p->frame_new = 0;
     }
-    if (p->z_clear_pending && p->rb.z_off && (p->hw.z_cntl & MACH64_Z_EN)) {
-        mach64_flush_batch(ctx);
-        rgb_clear_z(&p->rb, 0xffffu);
-        p->dirty |= MACH64_DIRTY_STATE;
+    if (p->z_clear_pending && p->rb.z_off) {
         p->z_clear_pending = 0;
+        mach64_zs_clear_depth(ctx);
     }
 }
 
 int mach64_draw_triangle(gld_context *ctx, const m64_vertex *v0, const m64_vertex *v1, const m64_vertex *v2)
 {
     mach64_priv *p = MACH64_PRIV(ctx);
-    size_t need;
     if (!p->attached) return 0;
     mach64_frame_start(ctx);
     if (!p->attached) return 0;
+    mach64_zs_prepare(ctx);                          /* put the stencil/depth planes where this draw needs them */
+    if (p->zs_mode == 2) return mach64_zs_cpu_draw(ctx, v0, v1, v2);
+    mach64_zs_note_hw(ctx);
+    return mach64_hw_tri(ctx, v0, v1, v2);
+}
+
+/* One triangle through the hardware (the batch, the sampler-change split, the state block). */
+int mach64_hw_tri(gld_context *ctx, const m64_vertex *v0, const m64_vertex *v1, const m64_vertex *v2)
+{
+    mach64_priv *p = MACH64_PRIV(ctx);
+    size_t need;
     if (!p->batch.buf) m64_cb_init(&p->batch, p->batchbuf, GLD_BATCH_DWORDS);
     need = ((p->dirty & MACH64_DIRTY_STATE) ? 96u : 0u) + 64u;
     if (p->batch.n + need > GLD_BATCH_LIMIT) mach64_flush_batch(ctx);        /* a full buffer is a normal mid-frame flush now (no present semantics) */

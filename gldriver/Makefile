@@ -6,7 +6,7 @@ CFLAGS ?= -O2 -Wall -std=gnu99 -mcpu=750 -fsingle-precision-constant -DGLD_DBUF 
 
 EXEC   := ATIRageProGLDriver
 BUNDLE := $(EXEC).bundle
-SRC    := gld_core.c gld_context.c gld_entry.c gld_prims.c gld_dispatch.c gld_pixelformat.c gld_cgs.c gld_glue.c gld_pixels.c gld_texture.c rage_backend.c \
+SRC    := gld_core.c gld_context.c gld_entry.c gld_prims.c gld_dispatch.c gld_pixelformat.c gld_cgs.c gld_glue.c gld_pixels.c gld_texture.c gld_stencil.c rage_backend.c \
           ../common/mach64_emit.c
 
 .PHONY: bundle clean
