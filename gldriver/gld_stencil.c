@@ -256,9 +256,9 @@ void mach64_zs_sync(gld_context *ctx, uint32_t gli)
     z->dfunc = (int)(*(const uint32_t *)(uintptr_t)(gli + 0x633c) >> 16); if (z->dfunc < 0x200 || z->dfunc > 0x207) z->dfunc = 0x201;
     z->dmask = (*(const uint32_t *)(uintptr_t)(gli + 0x63b8) & 0x01000000u) != 0;
     face_read(&z->face[0], gli, 0); face_read(&z->face[1], gli, 1);
-    if (z->fen[0] || (z->two && z->fen[1])) {
+    if (z->fen[0] || (z->two && z->fen[1]) || p->query) {
         mode = 2;
-        if (!z->depth_en && !z->two && z->fen[0] && p->rb.z_off && mode1_ok(&z->face[0], &ref, &zf, &wop)) mode = 1;
+        if (!p->query && !z->depth_en && !z->two && z->fen[0] && p->rb.z_off && mode1_ok(&z->face[0], &ref, &zf, &wop)) mode = 1;
     }
     p->zs_mode = mode;
     if (mode == 1) {
@@ -380,6 +380,7 @@ int mach64_zs_cpu_draw(gld_context *ctx, const m64_vertex *va, const m64_vertex 
         if (run >= 0) rect_run(ctx, z, py, run, px - 1, va, vb, vc, &flushed);
     }
     if (depth_en && z->dmask && pass) { z->pl[PL_D].hw_uni = 0; z->pl[PL_D].hw_cpu = 0; }
+    if (p->query) mach64_query_add(ctx, pass);
     all_draw = (!flushed && cov && pass == cov);
     if (!colour_on || !pass) { z->rn = 0; return 1; }
     if (all_draw) { z->rn = 0; return mach64_hw_tri(ctx, va, vb, vc); }

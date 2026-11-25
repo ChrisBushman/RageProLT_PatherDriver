@@ -123,6 +123,7 @@ typedef struct {
     /* idle repaint (windowed only): WindowServer paints the window white when it is exposed; an app that is not drawing (Chess) never restores it, so a
      * small asynchronous thread re-presents the last frame once the context has been idle for ~300 ms.  `volatile` counters only: nothing on the hot path. */
     void      *zs;                 /* stencil/depth emulation state (gld_stencil.c) */
+    void      *query;              /* the active occlusion query (gld_entry.c): while set every triangle runs through the CPU rasteriser, which counts the passing samples */
     uint32_t   zs_mode;            /* 0 stencil off, 1 hardware Z-as-stencil, 2 CPU stencil (gld_stencil.c) */
     uint32_t   nonpoly;            /* 1 while a point/line quad is drawn: it uses the front-face stencil state */
     uint32_t   tsig[9], tsig_valid;/* texture sampler setup of the last emitted state (see mach64_draw_triangle) */
@@ -163,6 +164,10 @@ int      mach64_draw_triangle(gld_context *ctx, const m64_vertex *v0, const m64_
 void     mach64_flush_batch(gld_context *ctx);
 void     mach64_sync_depth_from_gli(gld_context *ctx);
 uint32_t mach64_gli_u32(gld_context *ctx, uint32_t off);
+void mach64_signal_fence(gld_context *ctx, void *fence);
+void mach64_begin_query(gld_context *ctx, void *query);
+void mach64_end_query(gld_context *ctx);
+void mach64_query_add(gld_context *ctx, uint32_t n);
 void     mach64_frame_start(gld_context *ctx);
 void     mach64_clear_color(gld_context *ctx);
 void     mach64_clear_zbuffer(gld_context *ctx);
@@ -190,7 +195,7 @@ void mach64_texture_deleted(void *texobj);
 /* gld_texture.c */
 int      mach64_bind_texture(gld_context *ctx);
 void     mach64_tex_select_lod(gld_context *ctx, float pix_area, float uv_area);
-extern int mach64_fog_on, mach64_spec_mode, mach64_flat_on;
+extern int mach64_fog_on, mach64_spec_mode, mach64_flat_on, mach64_env_add;
 extern uint32_t mach64_tex_vofs[2];
 
 /* gld_cgs.c */

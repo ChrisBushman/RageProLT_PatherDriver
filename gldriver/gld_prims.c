@@ -43,6 +43,15 @@
 
 static uint32_t chan(float f){ return rage_f2byte(gld_bits(f)); }
 
+/* GL_ADD texture env: the chip's specular add happens after texturing, so the primary colour (plus any real specular) goes there and the diffuse colour
+ * is white: texel * 1 + primary. */
+static inline void env_add_fold(m64_vertex *o)
+{
+    uint32_t r = ((o->argb >> 16) & 0xff) + ((o->spec_argb >> 16) & 0xff), g = ((o->argb >> 8) & 0xff) + ((o->spec_argb >> 8) & 0xff), b = (o->argb & 0xff) + (o->spec_argb & 0xff);
+    if (r > 255) r = 255; if (g > 255) g = 255; if (b > 255) b = 255;
+    o->spec_argb = (o->spec_argb & 0xff000000u) | (r << 16) | (g << 8) | b;
+    o->argb |= 0x00ffffffu;
+}
 void mach64_read_vertex(const void *vp, m64_vertex *o, float fb_h)
 {
     const unsigned char *v = (const unsigned char *)vp;
@@ -102,6 +111,7 @@ void mach64_read_vertex(const void *vp, m64_vertex *o, float fb_h)
             o->argb = (o->argb & 0xff000000u) | (r << 16) | (gg << 8) | b;
         }
     }
+    if (mach64_env_add) env_add_fold(o);
 }
 
 #define VTX(base, i)  ((const void *)((const unsigned char *)(base) + (i) * MACH64_GLIVERTEX_STRIDE))
@@ -142,6 +152,7 @@ static void pack_at(const void *vp, float gx, float gy, float fb_h, m64_vertex *
         float rs = (w != 0.0f) ? sw / w : sw, rt = (w != 0.0f) ? tw / w : tw;
         __builtin_memcpy(&o->s2, &rs, 4); __builtin_memcpy(&o->t2, &rt, 4); o->w2 = o->w;
     }
+    if (mach64_env_add) env_add_fold(o);
 }
 
 #define GLI_POINT_SIZE  0x6630

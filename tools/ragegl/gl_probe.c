@@ -14,6 +14,9 @@
 #include <string.h>
 #include <unistd.h>
 
+#ifndef GL_GENERATE_MIPMAP_SGIS
+#define GL_GENERATE_MIPMAP_SGIS 0x8191
+#endif
 #ifndef GL_MIRROR_CLAMP_EXT
 #define GL_MIRROR_CLAMP_EXT 0x8742
 #endif
@@ -453,6 +456,55 @@ static void t_depth_clamp_bounds(void)
     report("depth clamp (accepted)", glerr() ? -1 : 1, 0);
 }
 
+
+/* ---- extensions the Rage renderer ADVERTISES (GLEngine filters the list by the driver's caps) ------------------------------------------------------- */
+static void t_fence(void)
+{
+    GLuint f = 0; int ok = 1;
+    reset(0, 0, 0); glGenFencesAPPLE(1, &f); quad(10, 10, 100, 100, 1, 0, 0, 1); glSetFenceAPPLE(f); glFinishFenceAPPLE(f);
+    ok = glTestFenceAPPLE(f) && near3(50, 50, 255, 0, 0, 20); glDeleteFencesAPPLE(1, &f);
+    report("APPLE_fence (set, finish, test)", glerr() ? -1 : ok, 0);
+}
+static void t_flush_render(void)
+{
+    reset(0, 0, 0); quad(10, 10, 100, 100, 0, 1, 0, 1); glFlushRenderAPPLE();
+    report("APPLE_flush_render", glerr() ? -1 : near3(50, 50, 0, 255, 0, 20), 0);
+}
+static void t_vao(void)
+{
+    static const float v[8] = { 10, 10, 100, 10, 100, 100, 10, 100 }; GLuint a = 0;
+    reset(0, 0, 0); glGenVertexArraysAPPLE(1, &a); glBindVertexArrayAPPLE(a); glEnableClientState(GL_VERTEX_ARRAY); glVertexPointer(2, GL_FLOAT, 0, v);
+    glBindVertexArrayAPPLE(0); glBindVertexArrayAPPLE(a); glColor3f(0, 0, 1); glDrawArrays(GL_QUADS, 0, 4); glBindVertexArrayAPPLE(0); glDisableClientState(GL_VERTEX_ARRAY);
+    report("APPLE_vertex_array_object", glerr() ? -1 : near3(50, 50, 0, 0, 255, 20), 0);
+}
+static void t_multidraw(void)
+{
+    static const float v[16] = { 10, 10, 50, 10, 50, 50, 10, 50, 60, 60, 100, 60, 100, 100, 60, 100 }; GLint first[2] = { 0, 4 }; GLsizei cnt[2] = { 4, 4 };
+    reset(0, 0, 0); glColor3f(1, 1, 0); glEnableClientState(GL_VERTEX_ARRAY); glVertexPointer(2, GL_FLOAT, 0, v); glMultiDrawArraysEXT(GL_QUADS, first, cnt, 2); glDisableClientState(GL_VERTEX_ARRAY);
+    report("EXT_multi_draw_arrays", glerr() ? -1 : (near3(30, 30, 255, 255, 0, 20) && near3(80, 80, 255, 255, 0, 20) && near3(80, 30, 0, 0, 0, 20)), 0);
+}
+static void t_range_elements(void)
+{
+    static const float v[8] = { 10, 10, 100, 10, 100, 100, 10, 100 }; static const unsigned short idx[4] = { 0, 1, 2, 3 };
+    reset(0, 0, 0); glColor3f(0, 1, 1); glEnableClientState(GL_VERTEX_ARRAY); glVertexPointer(2, GL_FLOAT, 0, v); glDrawRangeElementsEXT(GL_QUADS, 0, 3, 4, GL_UNSIGNED_SHORT, idx); glDisableClientState(GL_VERTEX_ARRAY);
+    report("EXT_draw_range_elements", glerr() ? -1 : near3(50, 50, 0, 255, 255, 20), 0);
+}
+static void t_genmip(void)
+{
+    static unsigned char t[64 * 64 * 3]; GLuint id; int i; for (i = 0; i < 64 * 64; i++) { t[i * 3] = 255; t[i * 3 + 1] = 0; t[i * 3 + 2] = 0; }
+    reset(0, 0, 0); glEnable(GL_TEXTURE_2D); glGenTextures(1, &id); glBindTexture(GL_TEXTURE_2D, id);
+    glTexParameteri(GL_TEXTURE_2D, GL_GENERATE_MIPMAP_SGIS, GL_TRUE); glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_NEAREST); glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1); glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, 64, 64, 0, GL_RGB, GL_UNSIGNED_BYTE, t);
+    glColor3f(1, 1, 1); glBegin(GL_QUADS); glTexCoord2f(0, 0); glVertex2f(10, 10); glTexCoord2f(1, 0); glVertex2f(18, 10); glTexCoord2f(1, 1); glVertex2f(18, 18); glTexCoord2f(0, 1); glVertex2f(10, 18); glEnd();
+    report("SGIS_generate_mipmap (minified draw uses generated levels)", glerr() ? -1 : near3(14, 14, 255, 0, 0, 30), 0); glDeleteTextures(1, &id);
+}
+static void t_windowpos(void)
+{
+    static unsigned char pix[8 * 8 * 3]; int i; for (i = 0; i < 64; i++) { pix[i * 3] = 0; pix[i * 3 + 1] = 255; pix[i * 3 + 2] = 0; }
+    reset(0, 0, 0); glWindowPos2iARB(40, 40); glPixelStorei(GL_UNPACK_ALIGNMENT, 1); glDrawPixels(8, 8, GL_RGB, GL_UNSIGNED_BYTE, pix);
+    report("ARB_window_pos + glDrawPixels", glerr() ? -1 : near3(43, 43, 0, 255, 0, 20), 0);
+}
+
 /* ---- pixel formats (accumulation, aux, 32 bit, multisample) ------------------------ */
 static void pf_test(const char *name, GLint *attrs, GDHandle gd)
 {
@@ -504,6 +556,8 @@ static const struct { const char *name; tfn fn; const char *ext; } TESTS[] = {
     { "stencil", t_stencil_basic, 0 }, { "stencil_twoside", t_stencil_twoside, "GL_EXT_stencil_two_side" },
     { "occlusion", t_occlusion, "GL_ARB_occlusion_query" }, { "vertex_program", t_vertex_program, "GL_ARB_vertex_program" }, { "fragment_program", t_fragment_program, "GL_ARB_fragment_program" },
     { "depth_clamp", t_depth_clamp_bounds, "GL_NV_depth_clamp" }, { "accum", t_accum, 0 },
+    { "fence", t_fence, "GL_APPLE_fence" }, { "flush_render", t_flush_render, "GL_APPLE_flush_render" }, { "vao", t_vao, "GL_APPLE_vertex_array_object" }, { "multidraw", t_multidraw, "GL_EXT_multi_draw_arrays" },
+    { "range_elements", t_range_elements, "GL_EXT_draw_range_elements" }, { "genmip", t_genmip, "GL_SGIS_generate_mipmap" }, { "windowpos", t_windowpos, "GL_ARB_window_pos" },
 };
 
 int main(int argc, char **argv)

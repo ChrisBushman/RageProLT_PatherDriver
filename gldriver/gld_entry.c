@@ -12,6 +12,7 @@
  * format carries no window geometry, which comes from CGS (gld_cgs.c).
  */
 #include "gld.h"
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -46,6 +47,13 @@ static void rage_fill_descriptor(gld_context *ctx)
         dd[0x0c/4] = 0x00000800; dd[0x10/4] = 0x00000800; dd[0x1c/4] = 0x01000000;
         dd[0x24/4] = 0x00000008; dd[0x28/4] = 0x00000008; dd[0x2c/4] = 0x00000008; dd[0x34/4] = 0x00000020;
         dd[0x38/4] = 0x00000008;                  /* stencil bits: GLEngine glStencilFunc clamps the reference to (1 << dd[0x38]) - 1 (static analysis of GLEngine 0x38528): with 0 every reference was stored as 0 */
+        {   /* GL_EXTENSIONS: GLEngine appends one extension per set bit of the 72-bit mask at descriptor +0x104 (GLEngine 0x39188; the bit -> name table is in
+             * docs/standalone-driver-design.md).  Only features this driver really delivers: */
+            static const unsigned char bits[] = { 5 /* ARB_texture_env_add */, 23 /* EXT_texture_env_add */, 16 /* ARB_occlusion_query */, 27 /* EXT_texture_lod_bias */,
+                                                  30 /* EXT_stencil_wrap */, 34 /* EXT_separate_specular_color */, 36 /* EXT_blend_func_separate */, 38 /* EXT_stencil_two_side */,
+                                                  69 /* SGIS_texture_edge_clamp */ };
+            unsigned i; for (i = 0; i < sizeof bits; i++) dd[0x104 / 4 + bits[i] / 32] |= 1u << (bits[i] & 31);
+        }
         *(uint16_t *)(uintptr_t)(descp + 0xb2) = 1024;
         *(uint16_t *)(uintptr_t)(descp + 0xac) = 2;
     }
@@ -244,12 +252,75 @@ int gldFlushBuffer(gld_context *ctx, void *drawable)
  * if the app uses the feature.  Return 0 (NULL/success). --------------- */
 #define GLD_STUB(name) int name(void) { return 0; }
 GLD_STUB(gldCreateBuffer)          GLD_STUB(gldDestroyBuffer)
-GLD_STUB(gldCreateFence)           GLD_STUB(gldDestroyFence)
 GLD_STUB(gldCreatePipelineProgram) GLD_STUB(gldDestroyPipelineProgram)
 GLD_STUB(gldModifyPipelineProgram) GLD_STUB(gldRelatePipelineProgram)
 GLD_STUB(gldGetPipelineProgramInfo)
-GLD_STUB(gldCreateQuery)           GLD_STUB(gldDestroyQuery)
-GLD_STUB(gldGetQueryInfo)
+
+
+/* ---- APPLE_fence / ARB_occlusion_query (ABI from the X1900 reference: gldCreateFence/Query(ctx, void **out) store a malloc'd object, gldTestObject/
+ * gldFinishObject(ctx, kind, obj) with kind 0 = fence, dispatch slot 0x64 = signal fence(ctx, fence), 0x68 = begin query(ctx, query), 0x6c = end query(ctx),
+ * gldGetQueryInfo(ctx, query, pname, int *out) with 0x8867 = result available, 0x8866 = result).  The engine is serialised through rgb_fence, so a signalled
+ * fence is complete as soon as the batch has drained, and a query's count is final when the query ends. ---------------------------------------------------- */
+typedef struct { uint32_t id; uint8_t done; uint8_t pad[3]; } gld_fence;
+typedef struct { uint32_t id; uint32_t count; } gld_query;
+int gldCreateFence(gld_context *ctx, void **out)
+{
+    gld_fence *f = (gld_fence *)calloc(1, sizeof *f); (void)ctx;
+    if (!f) { if (out) *out = 0; return 0x2720; }
+    f->done = 1; if (out) *out = f; return 0;
+}
+int gldDestroyFence(gld_context *ctx, void *f) { (void)ctx; free(f); return 0; }
+void mach64_signal_fence(gld_context *ctx, void *fence)
+{
+    mach64_priv *p = MACH64_PRIV(ctx); gld_fence *f = (gld_fence *)fence;
+    if (p && p->attached) { mach64_flush_batch(ctx); rgb_fence(&p->rb); }
+    if (f) f->done = 1;
+}
+int gldTestObject(gld_context *ctx, int kind, void *obj)
+{
+    mach64_priv *p = MACH64_PRIV(ctx);
+    if (kind == 0 && p && p->attached) { mach64_flush_batch(ctx); rgb_fence(&p->rb); }
+    (void)obj; return 1;
+}
+int gldFinishObject(gld_context *ctx, int kind, void *obj)
+{
+    mach64_priv *p = MACH64_PRIV(ctx);
+    if (p && p->attached) { mach64_flush_batch(ctx); rgb_fence(&p->rb); }
+    (void)kind; (void)obj; return 0;
+}
+int gldCreateQuery(gld_context *ctx, void **out)
+{
+    gld_query *q = (gld_query *)calloc(1, sizeof *q); (void)ctx;
+    if (!q) { if (out) *out = 0; return 0x2720; }
+    if (out) *out = q; return 0;
+}
+int gldDestroyQuery(gld_context *ctx, void *q)
+{
+    mach64_priv *p = MACH64_PRIV(ctx);
+    if (p && p->query == q) { p->query = 0; mach64_sync_depth_from_gli(ctx); }
+    free(q); return 0;
+}
+int gldGetQueryInfo(gld_context *ctx, void *query, uint32_t pname, int *out)
+{
+    mach64_priv *p = MACH64_PRIV(ctx); gld_query *q = (gld_query *)query;
+    if (p && p->attached) { mach64_flush_batch(ctx); rgb_fence(&p->rb); }
+    if (!q || !out) return 0;
+    if (pname == 0x8867u) *out = 1; else if (pname == 0x8866u) *out = (int)q->count;
+    return 0;
+}
+void mach64_begin_query(gld_context *ctx, void *query)
+{
+    mach64_priv *p = MACH64_PRIV(ctx); gld_query *q = (gld_query *)query;
+    if (!p || !q) return;
+    q->count = 0; p->query = q; mach64_sync_depth_from_gli(ctx);          /* the CPU rasteriser counts the passing samples */
+}
+void mach64_end_query(gld_context *ctx)
+{
+    mach64_priv *p = MACH64_PRIV(ctx);
+    if (!p) return;
+    mach64_flush_batch(ctx); p->query = 0; mach64_sync_depth_from_gli(ctx);
+}
+void mach64_query_add(gld_context *ctx, uint32_t n) { mach64_priv *p = MACH64_PRIV(ctx); if (p && p->query) ((gld_query *)p->query)->count += n; }
 
 /* gldCreateShared / gldDestroyShared -- the context-level SHARED state object (the shared texture-name /
  * display-list namespace that sibling GL contexts inherit).  These are REAL in the reference (ati128gld
@@ -373,4 +444,3 @@ GLD_STUB(gldFlushVertexArray)      GLD_STUB(gldDestroyVertexArray)
 GLD_STUB(gldDestroyMemoryPluginData) GLD_STUB(gldGetMemoryPluginData)
 GLD_STUB(gldSetMemoryPluginData)   GLD_STUB(gldFinishMemoryPluginData)
 GLD_STUB(gldTestMemoryPluginData)
-GLD_STUB(gldFinishObject)          GLD_STUB(gldTestObject)

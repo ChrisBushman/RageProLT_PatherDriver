@@ -128,3 +128,46 @@ static void t_smooth(void)
     CHECK("point smooth off: a square point (the corner is lit)", px(57, 57) != 0 && px(63, 63) != 0);
     default_state(); sync(); clear_rt(0);
 }
+
+/* GL_TEXTURE_ENV_MODE GL_ADD (0x0104): texel + primary colour, saturating (the chip's specular add carries the primary colour). */
+static void t_envadd(void)
+{
+    unsigned char *d = quadtex(); void *t = mktex(8, 8, 0x1907, d, (GL_REPEAT_ << 16) | GL_REPEAT_, 0x2600, 0x2600);
+    default_state(); bindtex(t, 0x0104u); sync(); clear_rt(0);
+    tquad(20, 20, 148, 148, 0.0f, 0.0f, 1.0f, 1.0f, 0xff004000u);                       /* primary colour (0, 0.25, 0) */
+    CHECK("texture env ADD: red texel + (0, 64, 0) = (255, 64, 0)", isclr(px(36, 36), 255, 64, 0));
+    CHECK("texture env ADD: white texel saturates", isclr(px(132, 132), 255, 255, 255));
+    CHECK("texture env ADD: blue texel + (0, 64, 0) = (0, 64, 255)", isclr(px(36, 132), 0, 64, 255));
+    default_state(); bindtex(t, GL_MODULATE_ENV); sync(); clear_rt(0);
+    tquad(20, 20, 148, 148, 0.0f, 0.0f, 1.0f, 1.0f, 0xff004000u);
+    CHECK("after ADD the next MODULATE draw is not left in add mode", isclr(px(36, 36), 0, 0, 0));
+    default_state(); sync(); clear_rt(0);
+}
+
+/* ARB_occlusion_query / APPLE_fence through the dispatch slots GLEngine uses (0x68 begin, 0x6c end, 0x64 signal fence). */
+static void t_query(void)
+{
+    typedef int (*cq_fn)(gld_context *, void **); typedef int (*gq_fn)(gld_context *, void *, uint32_t, int *); typedef void (*b_fn)(gld_context *, void *); typedef void (*e_fn)(gld_context *);
+    extern int gldCreateQuery(gld_context *, void **), gldGetQueryInfo(gld_context *, void *, uint32_t, int *), gldDestroyQuery(gld_context *, void *);
+    extern int gldCreateFence(gld_context *, void **), gldDestroyFence(gld_context *, void *), gldTestObject(gld_context *, int, void *);
+    void *q = 0, *f = 0; int res = -1, avail = -1; unsigned char *vb;
+    default_state(); sync(); clear_rt(0); g_endframe = 0;
+    gldCreateQuery(ctx, &q); CHECK("gldCreateQuery returns an object", q != 0);
+    ((b_fn)SLOT(0x68))(ctx, q); tri(20, 20, 0xffffffffu, 120, 20, 0xffffffffu, 20, 120, 0xffffffffu, 0.0f); ((e_fn)SLOT(0x6c))(ctx);
+    gldGetQueryInfo(ctx, q, 0x8867u, &avail); gldGetQueryInfo(ctx, q, 0x8866u, &res);
+    printf("    (query: triangle area 5000, counted %d)\n", res);
+    CHECK("occlusion query counts the samples of a triangle (area 5000)", avail == 1 && res > 4850 && res < 5150);
+    ((b_fn)SLOT(0x68))(ctx, q); ((e_fn)SLOT(0x6c))(ctx); gldGetQueryInfo(ctx, q, 0x8866u, &res);
+    CHECK("an empty query counts 0 (and Begin restarts the count)", res == 0);
+    default_state(); g32(0x6340, 0x01000000u); g32(0x63b8, 0x01000000u); sync(); clear_rt(0);
+    tri(20, 20, 0xffffffffu, 120, 20, 0xffffffffu, 20, 120, 0xffffffffu, -0.5f);        /* a near triangle fills the depth buffer */
+    ((b_fn)SLOT(0x68))(ctx, q); tri(20, 20, 0xffffffffu, 120, 20, 0xffffffffu, 20, 120, 0xffffffffu, 0.5f); ((e_fn)SLOT(0x6c))(ctx); gldGetQueryInfo(ctx, q, 0x8866u, &res);
+    CHECK("occlusion query: a triangle fully behind a nearer one counts 0 samples", res == 0);
+    ((b_fn)SLOT(0x68))(ctx, q); tri(20, 20, 0xffffffffu, 120, 20, 0xffffffffu, 20, 120, 0xffffffffu, -0.9f); ((e_fn)SLOT(0x6c))(ctx); gldGetQueryInfo(ctx, q, 0x8866u, &res);
+    CHECK("occlusion query: a triangle in front of the depth buffer passes all its samples", res > 4850 && res < 5150);
+    vb = 0; (void)vb; gldDestroyQuery(ctx, q);
+    gldCreateFence(ctx, &f); CHECK("gldCreateFence returns an object", f != 0);
+    ((b_fn)SLOT(0x64))(ctx, f); CHECK("a signalled fence tests complete", gldTestObject(ctx, 0, f) == 1);
+    gldDestroyFence(ctx, f);
+    default_state(); sync(); g_endframe = 1; clear_rt(0);
+}

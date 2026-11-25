@@ -485,6 +485,7 @@ static uint32_t mach64_blend_dst(uint32_t glf)
  * reads and so had to be made per-context). */
 uint32_t mach64_tex_vofs[2] = { 0x80u, 0u };   /* see gld.h */
 int mach64_spec_mode = 0;
+int mach64_env_add = 0;       /* GL_TEXTURE_ENV_MODE GL_ADD on this draw: primary colour rides the specular add, the diffuse colour becomes white */
 int mach64_fog_on = 0;                    /* consumed by mach64_read_vertex       */
 int mach64_flat_on = 0;                   /* glShadeModel(GL_FLAT): emit_tri flattens colour */
 
@@ -734,6 +735,7 @@ int mach64_bind_texture(gld_context *ctx)
     /* GL_SEPARATE_SPECULAR_COLOR (glLightModeli COLOR_CONTROL): gli+0x6380 bit 0 (recovered with tools/mach64_mtexscan; the same word's bit 8 is fog).  GLEngine then
      * delivers the secondary colour as floats R,G,B at gli-vertex +0x50/+0x54/+0x58 (real GLEngine output, Chess; the Radeon reference layout +0x40 is the normal).  Decided below once we know if texturing is on. */
     mach64_spec_mode = (!lop_on && (mach64_gli_u32(ctx, GLI_FOG_ENABLE) & 1u)) ? 2 : 0;
+    mach64_env_add = 0;
     mach64_fog_on = lop_on ? 0 : mach64_fog_active(ctx);
     if (mach64_fog_on) p->dirty |= MACH64_DIRTY_STATE;
     else               st->dp_fog_clr = 0;   /* leave DP_FRGD_CLR to the 2D engine */
@@ -832,6 +834,7 @@ int mach64_bind_texture(gld_context *ctx)
          * GL_ADD (0x0104), GL_COMBINE (0x8570) are NOT hardware-doable (the DRI reference
          * software-rasterises them via Mesa, which we can't through Apple's GLEngine).  Best
          * hardware approximation is MODULATE.  (See docs/re-notes/texture-blend-audit.md.) */
+        case 0x0104:          light_fcn = 1u << 22; mach64_env_add = 1; break;   /* GL_ADD: Cp + Ct = Ct * white + specular(Cp) */
         case 0x8570:          light_fcn = 0u << 22; break;   /* GL_COMBINE (Sonic R GL_ADD_SIGNED overbright): vertex colour ~0.5 grey => Cp+Ct-0.5 ~= Ct => REPLACE (MODULATE halves the brightness) */
         default:              light_fcn = 1u << 22; break;
     }
@@ -911,7 +914,7 @@ int mach64_bind_texture(gld_context *ctx)
     {   /* GL_ALPHA_TEST on textured geometry: the texel alpha (needs TEX_MAP_AEN,
          * set for an RGBA texture) is compared to the reference. */
         uint32_t atc = mach64_alpha_tst(ctx, 1);
-        if (mach64_spec_mode) { atc |= 1u << 31; mach64_spec_mode = 1; }     /* SPECULAR_LIGHT_EN: add the interpolated specular rgb to textured pixels */
+        if (mach64_spec_mode || mach64_env_add) { atc |= 1u << 31; if (mach64_spec_mode) mach64_spec_mode = 1; }     /* SPECULAR_LIGHT_EN: add the interpolated specular rgb to textured pixels */
         changed = (!st->textured || st->tex_mip != hw_mip || st->tex_0_off != bound->off || (st->tex_cntl & 0xfu) != lod_n
                                   || st->tex_fmt != bound->hwfmt || (mt && st->tex2_fmt != bound2->hwfmt)
                                   || st->multitex != mt || (mt && (st->tex2_off != bound2->off || bound2->w != p->tex2_w || bound2->h != p->tex2_h || st->tex2_cntl_bits != mt_cntl(bound2)))
