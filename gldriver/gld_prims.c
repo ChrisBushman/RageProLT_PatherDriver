@@ -143,6 +143,12 @@ static void pack_at(const void *vp, float gx, float gy, float fb_h, m64_vertex *
     }
 }
 
+#define GLI_POINT_SIZE  0x6630
+#define GLI_LINE_WIDTH  0x6394
+#define GLI_POLYMODE    0x66e4      /* glPolygonMode: (front enum << 16) | back enum, GL_POINT 0x1b00 / GL_LINE 0x1b01 / GL_FILL 0x1b02 (found by gli diff) */
+#define GLI_FRONTFACE   0x66e8      /* halfword: 0x900 GL_CW, 0x901 GL_CCW */
+
+#define FBH_OF(ctx) ((float)*(const uint32_t *)((const unsigned char *)(ctx) + 0x1f4))
 /* Read a gli float field (glPointSize@0x6630 / glLineWidth@0x6394), defaulting
  * to 1.0.  Returns the GL size clamped to a sane minimum. */
 static float gli_size(gld_context *ctx, uint32_t off)
@@ -237,10 +243,36 @@ static inline __attribute__((always_inline)) void m64_vcopy(m64_vertex *d, const
 {
     d->x_y = s->x_y; d->z = s->z; d->w = s->w; d->s = s->s; d->t = s->t; d->spec_argb = s->spec_argb; d->argb = s->argb; d->s2 = s->s2; d->t2 = s->t2; d->w2 = s->w2;
 }
+
+/* ---- glPolygonMode: GLEngine hands the driver the filled polygon; points/lines are ours to draw ----------------------------------------------------
+ * pm_mode: 0 = fill, 1 = line, 2 = point for the face this triangle shows (front = the winding glFrontFace names).  pm_outline draws the polygon's edges
+ * (or its vertices) through the line/point paths instead; `loop` closes the outline. */
+static int pm_mode(gld_context *ctx, const void *g0, const void *g1, const void *g2)
+{
+    uint32_t pm = mach64_gli_u32(ctx, GLI_POLYMODE), m, ff;
+    const unsigned char *a = (const unsigned char *)g0, *b = (const unsigned char *)g1, *c = (const unsigned char *)g2;
+    float area; int front, ccw;
+    if (pm == 0x1b021b02u || pm == 0) return 0;
+    ff = mach64_gli_u32(ctx, GLI_FRONTFACE & ~3u); ff = (GLI_FRONTFACE & 2) ? (ff & 0xffffu) : (ff >> 16);
+    ccw = (ff != 0x900u);
+    area = (*(const float *)(b + GVOFF_X) - *(const float *)(a + GVOFF_X)) * (*(const float *)(c + GVOFF_Y) - *(const float *)(a + GVOFF_Y))
+         - (*(const float *)(c + GVOFF_X) - *(const float *)(a + GVOFF_X)) * (*(const float *)(b + GVOFF_Y) - *(const float *)(a + GVOFF_Y));
+    front = (area >= 0.0f) == (ccw != 0);
+    m = front ? (pm >> 16) : (pm & 0xffffu);
+    return m == 0x1b01u ? 1 : m == 0x1b00u ? 2 : 0;
+}
+static void pm_outline(gld_context *ctx, const void *const *gv, uint32_t n, int mode)
+{
+    float fb_h = FBH_OF(ctx), w = gli_size(ctx, GLI_LINE_WIDTH) * 0.5f, s = gli_size(ctx, GLI_POINT_SIZE) * 0.5f; uint32_t i;
+    if (mode == 2) { for (i = 0; i < n; i++) draw_point(ctx, gv[i], fb_h, s); return; }
+    for (i = 0; i < n; i++) draw_line(ctx, gv[i], gv[(i + 1) % n], fb_h, w);
+}
 static void emit_tri_rv(gld_context *ctx, const m64_vertex *r0, const m64_vertex *r1, const m64_vertex *r2,
                         const void *gv0, const void *gv1, const void *gv2)
 {
     mach64_priv *p = MACH64_PRIV(ctx);
+    { int pmode = pm_mode(ctx, gv0, gv1, gv2);
+      if (pmode) { const void *g[3]; g[0] = gv0; g[1] = gv1; g[2] = gv2; pm_outline(ctx, g, 3, pmode); return; } }
     /* Work on the caller's vertices through const pointers; copy them (OWN) only when this triangle has to modify one (flat colour / texel inset): most triangles need no copy. */
     const m64_vertex *q0 = r0, *q1 = r1, *q2 = r2;
     m64_vertex v0, v1, v2; int own = 0;
@@ -277,7 +309,6 @@ static void emit_tri_rv(gld_context *ctx, const m64_vertex *r0, const m64_vertex
     mach64_draw_triangle(ctx, q0, q1, q2);
 }
 
-#define FBH_OF(ctx) ((float)*(const uint32_t *)((const unsigned char *)(ctx) + 0x1f4))
 static void emit_tri(gld_context *ctx, const void *base, uint32_t a, uint32_t b, uint32_t c)
 {
     m64_vertex v0, v1, v2; float fb_h = FBH_OF(ctx);
@@ -315,6 +346,8 @@ void mach64_render_elt_tris(gld_context *ctx, const void *v, uint32_t n)
     if (!v || n < 3) return;
     mach64_sync_depth_from_gli(ctx);
     mach64_bind_texture(ctx);
+    { int pmode = pm_mode(ctx, (const void *)(uintptr_t)pa[0], (const void *)(uintptr_t)pa[1], (const void *)(uintptr_t)pa[2]);
+      if (pmode) { const void *g[64]; uint32_t k, m = n > 64 ? 64 : n; for (k = 0; k < m; k++) g[k] = (const void *)(uintptr_t)pa[k]; pm_outline(ctx, g, m, pmode); return; } }
     mach64_read_vertex((const void *)(uintptr_t)pa[0], &v0, fb_h);   /* fan apex */
     mach64_read_vertex((const void *)(uintptr_t)pa[1], &vq[1], fb_h);
     for (i = 2; i < n; i++) {                                         /* each perimeter vertex is converted once and reused by the next triangle */
@@ -405,6 +438,8 @@ void mach64_render_tri_fan_slot(gld_context *ctx, const void *apex,
 void mach64_render_polygon(gld_context *ctx, const void *v, uint32_t n)
 {
     PRIM_SANE(n);
+    if (n >= 3) { int pmode = pm_mode(ctx, VTX(v, 0), VTX(v, 1), VTX(v, 2));
+        if (pmode) { const void *g[64]; uint32_t k; if (n > 64) n = 64; for (k = 0; k < n; k++) g[k] = VTX(v, k); mach64_sync_depth_from_gli(ctx); mach64_bind_texture(ctx); pm_outline(ctx, g, n, pmode); return; } }
     mach64_render_tri_fan(ctx, v, n);            /* convex polygon = fan */
 }
 
@@ -416,6 +451,8 @@ void mach64_render_quads(gld_context *ctx, const void *v, uint32_t n)
     mach64_bind_texture(ctx);          /* upload+program texture if bound */
     for (i = 0; i + 4 <= n; i += 4) {            /* quad -> 2 tris (4 vertex conversions, not 6) */
         m64_vertex q[4]; float fb_h = FBH_OF(ctx); int k;
+        int pmode = pm_mode(ctx, VTX(v, i), VTX(v, i+1), VTX(v, i+2));
+        if (pmode) { const void *g[4]; for (k = 0; k < 4; k++) g[k] = VTX(v, i + k); pm_outline(ctx, g, 4, pmode); continue; }     /* the 4 edges, no diagonal */
         for (k = 0; k < 4; k++) mach64_read_vertex(VTX(v, i + k), &q[k], fb_h);
         emit_tri_rv(ctx, &q[0], &q[1], &q[2], VTX(v, i), VTX(v, i+1), VTX(v, i+2));
         emit_tri_rv(ctx, &q[0], &q[2], &q[3], VTX(v, i), VTX(v, i+2), VTX(v, i+3));
@@ -450,9 +487,6 @@ void mach64_render_quad_strip(gld_context *ctx, const void *v, uint32_t n)
 
 /* gli offsets recovered by diffing point-size/line-width configs (tools/
  * mach64_ptlnstate): glPointSize float @0x6630, glLineWidth float @0x6394. */
-#define GLI_POINT_SIZE  0x6630
-#define GLI_LINE_WIDTH  0x6394
-
 void mach64_render_points(gld_context *ctx, const void *v, uint32_t n)
 {
     float fb_h = FB_H(ctx), s = gli_size(ctx, GLI_POINT_SIZE) * 0.5f; uint32_t i;

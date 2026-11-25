@@ -12,6 +12,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #ifndef GL_MIRROR_CLAMP_EXT
 #define GL_MIRROR_CLAMP_EXT 0x8742
@@ -519,9 +520,10 @@ int main(int argc, char **argv)
         for (a = 1; a < argc; a++) if (!strcmp(argv[a], TESTS[i].name)) run = 1;
         if (!run) continue;
         if (TESTS[i].ext && !have_ext(TESTS[i].ext)) { printf("not advertised: %s (%s) -- running anyway\n", TESTS[i].name, TESTS[i].ext); }
-        TESTS[i].fn();
+        TESTS[i].fn(); if (getenv("PROBE_NORESET") == 0 && 0) {}
     }
     if (argc < 2 || !strcmp(argv[1], "pf")) pf_tests(gd);
+    if (getenv("PROBE_HOLD")) { aglSwapBuffers(ctx); sleep(atoi(getenv("PROBE_HOLD"))); }
     printf("\nPROBE: %d pass, %d fail, %d unsupported\n", g_pass, g_fail, g_unsup);
     return 0;
 }

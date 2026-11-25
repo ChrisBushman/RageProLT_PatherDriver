@@ -57,6 +57,15 @@ uint32_t mach64_gli_u32(gld_context *ctx, uint32_t off)
     return g ? *(const uint32_t *)(uintptr_t)(g + off) : 0;
 }
 
+static void glidiff(gld_context *ctx, const char *tag)
+{
+    static uint32_t snap[0x2000]; static int have; const char *fn = getenv("RAGE_GLIDIFF"); uint32_t g = gli_find(ctx), o, n = 0; FILE *f;
+    if (!fn || !g) return;
+    f = fopen(fn, "a"); if (!f) return;
+    for (o = 0x300; o < 0x7e00; o += 4) { uint32_t v = *(const uint32_t *)(uintptr_t)(g + o), i = o / 4 - 0xc0; if (i >= sizeof snap / 4) continue;
+        if (have && snap[i] != v) { if (!n++) fprintf(f, "-- %s\n", tag); fprintf(f, "  %04x: %08x -> %08x\n", o, snap[i], v); } snap[i] = v; }
+    have = 1; fclose(f);
+}
 float mach64_zforce = -1.0f;
 
 /* GL depth + stencil state -> Z_CNTL and the stencil/depth emulation (gld_stencil.c).  gli+0x6340 bit24 = GL_DEPTH_TEST, +0x633c >> 16 = glDepthFunc,
@@ -164,6 +173,7 @@ void mach64_frame_start(gld_context *ctx)
 {
     mach64_priv *p = MACH64_PRIV(ctx);
     if (p->k2d_touched) { p->k2d_touched = 0; p->dirty |= MACH64_DIRTY_STATE; }       /* the idle-repaint thread blitted in between */
+    glidiff(ctx, "frame_start");
     if (p->frame_new) {
         if (!mach64_mode_check(ctx)) return;
         /* glClear reaches the driver through slot 0x04 (mach64_flush, a2 = the GL_*_BUFFER_BIT mask, found in GLEngine's glClear at 0x4530 which
