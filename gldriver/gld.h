@@ -122,6 +122,7 @@ typedef struct {
     uint32_t   triangles;          /* statistics */
     /* idle repaint (windowed only): WindowServer paints the window white when it is exposed; an app that is not drawing (Chess) never restores it, so a
      * small asynchronous thread re-presents the last frame once the context has been idle for ~300 ms.  `volatile` counters only: nothing on the hot path. */
+    uint32_t   stencil_mode;       /* 0 none, 1 = stencil write, 2 = stencil test, emulated in the Z buffer (see mach64_sync_depth_from_gli) */
     uint32_t   tsig[9], tsig_valid;/* texture sampler setup of the last emitted state (see mach64_draw_triangle) */
     volatile uint32_t presents;    /* completed presents (activity together with `triangles`) */
     volatile uint32_t k2d_touched; /* the thread's blit reprogrammed the engine: the next draw must re-emit the state */
@@ -130,6 +131,7 @@ typedef struct {
     unsigned long rp_thread;       /* pthread_t */
 } mach64_priv;
 
+extern float mach64_zforce;             /* >= 0: every vertex gets this window depth (stencil emulation) */
 void mach64_repaint_start(mach64_priv *p);
 void mach64_repaint_stop(mach64_priv *p);
 

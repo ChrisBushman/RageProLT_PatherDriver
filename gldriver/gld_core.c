@@ -57,12 +57,38 @@ uint32_t mach64_gli_u32(gld_context *ctx, uint32_t off)
     return g ? *(const uint32_t *)(uintptr_t)(g + off) : 0;
 }
 
-/* GL depth state -> Z_CNTL.  gli+0x6340 bit24 = GL_DEPTH_TEST, +0x633c >> 16 = glDepthFunc, +0x63b8 bit24 = glDepthMask. */
+float mach64_zforce = -1.0f;
+
+/* GL depth state -> Z_CNTL.  gli+0x6340 bit24 = GL_DEPTH_TEST, +0x633c >> 16 = glDepthFunc, +0x63b8 bit24 = glDepthMask.
+ *
+ * STENCIL.  The chip has no stencil planes.  Chess clips its board reflection with one (write the board outline with ALWAYS/REPLACE, then draw the reflected pieces
+ * with EQUAL 1), always with the depth test off, so the Z buffer is free and stands in for a 1-bit stencil: cleared to far (stencil 0); a stencil-write draw stores a
+ * constant near depth (stencil 1); a stencil-test draw passes only where that near depth is stored (constant fragment depth just short of far, GREATER).  Only this
+ * pattern (depth test off, ALWAYS+REPLACE / EQUAL+KEEP) is emulated; any other stencil use is ignored as before.  gli words (tools/mach64_stencilscan):
+ * +0x6734 enable, +0x6714 = func<<16 | sfail op, +0x6718 = dpfail<<16 | dppass op.  Z is wiped when the emulation starts and when it ends. */
+#define STENCIL_ZSET   0.25f
+#define STENCIL_ZTEST  0.90f
 void mach64_sync_depth_from_gli(gld_context *ctx)
 {
     mach64_priv *p = MACH64_PRIV(ctx);
-    uint32_t gli = gli_find(ctx), z = 0;
+    uint32_t gli = gli_find(ctx), z = 0, smode = 0;
     if (!gli) return;
+    if ((*(const uint32_t *)(uintptr_t)(gli + 0x6734) & 1u) && !((*(const uint32_t *)(uintptr_t)(gli + 0x6340)) & 0x01000000u) && p->rb.z_off) {
+        uint32_t f = *(const uint32_t *)(uintptr_t)(gli + 0x6714), o = *(const uint32_t *)(uintptr_t)(gli + 0x6718);
+        if ((f >> 16) == 0x0207u && (o & 0xffffu) == 0x1e01u) smode = 1;                                   /* ALWAYS, pass op REPLACE */
+        else if ((f >> 16) == 0x0202u && (f & 0xffffu) == 0x1e00u && (o & 0xffffu) == 0x1e00u) smode = 2;  /* EQUAL, ops KEEP */
+    }
+    if (smode != p->stencil_mode) {
+        if ((smode == 1 && p->stencil_mode == 0) || smode == 0) {            /* entering (stencil starts clear) or leaving (restore a clean Z) */
+            mach64_flush_batch(ctx);
+            rgb_clear_z(&p->rb, 0xffffu);
+            p->dirty |= MACH64_DIRTY_STATE;
+        }
+        p->stencil_mode = smode;
+    }
+    mach64_zforce = smode == 1 ? STENCIL_ZSET : smode == 2 ? STENCIL_ZTEST : -1.0f;
+    if (smode == 1) { if (p->hw.z_cntl != (MACH64_Z_EN | MACH64_Z_TEST_ALWAYS | MACH64_Z_MASK_EN)) { p->hw.z_cntl = MACH64_Z_EN | MACH64_Z_TEST_ALWAYS | MACH64_Z_MASK_EN; p->dirty |= MACH64_DIRTY_STATE; } return; }
+    if (smode == 2) { if (p->hw.z_cntl != (MACH64_Z_EN | MACH64_Z_TEST_GREATER)) { p->hw.z_cntl = MACH64_Z_EN | MACH64_Z_TEST_GREATER; p->dirty |= MACH64_DIRTY_STATE; } return; }
     if ((*(const uint32_t *)(uintptr_t)(gli + 0x6340)) & 0x01000000u) {
         uint32_t func = (*(const uint32_t *)(uintptr_t)(gli + 0x633c)) >> 16;
         uint32_t mask = (*(const uint32_t *)(uintptr_t)(gli + 0x63b8)) & 0x01000000u;

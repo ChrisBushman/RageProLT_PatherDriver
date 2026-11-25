@@ -59,6 +59,7 @@ void mach64_read_vertex(const void *vp, m64_vertex *o, float fb_h)
     float rw = (w != 0.0f) ? 1.0f / w : 1.0f;       /* shared by every texcoord pair below (fdivs is ~17 cycles on the G3) */
     float ndcz  = *(const float *)(v + 0x18) * w;   /* w == 1/w_clip (from +0x0c) */
     float depth = ndcz * 0.5f + 0.5f;
+    if (mach64_zforce >= 0.0f) depth = mach64_zforce;       /* stencil emulation: constant depth */
     uint32_t argb = (chan(*(const float *)(v + 0x3c)) << 24)   /* vertex colour alpha */
                   | (chan(*(const float *)(v + GVOFF_R)) << 16)
                   | (chan(*(const float *)(v + GVOFF_G)) <<  8)
