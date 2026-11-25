@@ -301,6 +301,11 @@ static void t_envstate(void)
         if (i < sizeof st / sizeof st[0]) glTexEnvi(GL_TEXTURE_ENV, st[i].pn, st[i].v); else glTexEnvfv(GL_TEXTURE_ENV, GL_TEXTURE_ENV_COLOR, ec);
         glBegin(GL_QUADS); glTexCoord2f(.5f, .5f); glVertex2f(10, 10); glVertex2f(20, 10); glVertex2f(20, 20); glVertex2f(10, 20); glEnd();
     }
+    { static const struct { GLenum pn; GLint v; } d[] = { { GL_RGB_SCALE_ARB, 1 }, { GL_ALPHA_SCALE, 1 }, { GL_COMBINE_RGB_ARB, GL_MODULATE }, { GL_COMBINE_ALPHA_ARB, GL_MODULATE },
+        { GL_SOURCE0_RGB_ARB, GL_TEXTURE }, { GL_SOURCE1_RGB_ARB, GL_PREVIOUS_ARB }, { GL_SOURCE2_RGB_ARB, GL_CONSTANT_ARB }, { GL_SOURCE0_ALPHA_ARB, GL_TEXTURE }, { GL_SOURCE1_ALPHA_ARB, GL_PREVIOUS_ARB },
+        { GL_SOURCE2_ALPHA_ARB, GL_CONSTANT_ARB }, { GL_OPERAND0_RGB_ARB, GL_SRC_COLOR }, { GL_OPERAND1_RGB_ARB, GL_SRC_COLOR }, { GL_OPERAND2_RGB_ARB, GL_SRC_ALPHA }, { GL_OPERAND0_ALPHA_ARB, GL_SRC_ALPHA },
+        { GL_OPERAND1_ALPHA_ARB, GL_SRC_ALPHA }, { GL_OPERAND2_ALPHA_ARB, GL_SRC_ALPHA }, { GL_TEXTURE_ENV_MODE, GL_MODULATE } }; GLfloat z[4] = { 0, 0, 0, 0 };
+      for (i = 0; i < sizeof d / sizeof d[0]; i++) glTexEnvi(GL_TEXTURE_ENV, d[i].pn, d[i].v); glTexEnvfv(GL_TEXTURE_ENV, GL_TEXTURE_ENV_COLOR, z); }
     reset(0, 0, 0); glDeleteTextures(1, &id); report("env state dump", 1, "see gli diff");
 }
 static void t_tex1x1(void)
