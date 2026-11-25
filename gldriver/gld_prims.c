@@ -102,7 +102,7 @@ void mach64_read_vertex(const void *vp, m64_vertex *o, float fb_h)
      * +0x4c; the fog blend (fragment vs DP_FOG_CLR) is armed by SCALE_3D_CNTL
      * ALPHA_FOG_EN=FOG (bit12) in mach64_apply_fog.  mach64_fog_on is set per-draw by
      * mach64_bind_texture. */
-    if (mach64_fog_on) o->spec_argb = chan(*(const float *)(v + 0x4c)) << 24;
+    if (mach64_fog_on || mach64_fog_cpu) o->spec_argb = chan(*(const float *)(v + 0x4c)) << 24;
     if (mach64_spec_mode) {   /* separate specular colour: R,G,B floats at +0x50/+0x54/+0x58 (observed from real GLEngine with lighting on: +0x40 still holds the eye-space normal, +0x50 the lit specular) */
         uint32_t sr = chan(*(const float *)(v + 0x50)), sg = chan(*(const float *)(v + 0x54)), sb = chan(*(const float *)(v + 0x58));
         if (mach64_spec_mode == 1) o->spec_argb |= (sr << 16) | (sg << 8) | sb;          /* hardware adds it after texturing */

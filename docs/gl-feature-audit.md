@@ -1,6 +1,6 @@
 # GL feature audit (Nov 25)
 
-Evidence: `tools/ragegl/gl_probe` (124 probes) on the G4 MDD against the standalone driver: **123 pass, 1 fail** (ARB fragment program); `gl_suite` 290/290.
+Evidence: `tools/ragegl/gl_probe` (126 probes) on the G4 MDD against the standalone driver: **125 pass, 1 fail** (ARB fragment program); `gl_suite` 290/290.
 Status words: **tested** = a probe draws and checks pixels; **accepted-only** = the call is accepted but the effect is not verified (weaker than tested);
 **failing** = probe fails (driver gap); **unsupported** = GLEngine or the chip cannot do it; **untested** = no probe yet.
 
@@ -16,7 +16,7 @@ groups (kext reload heals it) showed `TEX_CNTL` keeps the secondary-unit bits of
 | Lines: width, stipple, smooth | tested | wide line, line stipple (+factor), line smooth |
 | Polygons: fill/line/point mode, cull, stipple, smooth, offset (fill/line/point) | tested | polygon mode LINE/POINT, cull, polygon stipple/smooth, three offset probes |
 | Depth test, all 8 functions | tested | depth functions |
-| Alpha test, all 8 functions | tested | alpha test functions (CPU path ignores alpha test, hardware path used) |
+| Alpha test, all 8 functions | tested | alpha test functions; also on the CPU blend path |
 | Blend: 9 source/dest factors, ADD | tested | blend probes, suite |
 | Logic ops | tested (8 of 16) | logic ops, XOR |
 | Scissor, user clip planes | tested | scissor, clip plane |
@@ -75,4 +75,4 @@ separate_specular_color, texture_mirror_clamp, compiled_vertex_array, abgr, bgra
 | Destination alpha | unsupported | chip is RGB565/1555, ALPHA_BITS 0 |
 
 ## Known limits of the CPU rasteriser path
-Level-0 only for CPU textures, no multitexture on the CPU path, alpha test/fog/colour-mask nuances ignored on that path.
+Level-0 only for CPU textures. Two-unit texturing on the CPU path only for crossbar COMBINE. Alpha test (before stencil/depth, so discarded fragments touch neither) and fog (vertex fog factor interpolated, blended with the fog colour) are applied on the CPU path (probes cpu_alpha_test, cpu_fog). Colour-mask nuances remain.

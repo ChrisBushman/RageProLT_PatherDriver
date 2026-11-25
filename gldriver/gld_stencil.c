@@ -337,7 +337,31 @@ static void cb_load(gld_context *ctx, cb_state *c)
         uint32_t u = mach64_gli_u32(ctx, 0x62f0u + (uint32_t)i * 4u); float f; __builtin_memcpy(&f, &u, 4);
         c->cc[i] = f <= 0.0f ? 0 : f >= 1.0f ? 255 : (int)(f * 255.0f + 0.5f);
     }
+    c->fog = mach64_fog_cpu;
+    for (i = 0; i < 3; i++) {                                                  /* GL_FOG_COLOR (gli+0x6358) */
+        uint32_t u = mach64_gli_u32(ctx, 0x6358u + (uint32_t)i * 4u); float f; __builtin_memcpy(&f, &u, 4);
+        c->fogc[i] = f <= 0.0f ? 0 : f >= 1.0f ? 255 : (int)(f * 255.0f + 0.5f);
+    }
 }
+/* One pixel's colour: vertex colour planes, texture environment (one unit, two units, cube, volume), fog.  A macro because it works on the rasteriser's locals; used twice (before the stencil/depth tests when the alpha test needs the fragment alpha, otherwise after them). */
+#define SHADE_PIXEL \
+                            for (c = 0; c < 4; c++) { int64_t v = (fca[c] + ((int64_t)1 << 37)) >> 38; if (v < 0) v = 0; else if (v > 255) v = 255; out |= (uint32_t)v << (8 * c); }      /* vertex colour: incremental plane, no divide */ \
+                            if (cbs.tex) { \
+                                if (cbs.env.e2) {                                    /* two-unit composite: unit 0 then unit 1, both texels and the primary colour nameable (crossbar) */ \
+                                    const m64_cpuenv *e2 = cbs.env.e2; uint32_t t0, t1, o0; \
+                                    if (faff) { t0 = tex_sample_q8(&cbs.env, ((int32_t)(fpa >> 16)) >> fkp, ((int32_t)(fqa >> 16)) >> fkp); t1 = tex_sample_q8(e2, ((int32_t)(fpa2 >> 16)) >> fkp, ((int32_t)(fqa2 >> 16)) >> fkp); } \
+                                    else { t0 = tex_sample_q8(&cbs.env, fx_div(fpa, fra, fkp - fkr), fx_div(fqa, fra, fkp - fkr)); t1 = tex_sample_q8(e2, fx_div(fpa2, fra, fkp - fkr), fx_div(fqa2, fra, fkp - fkr)); } \
+                                    g_xb.on = 1; g_xb.pri = out; g_xb.t0 = t0; g_xb.t1 = t1; \
+                                    o0 = env_apply_ref(&cbs.env, out, t0); out = env_apply_ref(e2, o0, t1); \
+                                    g_xb.on = 0; \
+                                } else if (cbs.env.cube) out = env_apply(&cbs.env, &cbs.ep, out, cube_sample_fx(&cbs.env, (int32_t)(fpa >> 16), (int32_t)(fqa >> 16), (int32_t)(fra >> 16))); \
+                                else if (cbs.env.vol) out = env_apply(&cbs.env, &cbs.ep, out, faff ? vol_sample_q8(&cbs.env, ((int32_t)(fpa >> 16)) >> fkp, ((int32_t)(fqa >> 16)) >> fkp, ((int32_t)(fza >> 16)) >> fkp) \
+                                                                                          : vol_sample_q8(&cbs.env, fx_div(fpa, fra, fkp - fkr), fx_div(fqa, fra, fkp - fkr), fx_div(fza, fra, fkp - fkr))); \
+                                else if (faff) out = env_apply(&cbs.env, &cbs.ep, out, tex_sample_q8(&cbs.env, ((int32_t)(fpa >> 16)) >> fkp, ((int32_t)(fqa >> 16)) >> fkp)); \
+                                else out = env_apply(&cbs.env, &cbs.ep, out, tex_sample_q8(&cbs.env, fx_div(fpa, fra, fkp - fkr), fx_div(fqa, fra, fkp - fkr)));      /* the chip: address = interp(S*W) / interp(W) */ \
+                            } \
+                            if (cbs.fog) { int64_t fq = (fga + ((int64_t)1 << 37)) >> 38; int fv, ch; if (fq < 0) fq = 0; else if (fq > 255) fq = 255; fv = (int)fq; \
+                                for (ch = 0; ch < 3; ch++) { int v = (int)((out >> (8 * ch)) & 255u); v = (v * fv + cbs.fogc[2 - ch] * (255 - fv) + 127) / 255; out = (out & ~(255u << (8 * ch))) | ((uint32_t)v << (8 * ch)); } }      /* GL_FOG: factor interpolated from the vertex fog value (GLEngine evaluates the mode), blended against the fog colour */
 int mach64_zs_cpu_draw(gld_context *ctx, const m64_vertex *va, const m64_vertex *vb, const m64_vertex *vc)
 {
     mach64_priv *p = MACH64_PRIV(ctx); zs_state *z = (zs_state *)p->zs;
@@ -345,7 +369,7 @@ int mach64_zs_cpu_draw(gld_context *ctx, const m64_vertex *va, const m64_vertex 
     int notinc[3], i, minx, maxx, miny, maxy, W, Hh, py, px, front, fi, flushed = 0, all_draw;
     uint32_t cov = 0, pass = 0; const zs_face *f; int sten_on, colour_on;
     uint8_t *sb; uint16_t *db; int depth_en; void *cbw = 0; cb_state cbs; const m64_vertex *vq[3]; int swapped = 0, cb_any = 0;
-    fx_plane fpc[4], fpp, fpq, fpr, fpz, fpp2, fpq2; int fkp = 0, fkr = 0, faff = 0; fx_inv fiv, einv[3];                  /* fixed-point colour / texture-coordinate / cube-direction planes (gld_fxmap.h); fpp, fpq, fpr double as the cube X, Y, Z */
+    fx_plane fpc[4], fpp, fpq, fpr, fpz, fpp2, fpq2, fpf; int at_on = 0; uint32_t afunc = 0x207, aref = 0; int64_t fga = 0; int fkp = 0, fkr = 0, faff = 0; fx_inv fiv, einv[3];                  /* fixed-point colour / texture-coordinate / cube-direction planes (gld_fxmap.h); fpp, fpq, fpr double as the cube X, Y, Z */
     if (!z || !z->pl[PL_S].buf) return 0;
     W = (int)p->fb_w; Hh = (int)p->fb_h;
     x[0] = (int16_t)((uint32_t)va->x_y >> 16); y[0] = (int16_t)((uint32_t)va->x_y & 0xffffu); zq[0] = (uint32_t)va->z >> 15;
@@ -378,11 +402,12 @@ int mach64_zs_cpu_draw(gld_context *ctx, const m64_vertex *va, const m64_vertex 
     fx_rcp_init();
     for (i = 0; i < 3; i++) { int64_t a4 = A[i] < 0 ? -4 * A[i] : 4 * A[i]; if (a4) fx_inv_setup(&einv[i], a4); }      /* covered range of each row from the edge equations: reciprocal per edge, no divide */
     if ((z->cb || z->envcpu) && maxy >= miny && ((!p->hw.textured && !mach64_tex_cube) ? z->cb != 0 : (mach64_cpu_env(ctx, &cbs.env) != 0 && (cbs.tex = 1)))) {
-        mach64_flush_batch(ctx); cbw = mach64_cb_open(ctx, miny, maxy - miny + 1); cb_load(ctx, &cbs); cb_prepare(&cbs, mach64_cb_is555(ctx));        /* blend factors and COMBINE selectors resolved once per draw */
+        mach64_flush_batch(ctx); cbw = mach64_cb_open(ctx, miny, maxy - miny + 1); cb_load(ctx, &cbs); { uint32_t af = mach64_gli_u32(ctx, 0x62e4u), ru = mach64_gli_u32(ctx, 0x62e0u); float rf; __builtin_memcpy(&rf, &ru, 4); at_on = (af & 0x100u) != 0; afunc = af >> 16; aref = rf <= 0.0f ? 0u : rf >= 1.0f ? 255u : (uint32_t)(rf * 255.0f + 0.5f); if (afunc < 0x200 || afunc > 0x207) at_on = 0; } cb_prepare(&cbs, mach64_cb_is555(ctx));        /* blend factors and COMBINE selectors resolved once per draw */
         { const m64_vertex *t = vb; vq[0] = va; vq[1] = (swapped ? vc : vb); vq[2] = (swapped ? t : vc); }
         fx_inv_setup(&fiv, area);
         {   int c, i2; int64_t dxa = x[1] - x[0], dya = y[1] - y[0], dxb = x[2] - x[0], dyb = y[2] - y[0];
             for (c = 0; c < 4; c++) fx_plane_setup(&fpc[c], (int64_t)((vq[0]->argb >> (8 * c)) & 255u) << 22, (int64_t)((vq[1]->argb >> (8 * c)) & 255u) << 22, (int64_t)((vq[2]->argb >> (8 * c)) & 255u) << 22, dxa, dya, dxb, dyb, &fiv);
+            if (cbs.fog) fx_plane_setup(&fpf, (int64_t)(vq[0]->spec_argb >> 24) << 22, (int64_t)(vq[1]->spec_argb >> 24) << 22, (int64_t)(vq[2]->spec_argb >> 24) << 22, dxa, dya, dxb, dyb, &fiv);
             if (cbs.tex) {
                 float P[3], Q[3], R[3], Z[3] = { 0, 0, 0 }, mp = 0.0f, mr = 0.0f;
                 faff = !cbs.env.cube && vq[0]->w == vq[1]->w && vq[1]->w == vq[2]->w;          /* constant w: the texel position is itself a plane (w cancels), no divide */
@@ -423,12 +448,14 @@ int mach64_zs_cpu_draw(gld_context *ctx, const m64_vertex *va, const m64_vertex 
         if (cbw) {
             int64_t ddx = qx0 - x[0], ddy = qy - y[0]; int c;
             for (c = 0; c < 4; c++) fca[c] = fx_plane_at(&fpc[c], ddx, ddy);
+            if (cbs.fog) fga = fx_plane_at(&fpf, ddx, ddy);
             if (cbs.tex) { fpa = fx_plane_at(&fpp, ddx, ddy); fqa = fx_plane_at(&fpq, ddx, ddy); fra = fx_plane_at(&fpr, ddx, ddy); if (cbs.env.vol) fza = fx_plane_at(&fpz, ddx, ddy); if (cbs.env.e2) { fpa2 = fx_plane_at(&fpp2, ddx, ddy); fqa2 = fx_plane_at(&fpq2, ddx, ddy); } }
         }
         for (px = (int)lo; px <= (int)hi; px++) {
             {
-                size_t idx = (size_t)py * z->stride + (size_t)px; int sp = 1, zp = 1; uint32_t zi = 0, s = 0;
+                size_t idx = (size_t)py * z->stride + (size_t)px; int sp = 1, zp = 1, c, shaded = 0; uint32_t zi = 0, s = 0, out = 0;
                 cov++;
+                if (cbw && colour_on && at_on) { SHADE_PIXEL shaded = 1; if (!cmpf(afunc, out >> 24, aref)) goto skip_px; }      /* alpha test first: a discarded fragment touches neither stencil nor depth */
                 if (sten_on) { s = sb[idx]; sp = f->spass[s]; }
                 if (depth_en && sp) {
                     int64_t zz = (zacc + 0x8000) >> 16; if (zz < 0) zz = 0; else if (zz > 65535) zz = 65535; zi = (uint32_t)zz >> 1;                         /* the chip stores and compares the 16-bit depth shifted down one bit (measured) */
@@ -441,29 +468,15 @@ int mach64_zs_cpu_draw(gld_context *ctx, const m64_vertex *va, const m64_vertex 
                     if (cbw && colour_on) {                                        /* composite this pixel */
                         uint16_t *dp = mach64_cb_px(cbw, py, px);
                         if (dp) {
-                            uint32_t out = 0; int c;
-                            for (c = 0; c < 4; c++) { int64_t v = (fca[c] + ((int64_t)1 << 37)) >> 38; if (v < 0) v = 0; else if (v > 255) v = 255; out |= (uint32_t)v << (8 * c); }      /* vertex colour: incremental plane, no divide */
-                            if (cbs.tex) {
-                                if (cbs.env.e2) {                                    /* two-unit composite: unit 0 then unit 1, both texels and the primary colour nameable (crossbar) */
-                                    const m64_cpuenv *e2 = cbs.env.e2; uint32_t t0, t1, o0;
-                                    if (faff) { t0 = tex_sample_q8(&cbs.env, ((int32_t)(fpa >> 16)) >> fkp, ((int32_t)(fqa >> 16)) >> fkp); t1 = tex_sample_q8(e2, ((int32_t)(fpa2 >> 16)) >> fkp, ((int32_t)(fqa2 >> 16)) >> fkp); }
-                                    else { t0 = tex_sample_q8(&cbs.env, fx_div(fpa, fra, fkp - fkr), fx_div(fqa, fra, fkp - fkr)); t1 = tex_sample_q8(e2, fx_div(fpa2, fra, fkp - fkr), fx_div(fqa2, fra, fkp - fkr)); }
-                                    g_xb.on = 1; g_xb.pri = out; g_xb.t0 = t0; g_xb.t1 = t1;
-                                    o0 = env_apply_ref(&cbs.env, out, t0); out = env_apply_ref(e2, o0, t1);
-                                    g_xb.on = 0;
-                                } else if (cbs.env.cube) out = env_apply(&cbs.env, &cbs.ep, out, cube_sample_fx(&cbs.env, (int32_t)(fpa >> 16), (int32_t)(fqa >> 16), (int32_t)(fra >> 16)));
-                                else if (cbs.env.vol) out = env_apply(&cbs.env, &cbs.ep, out, faff ? vol_sample_q8(&cbs.env, ((int32_t)(fpa >> 16)) >> fkp, ((int32_t)(fqa >> 16)) >> fkp, ((int32_t)(fza >> 16)) >> fkp)
-                                                                                          : vol_sample_q8(&cbs.env, fx_div(fpa, fra, fkp - fkr), fx_div(fqa, fra, fkp - fkr), fx_div(fza, fra, fkp - fkr)));
-                                else if (faff) out = env_apply(&cbs.env, &cbs.ep, out, tex_sample_q8(&cbs.env, ((int32_t)(fpa >> 16)) >> fkp, ((int32_t)(fqa >> 16)) >> fkp));
-                                else out = env_apply(&cbs.env, &cbs.ep, out, tex_sample_q8(&cbs.env, fx_div(fpa, fra, fkp - fkr), fx_div(fqa, fra, fkp - fkr)));      /* the chip: address = interp(S*W) / interp(W) */
-                            }
+                            if (!shaded) { SHADE_PIXEL }
                             *dp = cbs.blend_on ? cb_blend(&cbs, out, *dp) : cb_pack(&cbs, (out >> 16) & 255u, (out >> 8) & 255u, out & 255u); cb_any = 1;
                         }
                     } else if (colour_on && run < 0) run = px;
                 } else if (run >= 0) { rect_run(ctx, z, py, run, px - 1, va, vb, vc, &flushed); run = -1; }
             }
+            skip_px: ;
             zacc += 4 * gx;
-            if (cbw) { fca[0] += 4 * fpc[0].gx; fca[1] += 4 * fpc[1].gx; fca[2] += 4 * fpc[2].gx; fca[3] += 4 * fpc[3].gx; if (cbs.tex) { fpa += 4 * fpp.gx; fqa += 4 * fpq.gx; fra += 4 * fpr.gx; if (cbs.env.vol) fza += 4 * fpz.gx; if (cbs.env.e2) { fpa2 += 4 * fpp2.gx; fqa2 += 4 * fpq2.gx; } } }
+            if (cbw) { fca[0] += 4 * fpc[0].gx; fca[1] += 4 * fpc[1].gx; fca[2] += 4 * fpc[2].gx; fca[3] += 4 * fpc[3].gx; if (cbs.fog) fga += 4 * fpf.gx; if (cbs.tex) { fpa += 4 * fpp.gx; fqa += 4 * fpq.gx; fra += 4 * fpr.gx; if (cbs.env.vol) fza += 4 * fpz.gx; if (cbs.env.e2) { fpa2 += 4 * fpp2.gx; fqa2 += 4 * fpq2.gx; } } }
         }
         if (run >= 0) rect_run(ctx, z, py, run, px - 1, va, vb, vc, &flushed);
     }

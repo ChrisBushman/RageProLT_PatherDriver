@@ -110,6 +110,7 @@ static void unpack16(const mach64_priv *p, unsigned v, unsigned *R, unsigned *G,
  * converted once per call; the per-pixel work is integer: scale Q8, bias in 8-bit units Q8, matrix Q16. */
 typedef struct { int active, sq[4], bq[4], cm_on, cm[16], pm_on, psq[4], pbq[4], map_on, mn[4]; unsigned char mp[4][4096]; } pxt_state;
 static int pxt_q(float f, int one, int lim) { float v = f * (float)one; if (v > (float)lim) v = (float)lim; else if (v < -(float)lim) v = -(float)lim; return (int)v; }
+static inline int pxt_clamp(int v) { return v < 0 ? 0 : v > 255 ? 255 : v; }
 static void pxt_load(const unsigned char *gc, pxt_state *t)
 {
     static const unsigned so[4] = { 0x6400, 0x6408, 0x6410, 0x6418 }, bo[4] = { 0x63fc, 0x6404, 0x640c, 0x6414 }; int i;
@@ -140,7 +141,6 @@ static void pxt_load(const unsigned char *gc, pxt_state *t)
     }
     if (t->cm_on) t->active = 1;
 }
-static inline int pxt_clamp(int v) { return v < 0 ? 0 : v > 255 ? 255 : v; }
 static void pxt_apply(const pxt_state *t, unsigned char *R, unsigned char *G, unsigned char *B, int A)
 {
     int c[4], k;

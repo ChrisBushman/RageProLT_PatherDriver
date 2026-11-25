@@ -701,6 +701,7 @@ int mach64_tex_noinset;
 float mach64_tex_mscale[2] = { 1.0f, 1.0f }, mach64_tex_mbias[2] = { 0.0f, 0.0f };      /* per-draw S/T coordinate map of the bound texture (see mach64_upload) */
 int mach64_spec_mode = 0;
 int mach64_env_add = 0;       /* GL_TEXTURE_ENV_MODE GL_ADD on this draw: primary colour rides the specular add, the diffuse colour becomes white */
+int mach64_fog_cpu = 0;                   /* GL_FOG enabled (even with blend on): the CPU compositor applies the fog itself */
 int mach64_fog_on = 0;                    /* consumed by mach64_read_vertex       */
 int mach64_flat_on = 0;                   /* glShadeModel(GL_FLAT): emit_tri flattens colour */
 
@@ -952,6 +953,7 @@ int mach64_bind_texture(gld_context *ctx)
     mach64_spec_mode = (!lop_on && (mach64_gli_u32(ctx, GLI_FOG_ENABLE) & 1u)) ? 2 : 0;
     mach64_env_add = 0;
     mach64_fog_on = lop_on ? 0 : mach64_fog_active(ctx);
+    mach64_fog_cpu = !lop_on && (mach64_gli_u32(ctx, GLI_FOG_ENABLE) & GLI_FOG_EN_BIT) != 0;
     if (mach64_fog_on) p->dirty |= MACH64_DIRTY_STATE;
     else               st->dp_fog_clr = 0;   /* leave DP_FRGD_CLR to the 2D engine */
 

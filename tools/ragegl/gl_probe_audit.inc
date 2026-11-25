@@ -518,7 +518,29 @@ static void a_multisample_attr(void)
     aq("ARB_multisample (4x pixel format offered)", pf ? 1 : -1, pf ? "" : "no multisample pixel format"); if (pf) aglDestroyPixelFormat(pf);
 }
 
+/* CPU compositing path (blend equation MAX forces it): alpha test and fog must still apply there */
+static void a_cpu_alpha_test(void)
+{
+    int a, b;
+    reset(0, 0, 0); glEnable(GL_BLEND); glBlendFunc(GL_ONE, GL_ONE); glBlendEquationEXT(GL_MAX_EXT); glEnable(GL_ALPHA_TEST); glAlphaFunc(GL_GREATER, 0.5f);
+    quad(10, 10, 60, 100, 1, 0, 0, 0.25f); quad(60, 10, 110, 100, 0, 1, 0, 0.75f);
+    glDisable(GL_ALPHA_TEST); glBlendEquationEXT(GL_FUNC_ADD_EXT);
+    if (glerr()) { report("alpha test on the CPU blend path", -1, 0); return; }
+    a = near3(30, 50, 0, 0, 0, 12); b = near3(90, 50, 0, 255, 0, 12);
+    report("alpha test on the CPU blend path", (a == 1 && b == 1) ? 1 : 0, 0);
+}
+static void a_cpu_fog(void)
+{
+    GLfloat fc[4] = { 0, 0, 1, 1 };
+    reset(0, 0, 0); glEnable(GL_BLEND); glBlendFunc(GL_ONE, GL_ONE); glBlendEquationEXT(GL_MAX_EXT); glEnable(GL_FOG); glFogi(GL_FOG_MODE, GL_LINEAR); glFogf(GL_FOG_START, 0); glFogf(GL_FOG_END, 1); glFogfv(GL_FOG_COLOR, fc);
+    glFogi(GL_FOG_COORDINATE_SOURCE_EXT, GL_FOG_COORDINATE_EXT);
+    glColor3f(1, 0, 0); glBegin(GL_QUADS); glFogCoordfEXT(0.5f); glVertex2f(10, 10); glFogCoordfEXT(0.5f); glVertex2f(100, 10); glFogCoordfEXT(0.5f); glVertex2f(100, 100); glFogCoordfEXT(0.5f); glVertex2f(10, 100); glEnd();
+    glDisable(GL_FOG); glFogi(GL_FOG_COORDINATE_SOURCE_EXT, GL_FRAGMENT_DEPTH_EXT); glBlendEquationEXT(GL_FUNC_ADD_EXT);
+    report("fog on the CPU blend path", glerr() ? -1 : near3(50, 50, 128, 0, 128, 30), 0);
+}
+
 #define AUDIT_ENTRIES \
+    { "cpu_alpha_test", a_cpu_alpha_test, "GL_EXT_blend_minmax" }, { "cpu_fog", a_cpu_fog, "GL_EXT_fog_coord" }, \
     { "wide_point", a_wide_point, 0 }, { "wide_line", a_wide_line, 0 }, { "polygon_stipple", a_polygon_stipple, 0 }, { "polygon_smooth", a_polygon_smooth, 0 }, \
     { "polyoffset_line", a_polyoffset_line, 0 }, { "polyoffset_point", a_polyoffset_point, 0 }, { "tex1d", a_tex1d, 0 }, { "tex_border", a_tex_border, 0 }, { "tex_border_rep", a_tex_border_rep, 0 }, \
     { "texgen", a_texgen, 0 }, { "texgen_sphere", a_texgen_sphere, 0 }, { "texmatrix", a_texmatrix, 0 }, { "texsubimage", a_texsubimage, 0 }, { "texsubimage1d", a_texsubimage1d, 0 }, \

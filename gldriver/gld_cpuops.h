@@ -7,7 +7,7 @@
 /* COMBINE source/operand selection resolved once per draw: sel = source index * 4 + operand kind (0 colour, 1 one-minus colour, 2 alpha, 3 one-minus alpha); source 0 texture, 1 primary / previous, 2 constant. */
 typedef struct { int rsel[3], asel[3]; } env_prep;
 /* Blend state: sf/df/eq as GL enums, plus the per-draw resolved forms (factor codes 0 zero, 1 one, 2 cs, 3 1-cs, 4 as, 5 1-as, 6 cd, 7 1-cd, 8.. constant-colour terms). */
-typedef struct { uint32_t sf, df, eq; int cc[4]; int blend_on, tex; m64_cpuenv env; env_prep ep; int fmt555, sfk, dfk, fastk, ccv[3][4]; } cb_state;
+typedef struct { uint32_t sf, df, eq; int cc[4]; int blend_on, tex; m64_cpuenv env; env_prep ep; int fmt555, sfk, dfk, fastk, ccv[3][4]; int fog, fogc[3]; } cb_state;
 static inline int mul255(int a, int b) { int t = a * b + 128; return (t + (t >> 8)) >> 8; }
 static int bfac(uint32_t f, int ch, const int *cs, int as, const int *cd, const int *cc)
 {
