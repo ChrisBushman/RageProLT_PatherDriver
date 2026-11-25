@@ -24,7 +24,8 @@
 
 int main(void)
 {
-    Rect bounds = { 60, 1920 + 80, 460, 1920 + 560 };      /* on the Rage display (global x 1920..2560) */              /* top,left,bottom,right -> 480x400 */
+    int ox = getenv("AGL_DX") ? atoi(getenv("AGL_DX")) : 0, oy = getenv("AGL_DY") ? atoi(getenv("AGL_DY")) : 0;
+    Rect bounds = { 60 + oy, 1920 + 80 + ox, 460 + oy, 1920 + 560 + ox };      /* on the Rage display (global x 1920..2560) */              /* top,left,bottom,right -> 480x400 */
     WindowRef win = NULL;
     OSStatus err = CreateNewWindow(kDocumentWindowClass,
                                    kWindowStandardDocumentAttributes, &bounds, &win);
@@ -60,9 +61,10 @@ int main(void)
     /* SPINNING Gouraud triangle: rotates about Z so the setup engine re-transforms and
      * re-rasterizes fresh geometry (and both windings) every frame -- exercises the full
      * 3D PIO path continuously, now that the static case is proven. */
+    int nfr = getenv("AGL_FRAMES") ? atoi(getenv("AGL_FRAMES")) : 180;
     printf("rendering 180 frames (spinning Gouraud triangle)...\n"); fflush(stdout);
     int i;
-    for (i = 0; i < 180; i++) {
+    for (i = 0; i < nfr; i++) {
         float a = getenv("AGL_STATIC") ? 20.0f : (float)i * 2.0f;                   /* degrees/frame */
         glClearColor(0.10f, 0.10f, 0.15f, 1.0f);     /* dark slate background */
         glClear(GL_COLOR_BUFFER_BIT);
@@ -78,7 +80,7 @@ int main(void)
 
         if (i == 90) { int gx; unsigned char rowpx[480 * 4]; glReadPixels(0, 200, 480, 1, GL_RGBA, GL_UNSIGNED_BYTE, rowpx); printf("row GL y=200:"); for (gx = 20; gx < 480; gx += 30) printf(" %d:%02x%02x%02x", gx, rowpx[gx*4], rowpx[gx*4+1], rowpx[gx*4+2]); printf("\n"); }
         if (i == 90) { unsigned char px[4] = {0,0,0,0}; glReadPixels(240, 60, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px); printf("readpixels (240,60) = %02x %02x %02x %02x\n", px[0], px[1], px[2], px[3]); }
-        if (i == 100) system("./scanshot /tmp/agl_scan.ppm");
+        if (i == 100 && !getenv("AGL_NOSHOT")) system("./scanshot /tmp/agl_scan.ppm");
         aglSwapBuffers(ctx);                         /* -> gldFlushBuffer -> Path-B present */
         usleep(16000);                               /* ~60 Hz; window stays up ~3s */
     }

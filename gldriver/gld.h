@@ -167,6 +167,7 @@ extern uint32_t mach64_tex_vofs[2];
 
 /* gld_cgs.c */
 int mach64_cgs_resolve_bounds(uint32_t window_id, uint32_t surface_id, int allow_enum, int *x, int *y, int *w, int *h);
+int mach64_cgs_visible_rects(uint32_t window_id, uint32_t surface_id, int lx, int ly, int w, int h, short (*out)[4], int maxr);
 int mach64_cgs_off_display(void);
 
 void mach64_read_vertex(const void *v, m64_vertex *out, float fb_h);

@@ -227,6 +227,21 @@ void mach64_present(gld_context *ctx)
     if (!p || !p->attached) return;
     mach64_flush_batch(ctx);
     if (!mach64_mode_check(ctx)) return;
+    if (p->win_mode && p->cgs_win) {
+        /* a window: follow it (it may have moved) and copy only the part no window in front covers */
+        int wx = 0, wy = 0, ww = 0, wh = 0, n, i; short vr[16][4];
+        if (mach64_cgs_resolve_bounds(p->cgs_win, p->cgs_surf, 0, &wx, &wy, &ww, &wh) && ww == (int)p->fb_w && wh == (int)p->fb_h) {
+            p->win_x = (uint32_t)wx; p->win_y = (uint32_t)wy;
+        }
+        n = mach64_cgs_visible_rects(p->cgs_win, p->cgs_surf, (int)p->win_x, (int)p->win_y, (int)p->fb_w, (int)p->fb_h, vr, 16);
+        if (n == 0) return;                                           /* completely covered */
+        if (n > 0) {
+            for (i = 0; i < n; i++)
+                rgb_present(&p->rb, vr[i][0] - (int)p->win_x, vr[i][1] - (int)p->win_y, vr[i][2], vr[i][3], vr[i][0], vr[i][1]);
+            p->dirty |= MACH64_DIRTY_STATE;
+            return;
+        }
+    }
     rgb_present(&p->rb, 0, 0, (int)p->fb_w, (int)p->fb_h, (int)p->win_x, (int)p->win_y);
     p->dirty |= MACH64_DIRTY_STATE;                /* the kernel blit reprogrammed the engine for 2D */
 }
