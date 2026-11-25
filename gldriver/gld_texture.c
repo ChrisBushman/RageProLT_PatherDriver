@@ -73,8 +73,10 @@ void mach64_tex_ctx_gone(rgb_t *rb)
 }
 
 /* A display mode change dropped the kernel's allocations: every resident texture is evicted (key + texobj kept) and re-uploads on its next bind. */
+static uint32_t g_tex_epoch;      /* bumped by everything that changes a slot, an upload or the pending queue: the bind memo (mach64_bind_texture) is valid only for one epoch */
 void mach64_tex_invalidate_all(void)
 {
+    g_tex_epoch++;
     int i;
     for (i = 0; i < MACH64_TEX_SLOTS; i++)
         if (g_slots[i].key) { heap_free(g_slots[i].owner, g_slots[i].off); g_slots[i].off = 0; g_slots[i].rsize = 0; g_slots[i].owner = 0; g_slots[i].h1 = g_slots[i].h2 = g_slots[i].hlen = 0; }
@@ -103,6 +105,7 @@ static mach64_tex_slot *slot_find(uint32_t key)
  * still fits; if it grew, the old region is freed before a fresh one is taken. */
 static mach64_tex_slot *slot_alloc_locked(uint32_t key, uint32_t w, uint32_t h, uint32_t nbytes)
 {
+    g_tex_epoch++;
     uint32_t sz = tex_align(nbytes);
     uint32_t off;
     mach64_tex_slot *s = slot_find(key);
@@ -170,9 +173,10 @@ void mach64_texture_bound(void *texobj) { (void)texobj; }   /* no bind hook; see
 static void cube_cache_drop(uint32_t state);
 static void vol_cache_drop(uint32_t state);
 
-static void cpu_free(mach64_tex_slot *s) { int k; free(s->cpu); s->cpu = 0; for (k = 0; k < 12; k++) { free(s->cpul[k]); s->cpul[k] = 0; } }
+static void cpu_free(mach64_tex_slot *s) { int k; g_tex_epoch++; free(s->cpu); s->cpu = 0; for (k = 0; k < 12; k++) { free(s->cpul[k]); s->cpul[k] = 0; } }
 void mach64_texture_deleted(gld_context *ctx, void *texobj)
 {
+    g_tex_epoch++;
     mach64_tex_slot *s; int used;
     /* A draw that sampled this texture may still sit in the unsubmitted batch: submit it before the VRAM is returned (the kernel validates texture offsets against the
      * owner's live allocations, so a batch naming a freed block samples garbage -- found with probes that delete the texture before reading the frame back). */
@@ -364,6 +368,7 @@ static uint32_t pal_info(const unsigned char *s, const unsigned char **pal)
 }
 static int mach64_upload(gld_context *ctx, void *texobj)
 {
+    g_tex_epoch++;
     mach64_priv *p = MACH64_PRIV(ctx);
     g_cur = &p->rb;
     const unsigned char *t = (const unsigned char *)texobj;
@@ -866,7 +871,7 @@ static uint32_t mt_cntl(const mach64_tex_slot *b2)
  * in VRAM regardless of enable state), then -- only if the app has GL_TEXTURE_2D
  * enabled -- programs the texture registers into p->hw and enables textured state
  * emission.  Returns 1 if a texture is bound (the primitive should feed S/T). */
-int mach64_bind_texture(gld_context *ctx)
+static int bind_texture_full(gld_context *ctx)
 {
     mach64_priv *p = MACH64_PRIV(ctx);
     g_cur = &p->rb;
@@ -1236,6 +1241,62 @@ int mach64_bind_texture(gld_context *ctx)
     if (mt && !(st->setup_cntl & 0x40u)) { st->setup_cntl |= 0x40u; p->dirty |= MACH64_DIRTY_STATE; }   /* LOG_MAX_INC_ADJ, as for the hardware mip path and Win98's context default */
     st->textured = 1;
     return 1;
+}
+
+/* ---- per-primitive memo of the whole bind --------------------------------------------------------------------------------------------------------------------
+ * bind_texture_full decodes ~100 gli words and the bound slots into p->hw on EVERY primitive, and its reset of the per-level registers makes mach64_tex_select_lod re-dirty the
+ * state each time (an extra 96-dword state block per primitive).  The decode is a pure function of: the gli region it reads (0x62e0..0x6800: blend/alpha/fog/logic-op/stipple/shade/
+ * texture units/LOD bias; 0x1573c..0x15780: the bound texobj words), the texture epoch (slots, uploads, pending queue), the batch generation (slots are stamped per batch), the
+ * target and the context.  When all of those are unchanged the previous result stands: what is skipped is exactly what would be rewritten with the same values.
+ * RAGE_NO_MEMO=1 disables it; RAGE_VERIFY_MEMO=1 runs the full decode on every hit too and reports any difference (other than the per-triangle LOD registers, which select_lod owns). */
+#define MEMO_A_LO 0x62e0u
+#define MEMO_A_HI 0x6800u
+#define MEMO_B_LO 0x1573cu
+#define MEMO_B_HI 0x15780u
+static struct {
+    gld_context *ctx; void *rb; uint32_t epoch, bgen; int ret, valid;
+    uint32_t a[(MEMO_A_HI - MEMO_A_LO) / 4], b[(MEMO_B_HI - MEMO_B_LO) / 4];
+} g_memo;
+static int memo_mode = -1;          /* 0 off, 1 on, 2 on + verify */
+static unsigned g_memo_hits, g_memo_miss, g_memo_bad;
+
+static void memo_report(void) { fprintf(stderr, "RAGE memo: %u hits, %u misses, %u mismatches\n", g_memo_hits, g_memo_miss, g_memo_bad); }
+int mach64_bind_texture(gld_context *ctx)
+{
+    mach64_priv *p = MACH64_PRIV(ctx);
+    uint32_t g; int ret;
+    if (memo_mode < 0) { const char *e = getenv("RAGE_NO_MEMO"), *v = getenv("RAGE_VERIFY_MEMO"); memo_mode = (e && e[0] == '1') ? 0 : (v && v[0] == '1') ? 2 : 1; if (memo_mode == 2) atexit(memo_report); }
+    if (!memo_mode) return bind_texture_full(ctx);
+    (void)mach64_gli_u32(ctx, 0);
+    g = g_gli_g;
+    if (g && g_gli_ctx == ctx && g_memo.valid && g_memo.ctx == ctx && g_memo.rb == (void *)&p->rb && g_memo.epoch == g_tex_epoch && g_memo.bgen == mach64_batch_gen && !*(volatile int *)&g_npending
+        && !__builtin_memcmp(g_memo.a, (const void *)(uintptr_t)(g + MEMO_A_LO), sizeof g_memo.a) && !__builtin_memcmp(g_memo.b, (const void *)(uintptr_t)(g + MEMO_B_LO), sizeof g_memo.b)) {
+        g_memo_hits++;
+        if (memo_mode == 2) {
+            m64_state before = p->hw, after; int gl[8], bad = 0; uint32_t d0 = p->dirty;
+            gl[0] = mach64_fog_on; gl[1] = mach64_spec_mode; gl[2] = mach64_env_add; gl[3] = mach64_flat_on; gl[4] = mach64_fog_cpu; gl[5] = mach64_tex_noinset; gl[6] = mach64_tex_cube; gl[7] = (int)p->tex_slot;
+            ret = bind_texture_full(ctx);
+            after = p->hw;
+            before.tex_0_off = after.tex_0_off = 0; before.tex_size_pitch = after.tex_size_pitch = 0; before.tex_maxlog2 = after.tex_maxlog2 = 0;
+            before.tex_scale_3d &= ~0x02000000u; after.tex_scale_3d &= ~0x02000000u;
+            if (ret != g_memo.ret) bad |= 1;
+            if (__builtin_memcmp(&before, &after, sizeof before)) bad |= 2;
+            if (gl[0] != mach64_fog_on || gl[1] != mach64_spec_mode || gl[2] != mach64_env_add || gl[3] != mach64_flat_on || gl[4] != mach64_fog_cpu || gl[5] != mach64_tex_noinset || gl[6] != mach64_tex_cube) bad |= 4;
+            if (bad) { if (g_memo_bad++ < 20) fprintf(stderr, "RAGE memo MISMATCH bad=%x ret=%d/%d dirty=%x\n", bad, ret, g_memo.ret, d0); }
+            return ret;
+        }
+        if (mach64_fog_on) p->dirty |= MACH64_DIRTY_STATE;       /* fog re-latches DP_FOG_CLR on every fog draw (see bind_texture_full) */
+        return g_memo.ret;
+    }
+    g_memo_miss++;
+    ret = bind_texture_full(ctx);
+    g = g_gli_g;
+    if (g && g_gli_ctx == ctx && !*(volatile int *)&g_npending) {
+        g_memo.ctx = ctx; g_memo.rb = (void *)&p->rb; g_memo.epoch = g_tex_epoch; g_memo.bgen = mach64_batch_gen; g_memo.ret = ret; g_memo.valid = 1;
+        __builtin_memcpy(g_memo.a, (const void *)(uintptr_t)(g + MEMO_A_LO), sizeof g_memo.a); __builtin_memcpy(g_memo.b, (const void *)(uintptr_t)(g + MEMO_B_LO), sizeof g_memo.b);
+    } else g_memo.valid = 0;
+    if (memo_mode == 2 && ((g_memo_hits + g_memo_miss) & 0xfffu) == 0) fprintf(stderr, "RAGE memo: %u hits, %u misses, %u mismatches\n", g_memo_hits, g_memo_miss, g_memo_bad);
+    return ret;
 }
 
 /* Per-triangle mip level and min/mag filter (software LOD, used when the hardware mip chain is not used, see hw_mip in
