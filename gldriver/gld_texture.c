@@ -400,7 +400,7 @@ static int mach64_upload(gld_context *ctx, void *texobj)
         int attempt;
         hwfmt = 6u; bpt = 4u; slot = 0;
         { mach64_tex_slot *pre; TEX_LOCK(); pre = slot_find(tex_key(texobj)); pre_used = (pre && pre->rsize && pre->owner == g_cur && pre->gen == mach64_batch_gen); TEX_UNLOCK(); }
-        if (lvl[0].w >= 2) {
+        if (lvl[0].w >= 1) {
             if (t0 == 0x8363u) { hwfmt = 4u; bpt = 2u; }
             else if (t0 == 0x8033u) { hwfmt = 15u; bpt = 2u; }
             else if (t0 == 0x8034u) { hwfmt = 3u; bpt = 2u; }

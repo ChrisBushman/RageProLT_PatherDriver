@@ -266,6 +266,18 @@ static void t_wrap_mirror_clamp(void) { static const int e[4][3] = { { 0, 255, 0
 static void t_wrap_edge(void) { static const int e[4][3] = { { 255, 0, 0 }, { 255, 0, 0 }, { 0, 255, 0 }, { 0, 255, 0 } }; report("wrap: CLAMP_TO_EDGE", wrap_test(GL_CLAMP_TO_EDGE, -1, 2, e, 0), 0); }
 static void t_wrap_border(void) { static const int e[4][3] = { { 0, 0, 255 }, { 255, 0, 0 }, { 0, 255, 0 }, { 0, 0, 255 } }; GLfloat bc[4] = { 0, 0, 1, 1 }; report("wrap: CLAMP_TO_BORDER", wrap_test(GL_CLAMP_TO_BORDER_ARB, -1, 2, e, bc), 0); }
 static void t_wrap_repeat(void) { static const int e[4][3] = { { 255, 0, 0 }, { 0, 255, 0 }, { 255, 0, 0 }, { 0, 255, 0 } }; report("wrap: REPEAT", wrap_test(GL_REPEAT, 0, 2, e, 0), 0); }
+static void t_tex1x1(void)
+{
+    static const unsigned char c[3] = { 0, 128, 64 }, c4[12] = { 0, 128, 64, 0, 128, 64, 0, 128, 64, 0, 128, 64 }; GLuint id; char n[64];
+    reset(0, 0, 0); glEnable(GL_TEXTURE_2D); id = mktex(GL_TEXTURE_2D, 1, 1, c, GL_NEAREST, GL_CLAMP); glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_REPLACE);
+    glColor3f(1, 1, 1); glBegin(GL_QUADS); glTexCoord2f(.5f, .5f); glVertex2f(10, 10); glVertex2f(100, 10); glVertex2f(100, 100); glVertex2f(10, 100); glEnd();
+    glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
+    report("texture 1x1 REPLACE", glerr() ? -1 : near3(50, 50, 0, 128, 64, 12), 0); glDeleteTextures(1, &id);
+    reset(0, 0, 0); glEnable(GL_TEXTURE_2D); id = mktex(GL_TEXTURE_2D, 2, 2, c4, GL_NEAREST, GL_CLAMP); glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_ADD);
+    glColor3f(0.5f, 0, 0); glBegin(GL_QUADS); glTexCoord2f(.5f, .5f); glVertex2f(10, 10); glVertex2f(100, 10); glVertex2f(100, 100); glVertex2f(10, 100); glEnd();
+    glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE); (void)n;
+    report("texture 2x2 ADD", glerr() ? -1 : near3(50, 50, 128, 128, 64, 30), 0); glDeleteTextures(1, &id);
+}
 static void t_env_add(void)
 {
     static const unsigned char c[3] = { 0, 128, 64 }; GLuint id;
@@ -556,7 +568,7 @@ static const struct { const char *name; tfn fn; const char *ext; } TESTS[] = {
     { "tex_npot", t_tex_npot, "GL_ARB_texture_non_power_of_two" }, { "tex_rect", t_tex_rect, "GL_EXT_texture_rectangle" }, { "tex_cube", t_tex_cube, "GL_ARB_texture_cube_map" },
     { "wrap_mirror", t_wrap_mirror, "GL_ARB_texture_mirrored_repeat" }, { "wrap_mirror_clamp", t_wrap_mirror_clamp, "GL_EXT_texture_mirror_clamp" },
     { "wrap_edge", t_wrap_edge, 0 }, { "wrap_border", t_wrap_border, "GL_ARB_texture_border_clamp" }, { "wrap_repeat", t_wrap_repeat, 0 },
-    { "env_add", t_env_add, "GL_ARB_texture_env_add" }, { "combine_addsigned", t_combine_addsigned, "GL_ARB_texture_env_combine" }, { "combine_subtract", t_combine_interp, "GL_ARB_texture_env_combine" },
+    { "tex1x1", t_tex1x1, 0 }, { "env_add", t_env_add, "GL_ARB_texture_env_add" }, { "combine_addsigned", t_combine_addsigned, "GL_ARB_texture_env_combine" }, { "combine_subtract", t_combine_interp, "GL_ARB_texture_env_combine" },
     { "combine_dot3", t_combine_dot3, "GL_ARB_texture_env_dot3" }, { "tex_s3tc", t_tex_s3tc, "GL_EXT_texture_compression_s3tc" }, { "tex_paletted", t_tex_paletted, "GL_EXT_paletted_texture" },
     { "tex_aniso", t_tex_aniso, "GL_EXT_texture_filter_anisotropic" }, { "tex_3d", t_tex_3d, 0 }, { "copyteximage", t_copyteximage, 0 }, { "copytexsub", t_copytexsub, 0 },
     { "point_sprite", t_point_sprite, "GL_ARB_point_sprite" }, { "point_params", t_point_params, "GL_ARB_point_parameters" }, { "displaylist", t_displaylist, 0 }, { "vertex_array", t_vertex_array, 0 },
