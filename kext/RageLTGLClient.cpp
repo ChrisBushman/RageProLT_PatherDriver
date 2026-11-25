@@ -35,6 +35,7 @@ bool RageLTGLClient::start(IOService *provider)
     M(RAGE_GL_SET_Z,       selSetZ,       kIOUCScalarIScalarO, 2, 0);
     M(RAGE_GL_FILL,        selFill,       kIOUCScalarIScalarO, 5, 0);
     M(RAGE_GL_SUBMIT,      selSubmit,     kIOUCScalarIScalarO, 2, 0);
+    M(RAGE_GL_SUBMIT_EX,   selSubmitEx,   kIOUCScalarIScalarO, 6, 0);
     M(RAGE_GL_FENCE,       selFence,      kIOUCScalarIScalarO, 1, 1);
     M(RAGE_GL_PRESENT,     selPresent,    kIOUCScalarIScalarO, 6, 0);
     M(RAGE_GL_VRAM_WRITE,  selVramWrite,  kIOUCScalarIScalarO, 4, 0);
@@ -123,6 +124,18 @@ IOReturn RageLTGLClient::selSubmit(uint32_t addr, uint32_t npairs)
     if (rc == kIOReturnSuccess) rc = fDev->submitBatch(fOwner, buf, npairs);
     IOFree(buf, bytes);
     return rc;
+}
+
+IOReturn RageLTGLClient::selSubmitEx(uint32_t addr, uint32_t npairs, uint32_t texAddr, uint32_t ntex, uint32_t tfmt, uint32_t tfmt2)
+{
+    uint32_t tex[24], i; IOReturn rc = kIOReturnSuccess;
+    if (!fDev) return kIOReturnNotAttached;
+    if (ntex > 12u || npairs > RAGE_BATCH_MAX_PAIRS) return kIOReturnBadArgument;
+    if (ntex) { rc = userIn(texAddr, (uint8_t *)tex, ntex * 8u); if (rc != kIOReturnSuccess) return rc; }
+    for (i = 0; i < ntex; i++) (void)fDev->setTexture(fOwner, tex[2 * i], tex[2 * i + 1], 0);          /* same checks as SET_TEXTURE; a refused offset stays unbound */
+    if (tfmt && tfmt != 6u) (void)fDev->setTexture(fOwner, 0u, 0xfffffffeu, tfmt);
+    if (tfmt2) (void)fDev->setTexture(fOwner, 11u, 0xfffffffeu, tfmt2);
+    return npairs ? selSubmit(addr, npairs) : kIOReturnSuccess;
 }
 
 IOReturn RageLTGLClient::selFence(uint32_t seq, uint32_t *completed)

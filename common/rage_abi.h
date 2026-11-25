@@ -30,7 +30,10 @@ enum {
     RAGE_GL_CONFIG = 14,       /* in 2 {key, value}: key 1 = use DMA submission (1) or PIO (0); a global switch, harmless to flip */
     RAGE_GL_SET_TEXTURE = 15,  /* in 3 {index 0..10 = TEX_n_OFF / 11 = SECONDARY_TEX_OFF, VRAM offset (0xffffffff unbinds, 0xfffffffe = set the format only), texel format 0/3/4/6/8/11/12/15 (0 = unchanged; 8 = Y8, 11/12 = YCbCr 4:2:2)} */
     RAGE_GL_CLEAR_Z = 16,      /* in 1 {value}: fill the whole bound 16-bit Z buffer (clipped to the scissor) with value */
-    RAGE_GL_SEL_COUNT = 17
+    RAGE_GL_SUBMIT_EX = 17,    /* in 6 {user address of {reg,val} pairs, number of pairs (0 = textures only), user address of {index,offset} texture pairs, number of texture pairs (<= 12),
+                                * texel format 0/3/4/6/8/11/12/15 for the primary unit (0 or 6 = unchanged), format for the secondary unit (0 = unchanged)}: every SET_TEXTURE of a flush plus
+                                * the submit in ONE kernel call (a flush used to cost 13+ round trips); the texture records apply exactly as SET_TEXTURE would, failures ignored */
+    RAGE_GL_SEL_COUNT = 18
 };
 #define RAGE_XFER_SWAP16 1u      /* VRAM_WRITE/READ flag: swap bytes inside every 16-bit unit */
 #define RAGE_XFER_SWAP32 2u      /* ... inside every 32-bit unit */

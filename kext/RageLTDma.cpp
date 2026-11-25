@@ -2,7 +2,8 @@
  * clients never see a bus address.  The stream is built here from the already-validated pairs plus the kernel prologue, as GUI register-write
  * packets (ADRINDEX header + value), chained over 4092-byte descriptors (the byte count is 12 bits wide, HW-proven), terminated by SRC_CNTL=0.
  * Completion = BM_GUI_TABLE reached the table end AND the engine idle for several reads (the kick can read idle for ~1 us).  Submit returns without
- * waiting; the next engine operation (any path) first drains via idleWait().  One buffer: a second submit waits for the first (serial model).
+ * waiting; the next engine operation (any path) first drains via idleWait().  Two buffers (the established single-thread engine of the SonicR plugin, gld_engine.c):
+ * submit N+1 BUILDS its stream in the free buffer while the engine still draws N, and only then waits for N and kicks; no thread, no interrupt.
  * Anything that fails to allocate or time out falls back to PIO / resets the engine.  No floating point. */
 #include "RageLTDevice.h"
 #include <IOKit/IOLib.h>
@@ -14,7 +15,8 @@
 #define LOG(...) IOLog("RageLT: " __VA_ARGS__)
 
 #define DMA_CMD_BYTES   0x12000u         /* 8192 pairs * 8 + prologue + terminator, rounded */
-#define DMA_RING_BYTES  0x8000u          /* 16 KB-aligned table picked inside (physical alignment of the request is not honoured, measured earlier) */
+#define DMA_RING_BYTES  0xc000u          /* two 16 KB-aligned tables picked inside (physical alignment of the request is not honoured, measured earlier: up to 16 KB lost to alignment) */
+#define DMA_TABLE_STRIDE 0x4000u         /* table b = ring base + b * stride */
 #define DMA_CHUNK       4092u
 
 #if RAGE_FEAT_DMA
@@ -32,8 +34,10 @@ bool RageLTDevice::dmaInit(void)
     IOByteCount seg; IOPhysicalAddress pc, pr;
     fDmaOk = false; fDmaUse = false; fDmaPending = false;
     fDmaCmd = IOBufferMemoryDescriptor::withOptions(o, DMA_CMD_BYTES, PAGE_SIZE);
+    fDmaCmd2 = IOBufferMemoryDescriptor::withOptions(o, DMA_CMD_BYTES, PAGE_SIZE);        /* optional: without it submits stay strictly serial */
     fDmaRing = IOBufferMemoryDescriptor::withOptions(o, DMA_RING_BYTES, 0x4000);
     if (!fDmaCmd || !fDmaRing) { LOG("DMA buffers not allocated: PIO only\n"); dmaFree(); return false; }
+    if (fDmaCmd2 && fDmaCmd2->prepare(kIODirectionOutIn) != kIOReturnSuccess) { fDmaCmd2->release(); fDmaCmd2 = 0; }
     if (fDmaCmd->prepare(kIODirectionOutIn) != kIOReturnSuccess || fDmaRing->prepare(kIODirectionOutIn) != kIOReturnSuccess) { dmaFree(); return false; }
     pc = fDmaCmd->getPhysicalSegment(0, &seg);
     if (seg < DMA_CMD_BYTES) { LOG("command buffer not contiguous\n"); dmaFree(); return false; }
@@ -45,6 +49,12 @@ bool RageLTDevice::dmaInit(void)
     fDmaCmdKva = (volatile uint8_t *)fDmaCmd->getBytesNoCopy();
     fDmaRingKva0 = (volatile uint8_t *)fDmaRing->getBytesNoCopy();
     if (!fDmaCmdKva || !fDmaRingKva0) { dmaFree(); return false; }
+    if (fDmaCmd2) {
+        IOPhysicalAddress p2 = fDmaCmd2->getPhysicalSegment(0, &seg);
+        fDmaCmdKva2 = (volatile uint8_t *)fDmaCmd2->getBytesNoCopy();
+        if (seg < DMA_CMD_BYTES || !p2 || p2 >= 0x80000000u || !fDmaCmdKva2) { fDmaCmd2->complete(kIODirectionOutIn); fDmaCmd2->release(); fDmaCmd2 = 0; }
+        else fDmaCmdBus2 = (uint32_t)p2;
+    }
     fDmaCmdBus = (uint32_t)pc;
     fDmaRingBus = ((uint32_t)pr + 0x3fffu) & ~0x3fffu;
     fDmaRingKva = fDmaRingKva0 + (fDmaRingBus - (uint32_t)pr);
@@ -59,6 +69,7 @@ void RageLTDevice::dmaFree(void)
 {
     fDmaOk = false;
     if (fDmaCmd) { fDmaCmd->complete(kIODirectionOutIn); fDmaCmd->release(); fDmaCmd = 0; }
+    if (fDmaCmd2) { fDmaCmd2->complete(kIODirectionOutIn); fDmaCmd2->release(); fDmaCmd2 = 0; }
     if (fDmaRing) { fDmaRing->complete(kIODirectionOutIn); fDmaRing->release(); fDmaRing = 0; }
 }
 
@@ -67,7 +78,7 @@ IOReturn RageLTDevice::dmaWait(void)
 {
     uint32_t spins, idle = 0, end;
     if (!fDmaPending) return kIOReturnSuccess;
-    end = fDmaRingBus + 16u * fDmaNDesc;
+    end = fDmaEnd;                                                     /* table end of the stream in flight (set at its kick) */
     for (spins = 0; spins < RAGE_WAIT_SPINS; spins++) {
         uint32_t tbl = eng_rd(fRegs, MACH64_BM_GUI_TABLE) & ~0xfu;
         if (tbl == end && !(eng_rd(fRegs, MACH64_GUI_STAT) & MACH64_GUI_ACTIVE)) { if (++idle >= 8) break; } else idle = 0;
@@ -87,13 +98,14 @@ IOReturn RageLTDevice::dmaWait(void)
     return kIOReturnSuccess;
 }
 
-/* pairs already validated by the caller; c = the owner's context (copied under fLock) */
+/* pairs already validated by the caller; c = the owner's context (copied under fLock).
+ * Order (the established double-buffer engine): build into the buffer the engine is NOT reading -> wait for the stream in flight -> engine idle -> kick. */
 IOReturn RageLTDevice::dmaSubmit(const struct rage_ctx *c, const uint32_t *pairs, uint32_t npairs)
 {
-    volatile uint32_t *w = (volatile uint32_t *)fDmaCmdKva; uint32_t n = 0, i, bytes, off, nd = 0;
-    IOReturn rc = dmaWait();                                           /* single buffer: the previous stream must be finished */
-    if (rc) return rc;
-    if (eng_wait_idle(fRegs)) return kIOReturnTimeout;
+    uint32_t n = 0, i, bytes, off, nd = 0, b = fDmaCmd2 ? fDmaCur : 0u, cmdBus, ringBus; IOReturn rc;
+    volatile uint32_t *w = (volatile uint32_t *)(b ? fDmaCmdKva2 : fDmaCmdKva); volatile uint8_t *tab = fDmaRingKva + b * DMA_TABLE_STRIDE;
+    cmdBus = b ? fDmaCmdBus2 : fDmaCmdBus; ringBus = fDmaRingBus + b * DMA_TABLE_STRIDE;
+    if (!fDmaCmd2) { rc = dmaWait(); if (rc) return rc; }              /* single buffer: the previous stream must be finished before its memory is rewritten */
 #define PUT(reg, val) do { OSWriteLittleInt32((void *)w, 4u * n, MACH64_ADRINDEX(reg)); OSWriteLittleInt32((void *)w, 4u * n + 4u, (val)); n += 2; } while (0)
     { uint32_t pp[64], np = prologuePairs(c, pp), k; for (k = 0; k < np; k++) PUT(pp[2 * k], pp[2 * k + 1]); }
     /* Consecutive registers (reg, reg+4, ...) leave as ONE packet: the burst form is what latches per-vertex colour into the interpolator (a vertex
@@ -114,22 +126,26 @@ IOReturn RageLTDevice::dmaSubmit(const struct rage_ctx *c, const uint32_t *pairs
     bytes = 4u * n;
     for (off = 0; off < bytes; off += DMA_CHUNK, nd++) {
         uint32_t len = bytes - off > DMA_CHUNK ? DMA_CHUNK : bytes - off;
-        volatile uint8_t *d = fDmaRingKva + 16u * nd;
+        volatile uint8_t *d = tab + 16u * nd;
         OSWriteLittleInt32((void *)d, 0, MACH64_APERTURE_OFFSET + MACH64_BM_ADDR);
-        OSWriteLittleInt32((void *)d, 4, fDmaCmdBus + off);
+        OSWriteLittleInt32((void *)d, 4, cmdBus + off);
         OSWriteLittleInt32((void *)d, 8, len | MACH64_DMA_HOLD_OFFSET | ((off + len >= bytes) ? MACH64_DMA_EOL : 0));
         OSWriteLittleInt32((void *)d, 12, 0);
     }
-    fDmaNDesc = nd;
-    dmaFlush(fDmaCmdKva, bytes);
-    dmaFlush(fDmaRingKva, 16u * nd);
+    dmaFlush((volatile uint8_t *)w, bytes);
+    dmaFlush(tab, 16u * nd);
+    rc = dmaWait();                                                    /* the stream on the other buffer (if any) must be finished before the engine is reprogrammed */
+    if (rc) return rc;
+    if (eng_wait_idle(fRegs)) return kIOReturnTimeout;
+    fDmaNDesc = nd; fDmaEnd = ringBus + 16u * nd;
     fDmaSaveBus = eng_rd(fRegs, MACH64_BUS_CNTL);
     eng_wr(fRegs, MACH64_BUS_CNTL, (fDmaSaveBus & ~MACH64_BUS_MASTER_DIS) | MACH64_BUS_EXT_REG_EN);
-    eng_wq(fRegs, MACH64_BM_GUI_TABLE_CMD, fDmaRingBus | MACH64_CIRCULAR_BUF_SIZE_16KB);
+    eng_wq(fRegs, MACH64_BM_GUI_TABLE_CMD, ringBus | MACH64_CIRCULAR_BUF_SIZE_16KB);
     eng_wq(fRegs, MACH64_SRC_CNTL, MACH64_SRC_BM_ENABLE | MACH64_SRC_BM_SYNC | MACH64_SRC_BM_OP_SYSTEM_TO_REG);
     fDmaPending = true;
     eng_wq(fRegs, MACH64_DST_HEIGHT_WIDTH, 0);                         /* kick */
-    logEvent(RAGE_EV_MARK, 0, 0xd0030000u, bytes, nd, npairs, 0);
+    if (fDmaCmd2) fDmaCur ^= 1u;                                       /* the next stream is built in the twin while this one draws */
+    logEvent(RAGE_EV_MARK, 0, 0xd0030000u, bytes, nd, npairs, b);
     return kIOReturnSuccess;
 }
 

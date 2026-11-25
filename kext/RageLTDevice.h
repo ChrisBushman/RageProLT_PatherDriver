@@ -61,10 +61,10 @@ class RageLTDevice : public IOAccelerator
     uint32_t               fNumFB;
     uint32_t               fFenceSubmitted, fFenceCompleted;   /* PIO phase: completes before submit returns; DMA keeps the same counters */
     /* RAGE_FEAT_DMA (RageLTDma.cpp) */
-    class IOBufferMemoryDescriptor *fDmaCmd, *fDmaRing;
+    class IOBufferMemoryDescriptor *fDmaCmd, *fDmaCmd2, *fDmaRing;       /* two command buffers (the stream being drawn and the one being built), one ring block holding a 16 KB table for each */
     IOMemoryMap         *fDmaCmdMap, *fDmaRingMap;
-    volatile uint8_t      *fDmaCmdKva, *fDmaRingKva, *fDmaRingKva0;
-    uint32_t               fDmaCmdBus, fDmaRingBus, fDmaNDesc, fDmaSaveBus;
+    volatile uint8_t      *fDmaCmdKva, *fDmaCmdKva2, *fDmaRingKva, *fDmaRingKva0;
+    uint32_t               fDmaCmdBus, fDmaCmdBus2, fDmaRingBus, fDmaNDesc, fDmaSaveBus, fDmaEnd, fDmaCur;   /* fDmaEnd = table end the walk of the stream in flight must reach; fDmaCur = buffer the next stream is built in */
     bool                 fDmaOk, fDmaUse, fDmaPending;
     uint32_t               fScratch;     /* a word the engine never writes: rewriting it with its own value (CPU) flushes the engine pixel cache before a CPU read of VRAM */
     struct rage_log     *fLog;         /* event ring (RAGE_FEAT_PANIC_LOG), allocated at start */

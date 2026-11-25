@@ -34,6 +34,7 @@ public:
     IOReturn selSetZ(uint32_t off, uint32_t pitch);
     IOReturn selFill(uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint32_t color);
     IOReturn selSubmit(uint32_t addr, uint32_t npairs);
+    IOReturn selSubmitEx(uint32_t addr, uint32_t npairs, uint32_t texAddr, uint32_t ntex, uint32_t tfmt, uint32_t tfmt2);
     IOReturn selFence(uint32_t seq, uint32_t *completed);
     IOReturn selPresent(uint32_t sx, uint32_t sy, uint32_t w, uint32_t h, uint32_t dx, uint32_t dy);
     IOReturn selVramWrite(uint32_t off, uint32_t addr, uint32_t len, uint32_t flags);

@@ -40,10 +40,16 @@ void mach64_pack_vertex(m64_vertex *out, float x, float y, float z, float w, uin
  * ctx+0x10 points into it; the block is found by the back-pointer at +0x7898 (user space only, bounded). */
 static gld_context *g_gli_ctx; static uint32_t g_gli_p10, g_gli_g;
 void mach64_gli_forget(gld_context *ctx) { if (g_gli_ctx == ctx) { g_gli_ctx = 0; g_gli_g = 0; } }
-static uint32_t gli_find(gld_context *ctx)
+static uint32_t gli_find_slow(gld_context *ctx);
+static inline uint32_t gli_find(gld_context *ctx)
+{
+    uint32_t p10 = *(const uint32_t *)((const char *)ctx + 0x10);
+    if (g_gli_ctx == ctx && g_gli_p10 == p10 && g_gli_g && *(const uint32_t *)(uintptr_t)(g_gli_g + 0x7898) == (uint32_t)(uintptr_t)ctx) return g_gli_g;       /* the hit: one compare chain, inlined */
+    return gli_find_slow(ctx);
+}
+static uint32_t gli_find_slow(gld_context *ctx)
 {
     uint32_t p10 = *(const uint32_t *)((const char *)ctx + 0x10), off;
-    if (g_gli_ctx == ctx && g_gli_p10 == p10 && g_gli_g && *(const uint32_t *)(uintptr_t)(g_gli_g + 0x7898) == (uint32_t)(uintptr_t)ctx) return g_gli_g;
     for (off = 0; off <= 0x8000; off += 4) {
         uint32_t g = p10 - off;
         if (g < 0x10000 || g > M64_UADDR_MAX) break;
@@ -59,8 +65,10 @@ uint32_t mach64_gli_u32(gld_context *ctx, uint32_t off)
 
 static void glidiff(gld_context *ctx, const char *tag)
 {
-    static uint32_t snap[0x2000]; static int have; const char *fn = getenv("RAGE_GLIDIFF"); uint32_t g = gli_find(ctx), o, n = 0; FILE *f;
-    if (!fn || !g) return;
+    static uint32_t snap[0x2000]; static int have; static const char *fn; static int fn_set; uint32_t g, o, n = 0; FILE *f;
+    if (!fn_set) { fn = getenv("RAGE_GLIDIFF"); fn_set = 1; }         /* read once: this runs on every draw */
+    if (!fn) return;
+    g = gli_find(ctx); if (!g) return;
     f = fopen(fn, "a"); if (!f) return;
     for (o = 0x300; o < 0x7e00; o += 4) { uint32_t v = *(const uint32_t *)(uintptr_t)(g + o), i = o / 4 - 0xc0; if (i >= sizeof snap / 4) continue;
         if (have && snap[i] != v) { if (!n++) fprintf(f, "-- %s\n", tag); fprintf(f, "  %04x: %08x -> %08x\n", o, snap[i], v); } snap[i] = v; }
