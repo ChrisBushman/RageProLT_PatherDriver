@@ -347,7 +347,7 @@ static int mach64_upload(gld_context *ctx, void *texobj)
     mach64_tex_slot *slot;
     int nlevels = 0, L, pre_used = 0;
     uint32_t tex_new_h1 = 0, tex_new_h2 = 0, tex_new_hl = 0;   /* hash of the image being uploaded (stored in the slot on success) */
-    int wmode_s = 0, wmode_t = 0; float wscale_s = 1.0f, wscale_t = 1.0f, wbias_s = 0.0f, wbias_t = 0.0f; unsigned char *mir_bufs[12] = { 0 }, *dec_bufs[12] = { 0 };
+    int rect = 0, wmode_s = 0, wmode_t = 0; float wscale_s = 1.0f, wscale_t = 1.0f, wbias_s = 0.0f, wbias_t = 0.0f; unsigned char *mir_bufs[12] = { 0 }, *dec_bufs[12] = { 0 };
 
     if (!t) return 0;
     state = *(const uint32_t *)(t + 0x30);
@@ -421,8 +421,10 @@ static int mach64_upload(gld_context *ctx, void *texobj)
     wmode_s = wmode_t = 0;
     {   uint32_t wrap = *(const uint32_t *)(s + 0x10), ws = wrap >> 16, wt = wrap & 0xffffu;
         wmode_s = ws == 0x8370u ? 1 : ws == 0x8742u ? 3 : ws == 0x812du ? 2 : 0; wmode_t = wt == 0x8370u ? 1 : wt == 0x8742u ? 3 : wt == 0x812du ? 2 : 0;
-        if (lvl[0].w & (lvl[0].w - 1u)) wmode_s = (wmode_s || ws == 0x2901u) ? 5 : 4;
-        if (lvl[0].h & (lvl[0].h - 1u)) wmode_t = (wmode_t || wt == 0x2901u) ? 5 : 4;
+        rect = (((*(const uint32_t *)s) >> 16) & 0xfu) == 2u;                 /* GL_TEXTURE_RECTANGLE_EXT (state word 0 bits 16..19: 3 = 2D, 2 = rectangle): texel-unit coordinates, never repeats */
+        if (rect) wmode_s = wmode_t = 0;
+        if (lvl[0].w & (lvl[0].w - 1u)) wmode_s = (!rect && (wmode_s || ws == 0x2901u)) ? 5 : 4;
+        if (lvl[0].h & (lvl[0].h - 1u)) wmode_t = (!rect && (wmode_t || wt == 0x2901u)) ? 5 : 4;
         if (nlevels > 1 && (wmode_s == 2 || wmode_t == 2)) { if (wmode_s == 2) wmode_s = 0; if (wmode_t == 2) wmode_t = 0; }
         if ((wmode_s || wmode_t)) {
             uint32_t W0 = lvl[0].w, H0 = lvl[0].h, nw0 = W0, nh0 = H0;
@@ -468,6 +470,7 @@ static int mach64_upload(gld_context *ctx, void *texobj)
             }
         }
     }
+    if (rect) { wscale_s = 1.0f / (float)lvl[0].w; wscale_t = 1.0f / (float)lvl[0].h; wbias_s = wbias_t = 0.0f; }    /* texel units -> normalised over the stored (padded) size */
     /* Texel format.  Packed 16-bit sources (5_6_5, 4_4_4_4, 5_5_5_1) are stored natively as RGB565 / ARGB4444 / ARGB1555 (half the VRAM, exact); everything
      * else is ARGB8888 -- and if an ARGB8888 texture does not fit the heap it is retried as 16-bit (RGB565 without alpha, ARGB4444 with), the way a compact texture format
      * would be chosen.  Only the Path B (kext memcpy) upload can pack 16-bit texels. */
@@ -519,6 +522,7 @@ static int mach64_upload(gld_context *ctx, void *texobj)
         slot->clamp_s = ((wrap >> 16) != 0x2901u);
         slot->clamp_t = ((wrap & 0xffffu) != 0x2901u);
         slot->wscale[0] = wscale_s; slot->wscale[1] = wscale_t; slot->wbias[0] = wbias_s; slot->wbias[1] = wbias_t;
+        if (rect) { slot->clamp_s = slot->clamp_t = 1; }
         if (wmode_s == 1 || wmode_s == 5) slot->clamp_s = 0; else if (wmode_s == 2 || wmode_s == 3 || wmode_s == 4) slot->clamp_s = 1;
         if (wmode_t == 1 || wmode_t == 5) slot->clamp_t = 0; else if (wmode_t == 2 || wmode_t == 3 || wmode_t == 4) slot->clamp_t = 1;
         /* GL filter enums (state-object offsets: 0x2600 NEAREST,
@@ -555,6 +559,8 @@ static int mach64_upload(gld_context *ctx, void *texobj)
  * when enabled, 0 when disabled; recovered via tools/mach64_texstate gli-diff). */
 #define GLI_TEX2D_ENABLE   0x6748
 #define GLI_TEX2D_BIT      0x00000008u
+#define GLI_TEXRECT_BIT    0x00000004u    /* GL_TEXTURE_RECTANGLE_EXT enabled (its bound texobj is the word BEFORE the 2D one: targets are 1D, rect, 2D, 3D, cube at 4-byte steps from 0x15744) */
+#define GLI_TEXANY_BITS    (GLI_TEX2D_BIT | GLI_TEXRECT_BIT)
 #define GLI_UNIT_STRIDE    0x7cu       /* per texture unit: enable word, env-mode word */
 #define GLI_BOUND_STRIDE   0x14u       /* per texture unit: bound texobj pointer       */
 
@@ -792,8 +798,8 @@ int mach64_bind_texture(gld_context *ctx)
     mach64_tex_slot *bound, *bound2;
     /* The textures this draw will use must survive any eviction triggered by an upload below. */
     {   int u; for (u = 0; u < 2; u++) {
-            uint32_t en = mach64_gli_u32(ctx, GLI_TEX2D_ENABLE + (uint32_t)u * GLI_UNIT_STRIDE), bt = mach64_gli_u32(ctx, GLI_BOUND_TEXOBJ + (uint32_t)u * GLI_BOUND_STRIDE);
-            g_protect[u] = ((en & GLI_TEX2D_BIT) && bt > 0x10000 && bt <= M64_UADDR_MAX) ? *(const uint32_t *)(uintptr_t)(bt + 0x30) : 0;
+            uint32_t en = mach64_gli_u32(ctx, GLI_TEX2D_ENABLE + (uint32_t)u * GLI_UNIT_STRIDE), bt = mach64_gli_u32(ctx, GLI_BOUND_TEXOBJ + (uint32_t)u * GLI_BOUND_STRIDE - ((en & GLI_TEX2D_BIT) ? 0u : 4u));
+            g_protect[u] = ((en & GLI_TEXANY_BITS) && bt > 0x10000 && bt <= M64_UADDR_MAX) ? *(const uint32_t *)(uintptr_t)(bt + 0x30) : 0;
         } }
     int punit;
     uint32_t wl, hl, tex_on, env, light_fcn, new_scale_3d, blend, lop_mix = 0;
@@ -904,9 +910,9 @@ int mach64_bind_texture(gld_context *ctx)
     {   mach64_tex_slot *ub[2]; int u;
         for (u = 0; u < 2; u++) {
             uint32_t en = mach64_gli_u32(ctx, GLI_TEX2D_ENABLE + (uint32_t)u * GLI_UNIT_STRIDE);
-            uint32_t bt = mach64_gli_u32(ctx, GLI_BOUND_TEXOBJ + (uint32_t)u * GLI_BOUND_STRIDE);
+            uint32_t bt = mach64_gli_u32(ctx, GLI_BOUND_TEXOBJ + (uint32_t)u * GLI_BOUND_STRIDE - ((en & GLI_TEX2D_BIT) ? 0u : 4u));
             ub[u] = 0;
-            if ((en & GLI_TEX2D_BIT) && bt > 0x10000 && bt <= M64_UADDR_MAX) {
+            if ((en & GLI_TEXANY_BITS) && bt > 0x10000 && bt <= M64_UADDR_MAX) {
                 uint32_t key = *(const uint32_t *)(uintptr_t)(bt + 0x30);
                 {   static mach64_tex_slot *last_sl[2];                       /* per-unit cache: the slot table is a static array, a slot's identity is its key, so a hit needs no lock and no search */
                     if (last_sl[u] && last_sl[u]->key == key) ub[u] = last_sl[u];
@@ -1209,7 +1215,7 @@ int mach64_env_needs_cpu(uint32_t gli)
 {
     const uint32_t *w = (const uint32_t *)(uintptr_t)gli;
     uint32_t en = w[0x6748 / 4], mode = w[0x674c / 4] >> 16;
-    if (!(en & GLI_TEX2D_BIT) || (w[(0x6748 + GLI_UNIT_STRIDE) / 4] & GLI_TEX2D_BIT)) return 0;       /* off, or two units (one-pass hardware compositing) */
+    if (!(en & GLI_TEXANY_BITS) || (w[(0x6748 + GLI_UNIT_STRIDE) / 4] & GLI_TEXANY_BITS)) return 0;       /* off, or two units (one-pass hardware compositing) */
     if (mode == ENV_BLEND) return 1;
     if (mode != ENV_COMBINE) return 0;
     {   uint32_t rf = w[0x6750 / 4] >> 16, af = w[0x6750 / 4] & 0xffffu;
