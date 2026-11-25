@@ -115,7 +115,8 @@ static void pack_at(const void *vp, float gx, float gy, float fb_h, m64_vertex *
     const unsigned char *v = (const unsigned char *)vp;
     float w     = *(const float *)(v + GVOFF_W);              /* 1/w_clip */
     float depth = *(const float *)(v + 0x18) * w * 0.5f + 0.5f; /* clip_z*(1/w) -> NDC -> [0,1] */
-    uint32_t argb = (chan(*(const float *)(v + GVOFF_R)) << 16)
+    uint32_t argb = (chan(*(const float *)(v + 0x3c)) << 24)          /* vertex alpha: blended points/lines need it */
+                  | (chan(*(const float *)(v + GVOFF_R)) << 16)
                   | (chan(*(const float *)(v + GVOFF_G)) <<  8)
                   |  chan(*(const float *)(v + GVOFF_B));
     mach64_pack_vertex(o, gx, fb_h - gy, depth, w, argb);   /* zeros o->s/o->t */
@@ -164,11 +165,65 @@ static float gli_size(gld_context *ctx, uint32_t off)
     return (f >= 1.0f) ? f : 1.0f;
 }
 
+
+/* ---- GL_POINT_SMOOTH / GL_LINE_SMOOTH: the chip has no coverage unit, so the primitive is built from geometry whose vertex alpha ramps from the vertex's
+ * alpha (inside) to 0 (one pixel outside); with the app's usual glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA) the edge pixels blend by coverage.
+ * gli+0x63a0 bit 16 = LINE_SMOOTH, gli+0x6650 bit 24 = POINT_SMOOTH. -------------------------------------------------------------------------------- */
+#define GLI_LINE_SMOOTH  0x63a0
+#define GLI_POINT_SMOOTH 0x6650
+static void set_alpha(m64_vertex *o, uint32_t a) { o->argb = (o->argb & 0x00ffffffu) | (a << 24); }
+static void smooth_tri(gld_context *ctx, m64_vertex *a, m64_vertex *b, m64_vertex *c) { mach64_draw_triangle(ctx, a, b, c); }
+static void draw_point_smooth(gld_context *ctx, const void *vp, float fb_h, float r)
+{
+    mach64_priv *p = MACH64_PRIV(ctx); const unsigned char *v = (const unsigned char *)vp;
+    float x = *(const float *)(v + GVOFF_X), y = *(const float *)(v + GVOFF_Y), ri = r - 0.5f, ro = r + 0.5f;
+    uint32_t alpha = chan(*(const float *)(v + 0x3c)); int n = (int)(8.0f + ro * 3.0f), i;
+    int tw = (p->hw.textured && p->tex_w > 0 && p->tex_h > 0) ? p->tex_w : 0, th = p->tex_h;
+    m64_vertex c, in0, in1, out0, out1;
+    if (ri < 0.0f) ri = 0.0f;
+    if (n > 48) n = 48; if (n < 12) n = 12;
+    pack_at(vp, x, y, fb_h, &c, tw, th); set_alpha(&c, alpha);
+    p->nonpoly = 1;
+    for (i = 0; i < n; i++) {
+        float a0 = 6.2831853f * (float)i / (float)n, a1 = 6.2831853f * (float)(i + 1) / (float)n;
+        float c0 = __builtin_cosf(a0), s0 = __builtin_sinf(a0), c1 = __builtin_cosf(a1), s1 = __builtin_sinf(a1);
+        pack_at(vp, x + ri * c0, y + ri * s0, fb_h, &in0, tw, th);   set_alpha(&in0, alpha);
+        pack_at(vp, x + ri * c1, y + ri * s1, fb_h, &in1, tw, th);   set_alpha(&in1, alpha);
+        pack_at(vp, x + ro * c0, y + ro * s0, fb_h, &out0, tw, th);  set_alpha(&out0, 0);
+        pack_at(vp, x + ro * c1, y + ro * s1, fb_h, &out1, tw, th);  set_alpha(&out1, 0);
+        if (ri > 0.0f) smooth_tri(ctx, &c, &in0, &in1);
+        smooth_tri(ctx, &in0, &out0, &in1);
+        smooth_tri(ctx, &in1, &out0, &out1);
+    }
+    p->nonpoly = 0;
+}
+static void draw_line_smooth(gld_context *ctx, const void *v0, const void *v1, float fb_h, float wdt)
+{
+    mach64_priv *p = MACH64_PRIV(ctx); const unsigned char *a = (const unsigned char *)v0, *b = (const unsigned char *)v1;
+    float x0 = *(const float *)(a + GVOFF_X), y0 = *(const float *)(a + GVOFF_Y), x1 = *(const float *)(b + GVOFF_X), y1 = *(const float *)(b + GVOFF_Y);
+    float dx = x1 - x0, dy = y1 - y0, len = __builtin_sqrtf(dx * dx + dy * dy), nx, ny, h = wdt + 0.5f, off[4];
+    uint32_t alpha0 = chan(*(const float *)(a + 0x3c)), alpha1 = chan(*(const float *)(b + 0x3c)), al0[4], al1[4];
+    int tw = (p->hw.textured && p->tex_w > 0 && p->tex_h > 0) ? p->tex_w : 0, th = p->tex_h, k;
+    m64_vertex A[4], B[4];
+    if (len < 0.0001f) return;
+    nx = -dy / len; ny = dx / len;
+    off[0] = -h; off[1] = -(h - 1.0f > 0.0f ? h - 1.0f : 0.0f); off[2] = -off[1]; off[3] = h;
+    al0[0] = 0; al0[1] = al0[2] = alpha0; al0[3] = 0; al1[0] = 0; al1[1] = al1[2] = alpha1; al1[3] = 0;
+    for (k = 0; k < 4; k++) {
+        pack_at(v0, x0 + nx * off[k], y0 + ny * off[k], fb_h, &A[k], tw, th); set_alpha(&A[k], al0[k]);
+        pack_at(v1, x1 + nx * off[k], y1 + ny * off[k], fb_h, &B[k], tw, th); set_alpha(&B[k], al1[k]);
+    }
+    p->nonpoly = 1;
+    for (k = 0; k < 3; k++) { smooth_tri(ctx, &A[k], &B[k], &A[k + 1]); smooth_tri(ctx, &B[k + 1], &A[k + 1], &B[k]); }
+    p->nonpoly = 0;
+}
+
 /* One point -> a size x size quad (two same-winding triangles) centred on it.
  * s is the half-extent (GL point size is the diameter). */
 static void draw_point(gld_context *ctx, const void *vp, float fb_h, float s)
 {
     mach64_priv *p = MACH64_PRIV(ctx);
+    if (mach64_gli_u32(ctx, GLI_POINT_SMOOTH) & 0x01000000u) { draw_point_smooth(ctx, vp, fb_h, s); return; }
     const unsigned char *v = (const unsigned char *)vp;
     float x = *(const float *)(v + GVOFF_X), y = *(const float *)(v + GVOFF_Y);
     int tw = (p->hw.textured && p->tex_w > 0 && p->tex_h > 0) ? p->tex_w : 0, th = p->tex_h;
@@ -225,6 +280,7 @@ static void draw_line_solid(gld_context *ctx, const void *v0, const void *v1,
     float adx = x1 - x0, ady = y1 - y0, ix, iy;
     int tw = (p->hw.textured && p->tex_w > 0 && p->tex_h > 0) ? p->tex_w : 0, th = p->tex_h;
     m64_vertex A, B, C, D;
+    if (mach64_gli_u32(ctx, GLI_LINE_SMOOTH) & 0x00010000u) { draw_line_smooth(ctx, v0, v1, fb_h, wdt); return; }
     if (adx < 0) adx = -adx;
     if (ady < 0) ady = -ady;
     if (adx > ady) { ix = 0.f; iy = wdt; } else { ix = wdt; iy = 0.f; }

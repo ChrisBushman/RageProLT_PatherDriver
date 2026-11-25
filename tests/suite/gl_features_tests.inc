@@ -96,3 +96,35 @@ static void t_linestipple(void)
     CHECK("line stipple disabled: the line is solid", runs == 1 && lit >= 62);
     default_state(); sync(); clear_rt(0);
 }
+
+/* GL_LINE_SMOOTH (gli 0x63a0 bit 16) / GL_POINT_SMOOTH (gli 0x6650 bit 24) with the usual SRC_ALPHA / ONE_MINUS_SRC_ALPHA blend: the summed intensity of the
+ * antialiased primitive equals its area (the coverage ramp), not the aliased pixel count. */
+static int sum_r(int x0, int y0, int x1, int y1) { int x, y, t = 0; for (y = y0; y < y1; y++) for (x = x0; x < x1; x++) t += (px(x, y) >> 16) & 0xff; return t; }
+static void smooth_state(uint32_t line, uint32_t point)
+{
+    default_state(); g32(0x6304, 0x01000000u); g32(0x62e8, (0x0302u << 16) | 0x0303u); if (line) g32(0x63a0, 0x00010000u); if (point) g32(0x6650, 0x01000000u); sync(); clear_rt(0);
+}
+static void t_smooth(void)
+{
+    unsigned char *vb; int s;
+    smooth_state(1, 0); gf(GLI_LINE_WIDTH_OFF, 1.0f); sync();
+    vb = VB(2); V(VX(vb, 0), 20, 60, 0, 0xffffffffu); V(VX(vb, 1), 100, 60, 0, 0xffffffffu); SLOT(0x1c)(ctx, vb, 2); endframe(); free(vb);
+    s = sum_r(60, 54, 61, 67);
+    printf("    (smooth line w=1: column sum %d, want ~255)\n", s);
+    CHECK("smooth line width 1: the column's summed intensity is one pixel of coverage", s > 190 && s < 330);
+    CHECK("smooth line: the ramp spans more than one row (antialiased)", (px(60, 59) != 0 || px(60, 60) != 0) && px(60, 56) == 0 && px(60, 64) == 0 && ((px(60, 59) >> 16 & 0xff) < 250 || (px(60, 60) >> 16 & 0xff) < 250));
+    smooth_state(1, 0); gf(GLI_LINE_WIDTH_OFF, 3.0f); sync();
+    vb = VB(2); V(VX(vb, 0), 20, 60, 0, 0xffffffffu); V(VX(vb, 1), 100, 60, 0, 0xffffffffu); SLOT(0x1c)(ctx, vb, 2); endframe(); free(vb);
+    s = sum_r(60, 52, 61, 69);
+    CHECK("smooth line width 3: the column's summed intensity is three pixels of coverage", s > 600 && s < 900);
+    smooth_state(0, 1); gf(GLI_POINT_SIZE_OFF, 9.0f); sync();
+    vb = VB(1); V(VX(vb, 0), 60, 60, 0, 0xffffffffu); SLOT(0x18)(ctx, vb, 1); endframe(); free(vb);
+    s = sum_r(48, 48, 73, 73);
+    printf("    (smooth point d=9: area sum %d, want ~%d)\n", s, (int)(3.14159f * 4.5f * 4.5f * 255));
+    CHECK("smooth point diameter 9: the summed intensity is the disc's area", s > (int)(3.14159f * 4.5f * 4.5f * 255 * 0.85f) && s < (int)(3.14159f * 4.5f * 4.5f * 255 * 1.15f));
+    CHECK("smooth point: round (the bounding-box corner is empty), solid centre", px(60, 60) != 0 && (px(60, 60) >> 16 & 0xff) > 240 && px(55, 55) == 0 && px(65, 65) == 0);
+    smooth_state(0, 0); gf(GLI_POINT_SIZE_OFF, 9.0f); sync();
+    vb = VB(1); V(VX(vb, 0), 60, 60, 0, 0xffffffffu); SLOT(0x18)(ctx, vb, 1); endframe(); free(vb);
+    CHECK("point smooth off: a square point (the corner is lit)", px(57, 57) != 0 && px(63, 63) != 0);
+    default_state(); sync(); clear_rt(0);
+}
