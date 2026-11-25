@@ -357,5 +357,6 @@ void mach64_cb_close(gld_context *c, void *h, int write_back)
     free(w);
     if (write_back) p->dirty |= MACH64_DIRTY_STATE;
 }
+int mach64_cb_is555(gld_context *c) { return MACH64_PRIV(c)->rb.fmt555 != 0; }
 uint16_t mach64_cb_pack(gld_context *c, unsigned R, unsigned G, unsigned B) { return pack16(MACH64_PRIV(c), R, G, B); }
 void mach64_cb_unpack(gld_context *c, unsigned v, unsigned *R, unsigned *G, unsigned *B) { unpack16(MACH64_PRIV(c), v, R, G, B); }

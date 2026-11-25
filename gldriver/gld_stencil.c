@@ -21,6 +21,7 @@
 #include <stdio.h>
 #include "gld.h"
 #include "gld_fxmap.h"
+#include "gld_cpuops.h"
 
 #define OP_KEEP      0x1e00u
 #define OP_REPLACE   0x1e01u
@@ -327,115 +328,6 @@ static void rect_run(gld_context *ctx, zs_state *z, int y, int x0, int x1, const
 
 
 /* ---- CPU compositing: the blend unit for the equations/factors the chip lacks.  8-bit integer maths; the destination has no alpha (Ad = 1). ---- */
-typedef struct { uint32_t sf, df, eq; int cc[4]; int blend_on, tex; m64_cpuenv env; } cb_state;
-static int mul255(int a, int b) { int t = a * b + 128; return (t + (t >> 8)) >> 8; }
-static int bfac(uint32_t f, int ch, const int *cs, int as, const int *cd, const int *cc)
-{
-    switch (f) {
-    case 0x0000u: return 0;
-    case 0x0001u: return 255;
-    case 0x0300u: return cs[ch];
-    case 0x0301u: return 255 - cs[ch];
-    case 0x0302u: return as;
-    case 0x0303u: return 255 - as;
-    case 0x0304u: return 255;                    /* destination alpha is 1 */
-    case 0x0305u: return 0;
-    case 0x0306u: return cd[ch];
-    case 0x0307u: return 255 - cd[ch];
-    case 0x0308u: return 0;                      /* min(As, 1 - Ad) with Ad = 1 */
-    case 0x8001u: return cc[ch];
-    case 0x8002u: return 255 - cc[ch];
-    case 0x8003u: return cc[3];
-    case 0x8004u: return 255 - cc[3];
-    default:      return 255;
-    }
-}
-static int texel_at(const m64_cpuenv *e, int x, int y)
-{
-    if (e->clamp_s) { if (x < 0) x = 0; else if (x >= e->w) x = e->w - 1; } else x &= (e->w - 1);
-    if (e->clamp_t) { if (y < 0) y = 0; else if (y >= e->h) y = e->h - 1; } else y &= (e->h - 1);
-    return (int)(e->img[(size_t)y * (size_t)e->w + (size_t)x]);
-}
-/* Texel fetch at a position given in Q8 texels (8 fraction bits): all integer.  Nearest takes the floor; bilinear weights are the 8 fraction bits of (position - 1/2). */
-static uint32_t tex_sample_q8(const m64_cpuenv *e, int32_t fu, int32_t fv)
-{
-    if (!e->bil) return (uint32_t)texel_at(e, fu >> 8, fv >> 8);
-    {   int32_t gu = fu - 128, gv = fv - 128; int x0 = gu >> 8, y0 = gv >> 8, ax = gu & 255, ay = gv & 255, sh; uint32_t out = 0;
-        uint32_t c00 = (uint32_t)texel_at(e, x0, y0), c10 = (uint32_t)texel_at(e, x0 + 1, y0), c01 = (uint32_t)texel_at(e, x0, y0 + 1), c11 = (uint32_t)texel_at(e, x0 + 1, y0 + 1);
-        for (sh = 0; sh < 32; sh += 8) {
-            int a = (int)((c00 >> sh) & 255u), b = (int)((c10 >> sh) & 255u), c = (int)((c01 >> sh) & 255u), d = (int)((c11 >> sh) & 255u);
-            int top = a * (256 - ax) + b * ax, bot = c * (256 - ax) + d * ax;
-            out |= (uint32_t)((top * (256 - ay) + bot * ay + 32768) >> 16) << sh;
-        }
-        return out;
-    }
-}
-/* Cube map: s, t, r are the interpolated direction components (perspective-correct without a divide: the ratios cancel the 1/w).  The major axis picks the
- * face; the face coordinate sc/ma comes from the reciprocal table (error < 2^-17), no divide. */
-static uint32_t cube_sample_fx(const m64_cpuenv *e, int32_t s, int32_t t, int32_t r)
-{
-    int32_t as = s < 0 ? -s : s, at = t < 0 ? -t : t, ar = r < 0 ? -r : r, ma, sc, tc; int f, ex; uint32_t rc; int64_t q; int32_t fu, fv; m64_cpuenv fe = *e;
-    if (as >= at && as >= ar) { ma = as; if (s >= 0) { f = 0; sc = -r; tc = -t; } else { f = 1; sc = r; tc = -t; } }
-    else if (at >= ar)        { ma = at; if (t >= 0) { f = 2; sc = s; tc = r; } else { f = 3; sc = s; tc = -r; } }
-    else                      { ma = ar; if (r >= 0) { f = 4; sc = s; tc = -t; } else { f = 5; sc = -s; tc = -t; } }
-    if (ma <= 0) return 0;
-    ex = 31 - fx_clz((uint32_t)ma); rc = fx_recip_norm((uint32_t)ma << (31 - ex));                    /* 1 / ma = rc / 2^(31 + ex) */
-    q = ((int64_t)sc * (int64_t)rc) >> (ex + 31 - 15);                                               /* sc / ma in Q15 */
-    fu = (int32_t)(((q + 32768) * e->w) >> 8);
-    q = ((int64_t)tc * (int64_t)rc) >> (ex + 31 - 15);
-    fv = (int32_t)(((q + 32768) * e->h) >> 8);
-    fe.img = e->face[f];
-    return tex_sample_q8(&fe, fu, fv);
-}
-static inline float fx_abs(float f) { uint32_t b; __builtin_memcpy(&b, &f, 4); b &= 0x7fffffffu; __builtin_memcpy(&f, &b, 4); return f; }
-static int sat255(int v) { return v < 0 ? 0 : v > 255 ? 255 : v; }
-static int env_arg(const m64_cpuenv *e, uint32_t src, uint32_t op, int ch, uint32_t cf, uint32_t ct)    /* ch 0..2 = R,G,B, 3 = A */
-{
-    uint32_t c = src == 0x1702u ? ct : src == 0x8576u ? (((uint32_t)e->ec[3] << 24) | ((uint32_t)e->ec[0] << 16) | ((uint32_t)e->ec[1] << 8) | (uint32_t)e->ec[2]) : cf;     /* TEXTURE / CONSTANT / PRIMARY and PREVIOUS (unit 0) */
-    int v;
-    if (op == 0x0302u || op == 0x0303u) v = (int)(c >> 24); else v = (int)((c >> (ch == 0 ? 16 : ch == 1 ? 8 : ch == 2 ? 0 : 24)) & 255u);
-    return (op == 0x0301u || op == 0x0303u) ? 255 - v : v;
-}
-static int env_fn(uint32_t fn, int a0, int a1, int a2)
-{
-    switch (fn) {
-    case 0x1e01u: return a0;
-    case 0x2100u: return mul255(a0, a1);
-    case 0x0104u: return a0 + a1;
-    case 0x8574u: return a0 + a1 - 128;
-    case 0x8575u: return mul255(a0, a2) + mul255(a1, 255 - a2);
-    case 0x84e7u: return a0 - a1;
-    default:      return a0;
-    }
-}
-static uint32_t env_apply(const m64_cpuenv *e, uint32_t cf, uint32_t ct)
-{
-    int af = (int)(cf >> 24), at = e->has_a ? (int)(ct >> 24) : 255, ch, r[3], a;
-    int fr[3], tr[3], cc[3];
-    for (ch = 0; ch < 3; ch++) { int sh = ch == 0 ? 16 : ch == 1 ? 8 : 0; fr[ch] = (int)((cf >> sh) & 255u); tr[ch] = (int)((ct >> sh) & 255u); cc[ch] = e->ec[ch]; }
-    switch (e->mode) {
-    case 0x1e01u: for (ch = 0; ch < 3; ch++) r[ch] = tr[ch]; a = e->has_a ? at : af; break;
-    case 0x2100u: for (ch = 0; ch < 3; ch++) r[ch] = mul255(fr[ch], tr[ch]); a = mul255(af, at); break;
-    case 0x2101u: if (!e->has_a) { for (ch = 0; ch < 3; ch++) r[ch] = tr[ch]; } else for (ch = 0; ch < 3; ch++) r[ch] = mul255(fr[ch], 255 - at) + mul255(tr[ch], at); a = af; break;
-    case 0x0be2u: for (ch = 0; ch < 3; ch++) r[ch] = mul255(fr[ch], 255 - tr[ch]) + mul255(cc[ch], tr[ch]); a = mul255(af, at); break;
-    case 0x0104u: for (ch = 0; ch < 3; ch++) r[ch] = fr[ch] + tr[ch]; a = mul255(af, at); break;
-    default: {                                                                     /* GL_COMBINE */
-        uint32_t ctt = (ct & 0x00ffffffu) | ((uint32_t)at << 24);
-        if (e->rgbf == 0x86aeu || e->rgbf == 0x86afu) {
-            int sum = 0; for (ch = 0; ch < 3; ch++) sum += (env_arg(e, e->src[0], e->op[0], ch, cf, ctt) - 128) * (env_arg(e, e->src[1], e->op[1], ch, cf, ctt) - 128);
-            { int d = sat255((4 * sum) / 255); r[0] = r[1] = r[2] = d; if (e->rgbf == 0x86afu) a = d; else a = -1; }
-        } else {
-            for (ch = 0; ch < 3; ch++) r[ch] = env_fn(e->rgbf, env_arg(e, e->src[0], e->op[0], ch, cf, ctt), env_arg(e, e->src[1], e->op[1], ch, cf, ctt), env_arg(e, e->src[2], e->op[2], ch, cf, ctt));
-            a = -1;
-        }
-        for (ch = 0; ch < 3; ch++) r[ch] = sat255(r[ch] * e->rscale);
-        if (a < 0) a = env_fn(e->alf, env_arg(e, e->asrc[0], e->aop[0], 3, cf, ctt), env_arg(e, e->asrc[1], e->aop[1], 3, cf, ctt), env_arg(e, e->asrc[2], e->aop[2], 3, cf, ctt));
-        a = sat255(a * e->ascale);
-        return ((uint32_t)a << 24) | ((uint32_t)r[0] << 16) | ((uint32_t)r[1] << 8) | (uint32_t)r[2];
-    }
-    }
-    return ((uint32_t)sat255(a) << 24) | ((uint32_t)sat255(r[0]) << 16) | ((uint32_t)sat255(r[1]) << 8) | (uint32_t)sat255(r[2]);
-}
 static void cb_load(gld_context *ctx, cb_state *c)
 {
     uint32_t fs = mach64_gli_u32(ctx, 0x62e8); int i;
@@ -446,25 +338,6 @@ static void cb_load(gld_context *ctx, cb_state *c)
         c->cc[i] = f <= 0.0f ? 0 : f >= 1.0f ? 255 : (int)(f * 255.0f + 0.5f);
     }
 }
-static uint16_t cb_blend(gld_context *ctx, const cb_state *c, uint32_t srcargb, uint16_t dst)
-{
-    int cs[3], cd[3], as = (int)(srcargb >> 24), r[3], ch; unsigned R, G, B;
-    mach64_cb_unpack(ctx, dst, &R, &G, &B);
-    cs[0] = (int)((srcargb >> 16) & 255u); cs[1] = (int)((srcargb >> 8) & 255u); cs[2] = (int)(srcargb & 255u);
-    cd[0] = (int)R; cd[1] = (int)G; cd[2] = (int)B;
-    for (ch = 0; ch < 3; ch++) {
-        int v;
-        if (c->eq == 0x8007u) v = cs[ch] < cd[ch] ? cs[ch] : cd[ch];
-        else if (c->eq == 0x8008u) v = cs[ch] > cd[ch] ? cs[ch] : cd[ch];
-        else {
-            int s = mul255(cs[ch], bfac(c->sf, ch, cs, as, cd, c->cc)), d = mul255(cd[ch], bfac(c->df, ch, cs, as, cd, c->cc));
-            v = c->eq == 0x800au ? s - d : c->eq == 0x800bu ? d - s : s + d;
-        }
-        r[ch] = v < 0 ? 0 : v > 255 ? 255 : v;
-    }
-    return mach64_cb_pack(ctx, (unsigned)r[0], (unsigned)r[1], (unsigned)r[2]);
-}
-
 int mach64_zs_cpu_draw(gld_context *ctx, const m64_vertex *va, const m64_vertex *vb, const m64_vertex *vc)
 {
     mach64_priv *p = MACH64_PRIV(ctx); zs_state *z = (zs_state *)p->zs;
@@ -505,7 +378,7 @@ int mach64_zs_cpu_draw(gld_context *ctx, const m64_vertex *va, const m64_vertex 
     fx_rcp_init();
     for (i = 0; i < 3; i++) { int64_t a4 = A[i] < 0 ? -4 * A[i] : 4 * A[i]; if (a4) fx_inv_setup(&einv[i], a4); }      /* covered range of each row from the edge equations: reciprocal per edge, no divide */
     if ((z->cb || z->envcpu) && maxy >= miny && ((!p->hw.textured && !mach64_tex_cube) ? z->cb != 0 : (mach64_cpu_env(ctx, &cbs.env) != 0 && (cbs.tex = 1)))) {
-        mach64_flush_batch(ctx); cbw = mach64_cb_open(ctx, miny, maxy - miny + 1); cb_load(ctx, &cbs);
+        mach64_flush_batch(ctx); cbw = mach64_cb_open(ctx, miny, maxy - miny + 1); cb_load(ctx, &cbs); cb_prepare(&cbs, mach64_cb_is555(ctx));        /* blend factors and COMBINE selectors resolved once per draw */
         { const m64_vertex *t = vb; vq[0] = va; vq[1] = (swapped ? vc : vb); vq[2] = (swapped ? t : vc); }
         fx_inv_setup(&fiv, area);
         {   int c, i2; int64_t dxa = x[1] - x[0], dya = y[1] - y[0], dxb = x[2] - x[0], dyb = y[2] - y[0];
@@ -558,11 +431,11 @@ int mach64_zs_cpu_draw(gld_context *ctx, const m64_vertex *va, const m64_vertex 
                             uint32_t out = 0; int c;
                             for (c = 0; c < 4; c++) { int64_t v = (fca[c] + ((int64_t)1 << 37)) >> 38; if (v < 0) v = 0; else if (v > 255) v = 255; out |= (uint32_t)v << (8 * c); }      /* vertex colour: incremental plane, no divide */
                             if (cbs.tex) {
-                                if (cbs.env.cube) out = env_apply(&cbs.env, out, cube_sample_fx(&cbs.env, (int32_t)(fpa >> 16), (int32_t)(fqa >> 16), (int32_t)(fra >> 16)));
-                                else if (faff) out = env_apply(&cbs.env, out, tex_sample_q8(&cbs.env, ((int32_t)(fpa >> 16)) >> fkp, ((int32_t)(fqa >> 16)) >> fkp));
-                                else out = env_apply(&cbs.env, out, tex_sample_q8(&cbs.env, fx_div(fpa, fra, fkp - fkr), fx_div(fqa, fra, fkp - fkr)));      /* the chip: address = interp(S*W) / interp(W) */
+                                if (cbs.env.cube) out = env_apply(&cbs.env, &cbs.ep, out, cube_sample_fx(&cbs.env, (int32_t)(fpa >> 16), (int32_t)(fqa >> 16), (int32_t)(fra >> 16)));
+                                else if (faff) out = env_apply(&cbs.env, &cbs.ep, out, tex_sample_q8(&cbs.env, ((int32_t)(fpa >> 16)) >> fkp, ((int32_t)(fqa >> 16)) >> fkp));
+                                else out = env_apply(&cbs.env, &cbs.ep, out, tex_sample_q8(&cbs.env, fx_div(fpa, fra, fkp - fkr), fx_div(fqa, fra, fkp - fkr)));      /* the chip: address = interp(S*W) / interp(W) */
                             }
-                            *dp = cbs.blend_on ? cb_blend(ctx, &cbs, out, *dp) : mach64_cb_pack(ctx, (out >> 16) & 255u, (out >> 8) & 255u, out & 255u); cb_any = 1;
+                            *dp = cbs.blend_on ? cb_blend(&cbs, out, *dp) : cb_pack(&cbs, (out >> 16) & 255u, (out >> 8) & 255u, out & 255u); cb_any = 1;
                         }
                     } else if (colour_on && run < 0) run = px;
                 } else if (run >= 0) { rect_run(ctx, z, py, run, px - 1, va, vb, vc, &flushed); run = -1; }

@@ -1289,7 +1289,7 @@ static int cube_env(gld_context *ctx, m64_cpuenv *o)
         g_cube.state = g_cube_state; g_cube.w = (int)w; g_cube.h = (int)h; g_cube.has_a = (fmt == 0x1908u || fmt == 0x1906u || fmt == 0x190Au || fmt == 0x8049u);
     }
     o->cube = 1; for (f = 0; f < 6; f++) o->face[f] = g_cube.img[f];
-    o->img = g_cube.img[0]; o->w = g_cube.w; o->h = g_cube.h; o->clamp_s = o->clamp_t = 1; o->has_a = g_cube.has_a;
+    o->img = g_cube.img[0]; o->w = g_cube.w; o->h = g_cube.h; o->wsh = (int)ilog2u((uint32_t)o->w); o->clamp_s = o->clamp_t = 1; o->has_a = g_cube.has_a;
     o->bil = *(const uint16_t *)(s + 0x18) == 0x2601u;
     o->mode = mach64_gli_u32(ctx, GLI_TEX_ENV_MODE + u) >> 16;
     { uint32_t a = mach64_gli_u32(ctx, 0x6750u + u); o->rgbf = a >> 16; o->alf = a & 0xffffu; }
@@ -1320,7 +1320,7 @@ int mach64_cpu_env(gld_context *ctx, m64_cpuenv *o)
         if (rc) { free(raw); free(sl->cpu); sl->cpu = 0; return 0; }
         cpu_decode(sl, raw, n, sl->cpu); free(raw);
     }
-    o->img = sl->cpu; o->w = (int)sl->lvl_w[0]; o->h = (int)sl->lvl_h[0]; o->clamp_s = (int)sl->clamp_s; o->clamp_t = (int)sl->clamp_t; o->bil = (int)sl->bilinear_mag; o->has_a = (int)sl->has_alpha;
+    o->img = sl->cpu; o->w = (int)sl->lvl_w[0]; o->h = (int)sl->lvl_h[0]; o->wsh = (int)ilog2u((uint32_t)o->w); o->clamp_s = (int)sl->clamp_s; o->clamp_t = (int)sl->clamp_t; o->bil = (int)sl->bilinear_mag; o->has_a = (int)sl->has_alpha;
     o->mode = mach64_gli_u32(ctx, GLI_TEX_ENV_MODE + u) >> 16;
     { uint32_t f = mach64_gli_u32(ctx, 0x6750u + u); o->rgbf = f >> 16; o->alf = f & 0xffffu; }
     { uint32_t a = mach64_gli_u32(ctx, 0x6754u + u), b = mach64_gli_u32(ctx, 0x6758u + u), c = mach64_gli_u32(ctx, 0x675cu + u);
