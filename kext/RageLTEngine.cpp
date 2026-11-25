@@ -113,7 +113,7 @@ IOReturn RageLTDevice::setZBuffer(uint32_t owner, uint32_t off, uint32_t pitch_p
 IOReturn RageLTDevice::setTexture(uint32_t owner, uint32_t index, uint32_t off, uint32_t fmt)
 {
     struct rage_ctx *c; IOReturn rc = kIOReturnBadArgument;
-    if (index > 11u || !(fmt == 0 || fmt == 3 || fmt == 4 || fmt == 6 || fmt == 15)) return rc;
+    if (index > 11u || !(fmt == 0 || fmt == 3 || fmt == 4 || fmt == 6 || fmt == 8 || fmt == 11 || fmt == 12 || fmt == 15)) return rc;
     IOLockLock(fLock);
     c = ctxFor(owner, false);
     if (c) {

@@ -28,7 +28,7 @@ enum {
     RAGE_GL_DISPLAY = 12,    /* in 0, out 6: mode_gen, width, height, pitch_px, bpp, scanout base */
     RAGE_GL_SCANOUT_READ = 13, /* debug builds only (RAGE_DEBUG_ENGTEST): in 3 {byte offset into the scanout block, user address, length} */
     RAGE_GL_CONFIG = 14,       /* in 2 {key, value}: key 1 = use DMA submission (1) or PIO (0); a global switch, harmless to flip */
-    RAGE_GL_SET_TEXTURE = 15,  /* in 3 {index 0..10 = TEX_n_OFF / 11 = SECONDARY_TEX_OFF, VRAM offset (0xffffffff unbinds, 0xfffffffe = set the format only), texel format 0/3/4/6/15 (0 = unchanged)} */
+    RAGE_GL_SET_TEXTURE = 15,  /* in 3 {index 0..10 = TEX_n_OFF / 11 = SECONDARY_TEX_OFF, VRAM offset (0xffffffff unbinds, 0xfffffffe = set the format only), texel format 0/3/4/6/8/11/12/15 (0 = unchanged; 8 = Y8, 11/12 = YCbCr 4:2:2)} */
     RAGE_GL_CLEAR_Z = 16,      /* in 1 {value}: fill the whole bound 16-bit Z buffer (clipped to the scissor) with value */
     RAGE_GL_SEL_COUNT = 17
 };

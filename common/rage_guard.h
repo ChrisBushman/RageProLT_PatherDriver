@@ -40,6 +40,7 @@ static const struct rage_reg_rule rage_reg_rules[] = {
      * stream carries only per-primitive state and vertices; the kernel prepends the scissor/target state and clamps to it. */
     { 0x0240, 0x02fc, RAGE_ADDR_NONE,      0 },            /* vertex setup block (the draw itself; clipped by the kernel's scissor) */
     { 0x0300, 0x0300, RAGE_ADDR_NONE,      0 },            /* ONE_OVER_AREA_UC (triangle trigger) */
+    { 0x0328, 0x033c, RAGE_ADDR_NONE,      0 },            /* SECONDARY_S/T/W of vertices 2 and 3 (multitexture; setup inputs, no address) */
     { 0x0304, 0x0304, RAGE_ADDR_NONE,      0 },            /* SETUP_CNTL (no memory-addressing bits) */
     { 0x054c, 0x0550, RAGE_ADDR_NONE,      0 },            /* Z_CNTL, ALPHA_TST_CNTL */
     { 0x05fc, 0x05fc, RAGE_ADDR_NONE,      0 },            /* SCALE_3D_CNTL */
