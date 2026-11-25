@@ -204,3 +204,21 @@ static void t_wrapmodes(void)
     CHECK("clamp to border: inside the image shows the texels", isclr(px(60, 60), 255, 0, 0) && isclr(px(108, 108), 255, 255, 255) && isclr(px(108, 60), 0, 255, 0));
     default_state(); sync(); clear_rt(0);
 }
+
+/* accumulation buffer through table[0x00] (GL_ACCUM 0x100, LOAD 0x101, RETURN 0x102, MULT 0x103, ADD 0x104) and the clear value at gli+0x6310 */
+static void t_accum(void)
+{
+    typedef void (*acc_fn)(gld_context *, uint32_t, float);
+    acc_fn acc = (acc_fn)mach64_ctl00;
+    default_state(); sync(); clear_rt(0);
+    tquad(20, 20, 148, 148, 0.0f, 0.0f, 0.0f, 0.0f, 0xff804000u);                        /* untextured fill (128, 64, 0) */
+    acc(ctx, 0x101u, 1.0f); clear_rt(0); acc(ctx, 0x102u, 1.0f);
+    CHECK("accum LOAD 1 + RETURN 1 restores the picture", isclr(px(60, 60), 132, 66, 0) || isclr(px(60, 60), 128, 64, 0));
+    acc(ctx, 0x103u, 0.5f); clear_rt(0); acc(ctx, 0x102u, 1.0f);
+    CHECK("accum MULT 0.5 halves it", px(60, 60) != 0 && ((px(60, 60) >> 16) & 255) >= 60 && ((px(60, 60) >> 16) & 255) <= 72);
+    acc(ctx, 0x104u, 0.25f); clear_rt(0); acc(ctx, 0x102u, 1.0f);
+    CHECK("accum ADD 0.25 adds 64 to every channel", ((px(60, 60) >> 8) & 255) >= 90 && (px(60, 60) & 255) >= 56 && (px(60, 60) & 255) <= 72);
+    acc(ctx, 0x102u, 2.0f);  clear_rt(0); acc(ctx, 0x102u, 2.0f);
+    CHECK("accum RETURN clamps at 255", ((px(60, 60) >> 16) & 255) == 255 || ((px(60, 60) >> 16) & 255) >= 248);
+    default_state(); sync(); clear_rt(0);
+}

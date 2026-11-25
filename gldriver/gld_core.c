@@ -346,8 +346,6 @@ int gldCompleteVertexBuffer(gld_context *ctx, void *vb) { (void)ctx; (void)vb; r
 void gldFreeVertexBuffer(gld_context *ctx, void *vb) { (void)ctx; (void)vb; }
 
 /* ---- control slots ---------------------------------------------------- */
-int mach64_ctl00(gld_context *c, uint32_t a, uint32_t b, uint32_t d, uint32_t e, uint32_t f, uint32_t g)
-{ (void)c; (void)a; (void)b; (void)d; (void)e; (void)f; (void)g; return 0; }
 
 /* table[0x04] = the STATE flush: sync the app's depth state into Z_CNTL before the batch renders. */
 int mach64_flush(gld_context *ctx, uint32_t a2, uint32_t a3, uint32_t a4, uint32_t a5, uint32_t a6, uint32_t a7)
@@ -355,11 +353,12 @@ int mach64_flush(gld_context *ctx, uint32_t a2, uint32_t a3, uint32_t a4, uint32
     mach64_priv *p = MACH64_PRIV(ctx);
     (void)a3; (void)a4; (void)a5; (void)a6; (void)a7;
     mach64_sync_depth_from_gli(ctx);
-    if ((a2 & 0x4500u) && p && p->attached) {
+    if ((a2 & 0x4700u) && p && p->attached) {
         mach64_frame_start(ctx);                     /* arm the frame (mode check, undefined-surface clear) before the app's own clear */
         if (!p->attached) return 0;
         if (a2 & 0x4000u) colour_clear(ctx);
         if (a2 & 0x0100u) { p->z_clear_pending = 0; if (p->rb.z_off) mach64_zs_clear_depth(ctx); else p->z_clear_pending = 1; }
+        if (a2 & 0x0200u) mach64_accum_clear(ctx);
         if (a2 & 0x0400u) mach64_zs_clear_stencil(ctx, mach64_gli_u32(ctx, 0x6334));
     }
     return 0;

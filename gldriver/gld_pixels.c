@@ -2,6 +2,7 @@
  * The bundle never holds a CPU view of VRAM (design 4): every pixel op moves whole target rows through the kernel (rgb_readback2 / rgb_upload2,
  * RGB565 with the SWAP16 transfer so a uint16_t array holds the logical pixel values), edits them in a malloc'd buffer, and writes the rows back.
  * Slot protocols and GL_PACK/GL_UNPACK offsets: docs/re-notes/readpixels.md and drawpixels.md (hardware-verified against GLEngine). */
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include "gld.h"
@@ -24,6 +25,9 @@ static void state_at(const unsigned char *g, unsigned o_align, unsigned o_rowlen
     if (*rowlen < 0) *rowlen = 0; if (*skippix < 0) *skippix = 0; if (*skiprows < 0) *skiprows = 0;
 }
 
+#ifndef ACCUM_CLEAR_OFF
+#define ACCUM_CLEAR_OFF 0x6310   /* gli offset of the glClearAccum colour (floats r,g,b,a) -- set from the gli diff */
+#endif
 /* a window of framebuffer rows held in memory: fb rows [fr0, fr0+nr), each pitch px of uint16 */
 typedef struct { uint16_t *buf; int fr0, nr; uint32_t pitch; uint32_t off; } pxwin;
 
@@ -274,4 +278,59 @@ int mach64_ctl14(gld_context *c, uint32_t a, uint32_t b, uint32_t d, uint32_t e,
     }
     win_put(p, &win);
     return 0;
+}
+
+/* ---- accumulation buffer (table[0x00], reference glAccum_impl).  Integer fixed point: each channel is held as Q8 of a colour byte (255.0 = 255 << 8) in an int32; the value operand is
+ * converted once to Q16.  The accumulation buffer covers the whole colour buffer and ignores the scissor. ---------------------------------------------------------------------- */
+typedef struct { int32_t *a; int w, h; } accum_buf;
+void mach64_accum_free(mach64_priv *p) { accum_buf *b = (accum_buf *)p->accum; if (b) { free(b->a); free(b); p->accum = 0; } }
+static accum_buf *accum_get(mach64_priv *p)
+{
+    accum_buf *b = (accum_buf *)p->accum; int W = (int)p->rb.w, H = (int)p->rb.h;
+    if (b && (b->w != W || b->h != H)) { mach64_accum_free(p); b = 0; }
+    if (!b) {
+        b = (accum_buf *)calloc(1, sizeof *b); if (!b) return 0;
+        b->a = (int32_t *)calloc((size_t)W * H * 3, sizeof(int32_t)); if (!b->a) { free(b); return 0; }
+        b->w = W; b->h = H; p->accum = b;
+    }
+    return b;
+}
+void mach64_accum_clear(gld_context *c)
+{
+    mach64_priv *p = MACH64_PRIV(c); accum_buf *b; const unsigned char *g;
+    if (!p || !p->rb.col_off || !(b = accum_get(p))) return;
+    {   int32_t cl[3] = { 0, 0, 0 }; int i, n = b->w * b->h; float f; (void)g;
+        if (ACCUM_CLEAR_OFF) for (i = 0; i < 3; i++) { uint32_t u = mach64_gli_u32(c, ACCUM_CLEAR_OFF + (uint32_t)i * 4u); memcpy(&f, &u, 4); cl[i] = (int32_t)(f * 65280.0f); }
+        for (i = 0; i < n; i++) { b->a[i * 3] = cl[0]; b->a[i * 3 + 1] = cl[1]; b->a[i * 3 + 2] = cl[2]; }
+    }
+}
+void mach64_ctl00(gld_context *c, uint32_t op, float value)
+{
+    mach64_priv *p = c ? MACH64_PRIV(c) : 0; accum_buf *b; pxwin win; int W, H, x, y, fr0, nr;
+    int64_t vq = (int64_t)(value * 65536.0f);
+    if (getenv("RAGE_PXTRACE")) { FILE *fp = fopen(getenv("RAGE_PXTRACE"), "a"); if (fp) { fprintf(fp, "accum op=%x value=%f\n", op, (double)value); fclose(fp); } }
+    if (!p || !p->attached || !p->rb.col_off || op < 0x100u || op > 0x104u || !(b = accum_get(p))) return;
+    W = b->w; H = b->h;
+    mach64_frame_start(c); mach64_flush_batch(c);
+    if (op == 0x103u || op == 0x104u) {                                   /* MULT / ADD: accumulation buffer only */
+        int i, n = W * H * 3;
+        if (op == 0x103u) for (i = 0; i < n; i++) b->a[i] = (int32_t)(((int64_t)b->a[i] * vq) >> 16);
+        else { int32_t add = (int32_t)((vq * 65280) >> 16); for (i = 0; i < n; i++) b->a[i] += add; }
+        return;
+    }
+    if (!win_rows_for(H, 0, H, &fr0, &nr) || win_get(p, p->rb.col_off, fr0, nr, &win)) return;
+    for (y = 0; y < H; y++) for (x = 0; x < W; x++) {
+        uint16_t *s = win_px(&win, H, x, y, W); int32_t *a = b->a + ((size_t)y * W + x) * 3; unsigned R, G, B;
+        if (!s) continue;
+        if (op == 0x102u) {                                              /* RETURN: colour = accum * value, clamped */
+            int64_t r = ((int64_t)a[0] * vq) >> 24, g = ((int64_t)a[1] * vq) >> 24, bl = ((int64_t)a[2] * vq) >> 24;
+            R = r < 0 ? 0 : r > 255 ? 255 : (unsigned)r; G = g < 0 ? 0 : g > 255 ? 255 : (unsigned)g; B = bl < 0 ? 0 : bl > 255 ? 255 : (unsigned)bl;
+            *s = pack16(p, R, G, B);
+        } else {                                                          /* LOAD / ACCUM: from the colour buffer */
+            unpack16(p, *s, &R, &G, &B);
+            if (op == 0x101u) { a[0] = (int32_t)(((int64_t)R * vq) >> 8); a[1] = (int32_t)(((int64_t)G * vq) >> 8); a[2] = (int32_t)(((int64_t)B * vq) >> 8); }
+            else { a[0] += (int32_t)(((int64_t)R * vq) >> 8); a[1] += (int32_t)(((int64_t)G * vq) >> 8); a[2] += (int32_t)(((int64_t)B * vq) >> 8); }
+        }
+    }
+    if (op == 0x102u) win_put(p, &win); else { free(win.buf); win.buf = 0; }
 }

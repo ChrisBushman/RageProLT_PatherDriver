@@ -123,6 +123,7 @@ typedef struct {
     /* idle repaint (windowed only): WindowServer paints the window white when it is exposed; an app that is not drawing (Chess) never restores it, so a
      * small asynchronous thread re-presents the last frame once the context has been idle for ~300 ms.  `volatile` counters only: nothing on the hot path. */
     void      *zs;                 /* stencil/depth emulation state (gld_stencil.c) */
+    void      *accum;              /* CPU accumulation buffer (gld_pixels.c): 3 x int32 per pixel, Q8 of a colour byte */
     void      *query;              /* the active occlusion query (gld_entry.c): while set every triangle runs through the CPU rasteriser, which counts the passing samples */
     uint32_t   zs_mode;            /* 0 stencil off, 1 hardware Z-as-stencil, 2 CPU stencil (gld_stencil.c) */
     uint32_t   nonpoly;            /* 1 while a point/line quad is drawn: it uses the front-face stencil state */
@@ -183,7 +184,9 @@ void     mach64_dispatch_complete(gld_context *, const void *, uint32_t);
 void     mach64_dispatch_render_ctl(gld_context *, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t);
 
 /* gld_pixels.c / control slots */
-int  mach64_ctl00(gld_context *, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t);
+void mach64_ctl00(gld_context *, uint32_t op, float value);   /* table[0x00] = glAccum (GL_ACCUM 0x100, LOAD 0x101, RETURN 0x102, MULT 0x103, ADD 0x104) */
+void mach64_accum_clear(gld_context *);
+void mach64_accum_free(mach64_priv *);
 int  mach64_ctl0c(gld_context *, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t);
 int  mach64_ctl10(gld_context *, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t);
 int  mach64_ctl14(gld_context *, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t);
