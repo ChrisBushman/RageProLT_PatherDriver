@@ -20,6 +20,7 @@
  */
 #include <stdio.h>
 #include "gld.h"
+#include "gld_fxmap.h"
 
 #define OP_KEEP      0x1e00u
 #define OP_REPLACE   0x1e01u
@@ -355,36 +356,38 @@ static int texel_at(const m64_cpuenv *e, int x, int y)
     if (e->clamp_t) { if (y < 0) y = 0; else if (y >= e->h) y = e->h - 1; } else y &= (e->h - 1);
     return (int)(e->img[(size_t)y * (size_t)e->w + (size_t)x]);
 }
-static uint32_t tex_sample(const m64_cpuenv *e, float u, float v)
+/* Texel fetch at a position given in Q8 texels (8 fraction bits): all integer.  Nearest takes the floor; bilinear weights are the 8 fraction bits of (position - 1/2). */
+static uint32_t tex_sample_q8(const m64_cpuenv *e, int32_t fu, int32_t fv)
 {
-    float fu = u * (float)e->w, fv = v * (float)e->h;
-    if (!e->bil) {
-        int x = (int)fu, y = (int)fv; if (fu < 0.0f) x = (int)(fu - 1.0f); if (fv < 0.0f) y = (int)(fv - 1.0f);
-        return (uint32_t)texel_at(e, x, y);
-    }
-    {   float gu = fu - 0.5f, gv = fv - 0.5f; int x0 = (int)gu, y0 = (int)gv, ax, ay, sh; uint32_t out = 0;
-        if (gu < 0.0f) x0 = (int)(gu - 1.0f); if (gv < 0.0f) y0 = (int)(gv - 1.0f);
-        ax = (int)((gu - (float)x0) * 256.0f); ay = (int)((gv - (float)y0) * 256.0f);
-        {   uint32_t c00 = (uint32_t)texel_at(e, x0, y0), c10 = (uint32_t)texel_at(e, x0 + 1, y0), c01 = (uint32_t)texel_at(e, x0, y0 + 1), c11 = (uint32_t)texel_at(e, x0 + 1, y0 + 1);
-            for (sh = 0; sh < 32; sh += 8) {
-                int a = (int)((c00 >> sh) & 255u), b = (int)((c10 >> sh) & 255u), c = (int)((c01 >> sh) & 255u), d = (int)((c11 >> sh) & 255u);
-                int top = a * (256 - ax) + b * ax, bot = c * (256 - ax) + d * ax;
-                out |= (uint32_t)((top * (256 - ay) + bot * ay + 32768) >> 16) << sh;
-            }
+    if (!e->bil) return (uint32_t)texel_at(e, fu >> 8, fv >> 8);
+    {   int32_t gu = fu - 128, gv = fv - 128; int x0 = gu >> 8, y0 = gv >> 8, ax = gu & 255, ay = gv & 255, sh; uint32_t out = 0;
+        uint32_t c00 = (uint32_t)texel_at(e, x0, y0), c10 = (uint32_t)texel_at(e, x0 + 1, y0), c01 = (uint32_t)texel_at(e, x0, y0 + 1), c11 = (uint32_t)texel_at(e, x0 + 1, y0 + 1);
+        for (sh = 0; sh < 32; sh += 8) {
+            int a = (int)((c00 >> sh) & 255u), b = (int)((c10 >> sh) & 255u), c = (int)((c01 >> sh) & 255u), d = (int)((c11 >> sh) & 255u);
+            int top = a * (256 - ax) + b * ax, bot = c * (256 - ax) + d * ax;
+            out |= (uint32_t)((top * (256 - ay) + bot * ay + 32768) >> 16) << sh;
         }
         return out;
     }
 }
-static uint32_t cube_sample(const m64_cpuenv *e, float s, float t, float r)
+/* Cube map: s, t, r are the interpolated direction components (perspective-correct without a divide: the ratios cancel the 1/w).  The major axis picks the
+ * face; the face coordinate sc/ma comes from the reciprocal table (error < 2^-17), no divide. */
+static uint32_t cube_sample_fx(const m64_cpuenv *e, int32_t s, int32_t t, int32_t r)
 {
-    float as = s < 0.0f ? -s : s, at = t < 0.0f ? -t : t, ar = r < 0.0f ? -r : r, ma, sc, tc; int f; m64_cpuenv fe = *e;
-    if (as >= at && as >= ar) { ma = as; if (s >= 0.0f) { f = 0; sc = -r; tc = -t; } else { f = 1; sc = r; tc = -t; } }
-    else if (at >= ar)        { ma = at; if (t >= 0.0f) { f = 2; sc = s; tc = r; } else { f = 3; sc = s; tc = -r; } }
-    else                      { ma = ar; if (r >= 0.0f) { f = 4; sc = s; tc = -t; } else { f = 5; sc = -s; tc = -t; } }
-    if (ma == 0.0f) return 0;
+    int32_t as = s < 0 ? -s : s, at = t < 0 ? -t : t, ar = r < 0 ? -r : r, ma, sc, tc; int f, ex; uint32_t rc; int64_t q; int32_t fu, fv; m64_cpuenv fe = *e;
+    if (as >= at && as >= ar) { ma = as; if (s >= 0) { f = 0; sc = -r; tc = -t; } else { f = 1; sc = r; tc = -t; } }
+    else if (at >= ar)        { ma = at; if (t >= 0) { f = 2; sc = s; tc = r; } else { f = 3; sc = s; tc = -r; } }
+    else                      { ma = ar; if (r >= 0) { f = 4; sc = s; tc = -t; } else { f = 5; sc = -s; tc = -t; } }
+    if (ma <= 0) return 0;
+    ex = 31 - fx_clz((uint32_t)ma); rc = fx_recip_norm((uint32_t)ma << (31 - ex));                    /* 1 / ma = rc / 2^(31 + ex) */
+    q = ((int64_t)sc * (int64_t)rc) >> (ex + 31 - 15);                                               /* sc / ma in Q15 */
+    fu = (int32_t)(((q + 32768) * e->w) >> 8);
+    q = ((int64_t)tc * (int64_t)rc) >> (ex + 31 - 15);
+    fv = (int32_t)(((q + 32768) * e->h) >> 8);
     fe.img = e->face[f];
-    return tex_sample(&fe, 0.5f * (sc / ma + 1.0f), 0.5f * (tc / ma + 1.0f));
+    return tex_sample_q8(&fe, fu, fv);
 }
+static inline float fx_abs(float f) { uint32_t b; __builtin_memcpy(&b, &f, 4); b &= 0x7fffffffu; __builtin_memcpy(&f, &b, 4); return f; }
 static int sat255(int v) { return v < 0 ? 0 : v > 255 ? 255 : v; }
 static int env_arg(const m64_cpuenv *e, uint32_t src, uint32_t op, int ch, uint32_t cf, uint32_t ct)    /* ch 0..2 = R,G,B, 3 = A */
 {
@@ -469,6 +472,7 @@ int mach64_zs_cpu_draw(gld_context *ctx, const m64_vertex *va, const m64_vertex 
     int notinc[3], i, minx, maxx, miny, maxy, W, Hh, py, px, front, fi, flushed = 0, all_draw;
     uint32_t cov = 0, pass = 0; const zs_face *f; int sten_on, colour_on;
     uint8_t *sb; uint16_t *db; int depth_en; void *cbw = 0; cb_state cbs; const m64_vertex *vq[3]; int swapped = 0, cb_any = 0;
+    fx_plane fpc[4], fpp, fpq, fpr; int fkp = 0, fkr = 0; fx_inv fiv;                  /* fixed-point colour / texture-coordinate / cube-direction planes (gld_fxmap.h); fpp, fpq, fpr double as the cube X, Y, Z */
     if (!z || !z->pl[PL_S].buf) return 0;
     W = (int)p->fb_w; Hh = (int)p->fb_h;
     x[0] = (int16_t)((uint32_t)va->x_y >> 16); y[0] = (int16_t)((uint32_t)va->x_y & 0xffffu); zq[0] = (uint32_t)va->z >> 15;
@@ -501,12 +505,34 @@ int mach64_zs_cpu_draw(gld_context *ctx, const m64_vertex *va, const m64_vertex 
     if ((z->cb || z->envcpu) && maxy >= miny && ((!p->hw.textured && !mach64_tex_cube) ? z->cb != 0 : (mach64_cpu_env(ctx, &cbs.env) != 0 && (cbs.tex = 1)))) {
         mach64_flush_batch(ctx); cbw = mach64_cb_open(ctx, miny, maxy - miny + 1); cb_load(ctx, &cbs);
         { const m64_vertex *t = vb; vq[0] = va; vq[1] = (swapped ? vc : vb); vq[2] = (swapped ? t : vc); }
+        fx_rcp_init(); fx_inv_setup(&fiv, area);
+        {   int c, i2; int64_t dxa = x[1] - x[0], dya = y[1] - y[0], dxb = x[2] - x[0], dyb = y[2] - y[0];
+            for (c = 0; c < 4; c++) fx_plane_setup(&fpc[c], (int64_t)((vq[0]->argb >> (8 * c)) & 255u) << 22, (int64_t)((vq[1]->argb >> (8 * c)) & 255u) << 22, (int64_t)((vq[2]->argb >> (8 * c)) & 255u) << 22, dxa, dya, dxb, dyb, &fiv);
+            if (cbs.tex) {
+                float P[3], Q[3], R[3], mp = 0.0f, mr = 0.0f;
+                for (i2 = 0; i2 < 3; i2++) {
+                    float sv = gld_flt((uint32_t)vq[i2]->s), tv = gld_flt((uint32_t)vq[i2]->t), wv = gld_flt((uint32_t)vq[i2]->w);
+                    if (cbs.env.cube) { P[i2] = sv * wv; Q[i2] = tv * wv; R[i2] = gld_flt((uint32_t)vq[i2]->r) * wv; if (fx_abs(R[i2]) > mp) mp = fx_abs(R[i2]); }
+                    else { P[i2] = sv * wv * (float)cbs.env.w * 256.0f; Q[i2] = tv * wv * (float)cbs.env.h * 256.0f; R[i2] = wv; if (fx_abs(wv) > mr) mr = fx_abs(wv); }
+                    if (fx_abs(P[i2]) > mp) mp = fx_abs(P[i2]); if (fx_abs(Q[i2]) > mp) mp = fx_abs(Q[i2]);
+                }
+                fkp = fx_scale_for(mp); fkr = cbs.env.cube ? fkp : fx_scale_for(mr);
+                fx_plane_setup(&fpp, fx_from_float(P[0], fkp), fx_from_float(P[1], fkp), fx_from_float(P[2], fkp), dxa, dya, dxb, dyb, &fiv);
+                fx_plane_setup(&fpq, fx_from_float(Q[0], fkp), fx_from_float(Q[1], fkp), fx_from_float(Q[2], fkp), dxa, dya, dxb, dyb, &fiv);
+                fx_plane_setup(&fpr, fx_from_float(R[0], fkr), fx_from_float(R[1], fkr), fx_from_float(R[2], fkr), dxa, dya, dxb, dyb, &fiv);
+            }
+        }
     }
     for (py = miny; py <= maxy; py++) {
-        int64_t qy = 4 * (int64_t)py + 2, qx0 = 4 * (int64_t)minx + 2; int run = -1, seen = 0;
+        int64_t qy = 4 * (int64_t)py + 2, qx0 = 4 * (int64_t)minx + 2, fca[4], fpa = 0, fqa = 0, fra = 0; int run = -1, seen = 0;
         for (i = 0; i < 3; i++) E[i] = A[i] * (qx0 - x[(i)]) + B[i] * (qy - y[i]) - notinc[i];
         zrow = (zq[0] * 65536) + gx * (qx0 - x[0]) + gy * (qy - y[0]);
         zacc = zrow;
+        if (cbw) {
+            int64_t ddx = qx0 - x[0], ddy = qy - y[0]; int c;
+            for (c = 0; c < 4; c++) fca[c] = fx_plane_at(&fpc[c], ddx, ddy);
+            if (cbs.tex) { fpa = fx_plane_at(&fpp, ddx, ddy); fqa = fx_plane_at(&fpq, ddx, ddy); fra = fx_plane_at(&fpr, ddx, ddy); }
+        }
         for (px = minx; px <= maxx; px++) {
             if ((E[0] | E[1] | E[2]) >= 0) {
                 size_t idx = (size_t)py * z->stride + (size_t)px; int sp = 1, zp = 1; uint32_t zi = 0, s = 0;
@@ -523,23 +549,11 @@ int mach64_zs_cpu_draw(gld_context *ctx, const m64_vertex *va, const m64_vertex 
                     if (cbw && colour_on) {                                        /* composite this pixel */
                         uint16_t *dp = mach64_cb_px(cbw, py, px);
                         if (dp) {
-                            int64_t w0 = E[1] + notinc[1], w1 = E[2] + notinc[2], w2 = E[0] + notinc[0]; uint32_t out = 0; int sh;
-                            if (w0 < 0) w0 = 0; if (w1 < 0) w1 = 0; if (w2 < 0) w2 = 0;
-                            for (sh = 0; sh < 32; sh += 8) {
-                                int64_t v = (w0 * (int64_t)((vq[0]->argb >> sh) & 255u) + w1 * (int64_t)((vq[1]->argb >> sh) & 255u) + w2 * (int64_t)((vq[2]->argb >> sh) & 255u) + area / 2) / area;
-                                if (v > 255) v = 255; out |= (uint32_t)v << sh;
-                            }
+                            uint32_t out = 0; int c;
+                            for (c = 0; c < 4; c++) { int64_t v = (fca[c] + ((int64_t)1 << 37)) >> 38; if (v < 0) v = 0; else if (v > 255) v = 255; out |= (uint32_t)v << (8 * c); }      /* vertex colour: incremental plane, no divide */
                             if (cbs.tex) {
-                                float f0 = (float)w0, f1 = (float)w1, f2 = (float)w2, sw, tw, ww;
-                                sw = f0 * gld_flt((uint32_t)vq[0]->s) * gld_flt((uint32_t)vq[0]->w) + f1 * gld_flt((uint32_t)vq[1]->s) * gld_flt((uint32_t)vq[1]->w) + f2 * gld_flt((uint32_t)vq[2]->s) * gld_flt((uint32_t)vq[2]->w);   /* the chip: address = interp(S*W) / interp(W) */
-                                tw = f0 * gld_flt((uint32_t)vq[0]->t) * gld_flt((uint32_t)vq[0]->w) + f1 * gld_flt((uint32_t)vq[1]->t) * gld_flt((uint32_t)vq[1]->w) + f2 * gld_flt((uint32_t)vq[2]->t) * gld_flt((uint32_t)vq[2]->w);
-                                ww = f0 * gld_flt((uint32_t)vq[0]->w) + f1 * gld_flt((uint32_t)vq[1]->w) + f2 * gld_flt((uint32_t)vq[2]->w);
-                                if (ww != 0.0f) { sw /= ww; tw /= ww; }
-                                if (cbs.env.cube) {
-                                    float rw = f0 * gld_flt((uint32_t)vq[0]->r) * gld_flt((uint32_t)vq[0]->w) + f1 * gld_flt((uint32_t)vq[1]->r) * gld_flt((uint32_t)vq[1]->w) + f2 * gld_flt((uint32_t)vq[2]->r) * gld_flt((uint32_t)vq[2]->w);
-                                    if (ww != 0.0f) rw /= ww;
-                                    out = env_apply(&cbs.env, out, cube_sample(&cbs.env, sw, tw, rw));
-                                } else out = env_apply(&cbs.env, out, tex_sample(&cbs.env, sw, tw));
+                                if (cbs.env.cube) out = env_apply(&cbs.env, out, cube_sample_fx(&cbs.env, (int32_t)(fpa >> 16), (int32_t)(fqa >> 16), (int32_t)(fra >> 16)));
+                                else out = env_apply(&cbs.env, out, tex_sample_q8(&cbs.env, fx_div(fpa, fra, fkp - fkr), fx_div(fqa, fra, fkp - fkr)));      /* the chip: address = interp(S*W) / interp(W) */
                             }
                             *dp = cbs.blend_on ? cb_blend(ctx, &cbs, out, *dp) : mach64_cb_pack(ctx, (out >> 16) & 255u, (out >> 8) & 255u, out & 255u); cb_any = 1;
                         }
@@ -549,6 +563,7 @@ int mach64_zs_cpu_draw(gld_context *ctx, const m64_vertex *va, const m64_vertex 
                 if (seen) { if (run >= 0) { rect_run(ctx, z, py, run, px - 1, va, vb, vc, &flushed); run = -1; } break; }
             }
             E[0] += 4 * A[0]; E[1] += 4 * A[1]; E[2] += 4 * A[2]; zacc += 4 * gx;
+            if (cbw) { fca[0] += 4 * fpc[0].gx; fca[1] += 4 * fpc[1].gx; fca[2] += 4 * fpc[2].gx; fca[3] += 4 * fpc[3].gx; if (cbs.tex) { fpa += 4 * fpp.gx; fqa += 4 * fpq.gx; fra += 4 * fpr.gx; } }
         }
         if (run >= 0) rect_run(ctx, z, py, run, px - 1, va, vb, vc, &flushed);
     }

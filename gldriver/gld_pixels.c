@@ -308,7 +308,6 @@ void mach64_ctl00(gld_context *c, uint32_t op, float value)
 {
     mach64_priv *p = c ? MACH64_PRIV(c) : 0; accum_buf *b; pxwin win; int W, H, x, y, fr0, nr;
     int64_t vq = (int64_t)(value * 65536.0f);
-    if (getenv("RAGE_PXTRACE")) { FILE *fp = fopen(getenv("RAGE_PXTRACE"), "a"); if (fp) { fprintf(fp, "accum op=%x value=%f\n", op, (double)value); fclose(fp); } }
     if (!p || !p->attached || !p->rb.col_off || op < 0x100u || op > 0x104u || !(b = accum_get(p))) return;
     W = b->w; H = b->h;
     mach64_frame_start(c); mach64_flush_batch(c);

@@ -1,0 +1,67 @@
+big triangles (~120 px), mild perspective (w ratio 2), tile 1  (42959 px total, shared edge loop 172.0 ns/px)
+  texture coords: float (current)      472.2 ns/px (net  300.2)   max err   0.0039  mean  0.00261  nearest-texel mismatches  0.002%
+  texture coords: float, int32 weights   356.9 ns/px (net  184.9)   max err   0.0039  mean  0.00261  nearest-texel mismatches  0.002%
+  texture coords: fixed + LUT recip    291.3 ns/px (net  119.3)   max err   0.0039  mean  0.00243  nearest-texel mismatches  0.042%
+  texture coords: fixed, 16-px spans   135.0 ns/px (net  -37.0)   max err  11.7625  mean  0.53011  nearest-texel mismatches 37.473%
+  texture coords: fixed, 8-px spans    146.9 ns/px (net  -25.1)   max err  11.7625  mean  0.15813  nearest-texel mismatches 15.047%
+  texture coords: fixed, 4-px spans    171.3 ns/px (net   -0.7)   max err   3.6365  mean  0.03010  nearest-texel mismatches  3.564%
+  colour: int64 barycentric divide     790.6 ns/px (net  618.6)   max err   0.5000  mean  0.39967  nearest-texel mismatches  0.000%
+  colour: incremental fixed-point      327.1 ns/px (net  155.1)   max err   0.5000  mean  0.39967  nearest-texel mismatches  0.000%
+  cube map: float (current)            545.1 ns/px (net  373.1)   max err   0.0039  mean  0.00260  nearest-texel mismatches  0.000%
+  cube map: fixed + LUT recip          313.6 ns/px (net  141.6)   max err   0.0085  mean  0.00262  nearest-texel mismatches  0.000%
+big triangles, strong perspective (w ratio 16), tile 8  (47699 px total, shared edge loop 154.9 ns/px)
+  texture coords: float (current)      455.2 ns/px (net  300.3)   max err   0.0040  mean  0.00256  nearest-texel mismatches  0.013%
+  texture coords: float, int32 weights   339.7 ns/px (net  184.8)   max err   0.0040  mean  0.00256  nearest-texel mismatches  0.013%
+  texture coords: fixed + LUT recip    269.1 ns/px (net  114.2)   max err   0.0068  mean  0.00185  nearest-texel mismatches  0.281%
+  texture coords: fixed, 16-px spans   127.9 ns/px (net  -27.0)   max err 393.5145  mean  9.00283  nearest-texel mismatches 74.836%
+  texture coords: fixed, 8-px spans    139.9 ns/px (net  -15.0)   max err 236.5269  mean  2.56839  nearest-texel mismatches 49.380%
+  texture coords: fixed, 4-px spans    164.5 ns/px (net    9.6)   max err  89.9076  mean  0.44164  nearest-texel mismatches 18.371%
+  colour: int64 barycentric divide     774.1 ns/px (net  619.2)   max err   0.5000  mean  0.40013  nearest-texel mismatches  0.000%
+  colour: incremental fixed-point      299.7 ns/px (net  144.8)   max err   0.5000  mean  0.40013  nearest-texel mismatches  0.000%
+  cube map: float (current)            521.4 ns/px (net  366.5)   max err   0.0039  mean  0.00261  nearest-texel mismatches  0.000%
+  cube map: fixed + LUT recip          288.9 ns/px (net  134.0)   max err   0.0049  mean  0.00262  nearest-texel mismatches  0.000%
+small triangles (~12 px), perspective 4, tile 1  (748 px total, shared edge loop 225.6 ns/px)
+  texture coords: float (current)      525.3 ns/px (net  299.7)   max err   0.0039  mean  0.00257  nearest-texel mismatches  0.000%
+  texture coords: float, int32 weights   410.4 ns/px (net  184.8)   max err   0.0039  mean  0.00257  nearest-texel mismatches  0.000%
+  texture coords: fixed + LUT recip    401.3 ns/px (net  175.7)   max err   0.0040  mean  0.00239  nearest-texel mismatches  0.000%
+  texture coords: fixed, 16-px spans   462.3 ns/px (net  236.7)   max err  29.9700  mean  1.37896  nearest-texel mismatches 35.027%
+  texture coords: fixed, 8-px spans    462.3 ns/px (net  236.8)   max err  29.9700  mean  1.37896  nearest-texel mismatches 35.027%
+  texture coords: fixed, 4-px spans    472.3 ns/px (net  246.7)   max err  11.6267  mean  0.69771  nearest-texel mismatches 25.267%
+  colour: int64 barycentric divide     845.0 ns/px (net  619.4)   max err   0.5000  mean  0.39369  nearest-texel mismatches  0.000%
+  colour: incremental fixed-point      424.5 ns/px (net  198.9)   max err   0.5000  mean  0.39369  nearest-texel mismatches  0.000%
+  cube map: float (current)            606.6 ns/px (net  381.1)   max err   0.0039  mean  0.00256  nearest-texel mismatches  0.000%
+  cube map: fixed + LUT recip          422.3 ns/px (net  196.8)   max err   0.0067  mean  0.00260  nearest-texel mismatches  0.000%
+big triangles, no perspective (ratio 1), tile 4  (55832 px total, shared edge loop 143.8 ns/px)
+  texture coords: float (current)      443.7 ns/px (net  299.9)   max err   0.0039  mean  0.00258  nearest-texel mismatches  0.005%
+  texture coords: float, int32 weights   328.8 ns/px (net  185.0)   max err   0.0039  mean  0.00258  nearest-texel mismatches  0.005%
+  texture coords: fixed + LUT recip    254.3 ns/px (net  110.5)   max err   0.0041  mean  0.00261  nearest-texel mismatches  0.002%
+  texture coords: fixed, 16-px spans   123.0 ns/px (net  -20.8)   max err   0.0507  mean  0.00503  nearest-texel mismatches  0.423%
+  texture coords: fixed, 8-px spans    135.0 ns/px (net   -8.8)   max err   0.0439  mean  0.00454  nearest-texel mismatches  0.346%
+  texture coords: fixed, 4-px spans    159.3 ns/px (net   15.5)   max err   0.0117  mean  0.00413  nearest-texel mismatches  0.274%
+  texture coords: affine (w const)     193.1 ns/px (net   49.3)   max err   0.0000  mean  0.00000  nearest-texel mismatches  0.000%
+  colour: int64 barycentric divide     763.1 ns/px (net  619.3)   max err   0.5000  mean  0.39965  nearest-texel mismatches  0.000%
+  colour: incremental fixed-point      281.4 ns/px (net  137.6)   max err   0.5000  mean  0.39965  nearest-texel mismatches  0.000%
+  cube map: float (current)            511.0 ns/px (net  367.3)   max err   0.0039  mean  0.00260  nearest-texel mismatches  0.000%
+  cube map: fixed + LUT recip          273.9 ns/px (net  130.2)   max err   0.0043  mean  0.00260  nearest-texel mismatches  0.000%
+triangles ~24 px, perspective 4, tile 1  (2130 px total, shared edge loop 190.3 ns/px)
+  texture coords: float (current)      490.4 ns/px (net  300.1)   max err   0.0039  mean  0.00262  nearest-texel mismatches  0.000%
+  texture coords: float, int32 weights   374.9 ns/px (net  184.6)   max err   0.0039  mean  0.00262  nearest-texel mismatches  0.000%
+  texture coords: fixed + LUT recip    329.8 ns/px (net  139.5)   max err   0.0041  mean  0.00247  nearest-texel mismatches  0.094%
+  texture coords: fixed, 16-px spans   310.7 ns/px (net  120.4)   max err  34.4347  mean  1.97353  nearest-texel mismatches 50.423%
+  texture coords: fixed, 8-px spans    316.4 ns/px (net  126.2)   max err  34.4347  mean  1.33146  nearest-texel mismatches 42.300%
+  texture coords: fixed, 4-px spans    334.4 ns/px (net  144.1)   max err  22.9703  mean  0.45844  nearest-texel mismatches 20.188%
+  colour: int64 barycentric divide     809.0 ns/px (net  618.7)   max err   0.5000  mean  0.39792  nearest-texel mismatches  0.000%
+  colour: incremental fixed-point      359.5 ns/px (net  169.2)   max err   0.5000  mean  0.39792  nearest-texel mismatches  0.000%
+  cube map: float (current)            567.7 ns/px (net  377.4)   max err   0.0039  mean  0.00261  nearest-texel mismatches  0.000%
+  cube map: fixed + LUT recip          352.2 ns/px (net  161.9)   max err   0.0081  mean  0.00261  nearest-texel mismatches  0.000%
+triangles ~40 px, perspective 4, tile 1  (5117 px total, shared edge loop 210.0 ns/px)
+  texture coords: float (current)      509.6 ns/px (net  299.6)   max err   0.0039  mean  0.00261  nearest-texel mismatches  0.000%
+  texture coords: float, int32 weights   394.4 ns/px (net  184.4)   max err   0.0039  mean  0.00261  nearest-texel mismatches  0.000%
+  texture coords: fixed + LUT recip    347.0 ns/px (net  137.0)   max err   0.0045  mean  0.00244  nearest-texel mismatches  0.020%
+  texture coords: fixed, 16-px spans   244.1 ns/px (net   34.1)   max err  26.1445  mean  1.44146  nearest-texel mismatches 54.270%
+  texture coords: fixed, 8-px spans    252.4 ns/px (net   42.4)   max err  17.0101  mean  0.67330  nearest-texel mismatches 37.561%
+  texture coords: fixed, 4-px spans    272.0 ns/px (net   62.0)   max err  17.0101  mean  0.17907  nearest-texel mismatches 13.758%
+  colour: int64 barycentric divide     829.6 ns/px (net  619.6)   max err   0.5000  mean  0.40149  nearest-texel mismatches  0.000%
+  colour: incremental fixed-point      388.8 ns/px (net  178.8)   max err   0.5000  mean  0.40149  nearest-texel mismatches  0.000%
+  cube map: float (current)            586.3 ns/px (net  376.3)   max err   0.0039  mean  0.00260  nearest-texel mismatches  0.000%
+  cube map: fixed + LUT recip          370.8 ns/px (net  160.8)   max err   0.0109  mean  0.00263  nearest-texel mismatches  0.000%
