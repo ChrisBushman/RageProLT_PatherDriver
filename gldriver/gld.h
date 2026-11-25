@@ -135,6 +135,7 @@ typedef struct {
     unsigned long rp_thread;       /* pthread_t */
 } mach64_priv;
 
+extern float mach64_zbias;              /* added to the window depth of expanded points/lines (glPolygonOffset in line/point polygon mode) */
 extern float mach64_zforce;             /* >= 0: every vertex gets this window depth (stencil emulation) */
 /* gld_stencil.c */
 void     mach64_zs_free(mach64_priv *p);

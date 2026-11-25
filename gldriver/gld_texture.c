@@ -564,7 +564,8 @@ static int mach64_upload(gld_context *ctx, void *texobj)
 #define GLI_TEX2D_BIT      0x00000008u
 #define GLI_TEXRECT_BIT    0x00000004u    /* GL_TEXTURE_RECTANGLE_EXT enabled (its bound texobj is the word BEFORE the 2D one: targets are 1D, rect, 2D, 3D, cube at 4-byte steps from 0x15744) */
 #define GLI_TEXCUBE_BIT    0x00000001u     /* GL_TEXTURE_CUBE_MAP enabled; its bound texobj is the word at 0x1573c, 12 bytes before the 2D one */
-#define GLI_TEXANY_BITS    (GLI_TEX2D_BIT | GLI_TEXRECT_BIT | GLI_TEXCUBE_BIT)
+#define GLI_TEX1D_BIT      0x00000010u     /* GL_TEXTURE_1D enabled; its bound texobj is the word AFTER the 2D one (found with RAGE_ENDUMP) */
+#define GLI_TEXANY_BITS    (GLI_TEX2D_BIT | GLI_TEXRECT_BIT | GLI_TEXCUBE_BIT | GLI_TEX1D_BIT)
 #define GLI_UNIT_STRIDE    0x7cu       /* per texture unit: enable word, env-mode word */
 #define GLI_BOUND_STRIDE   0x14u       /* per texture unit: bound texobj pointer       */
 static uint32_t unit_bound(gld_context *ctx, uint32_t u, uint32_t en)      /* the bound texobj of the highest-priority enabled target (cube > 2D > rectangle) */
@@ -573,6 +574,7 @@ static uint32_t unit_bound(gld_context *ctx, uint32_t u, uint32_t en)      /* th
     if (en & GLI_TEXCUBE_BIT) return mach64_gli_u32(ctx, base - 12u);
     if (en & GLI_TEX2D_BIT) return mach64_gli_u32(ctx, base);
     if (en & GLI_TEXRECT_BIT) return mach64_gli_u32(ctx, base - 4u);
+    if (en & GLI_TEX1D_BIT) return mach64_gli_u32(ctx, base + 4u);
     return 0;
 }
 

@@ -66,6 +66,7 @@ static void glidiff(gld_context *ctx, const char *tag)
         if (have && snap[i] != v) { if (!n++) fprintf(f, "-- %s\n", tag); fprintf(f, "  %04x: %08x -> %08x\n", o, snap[i], v); } snap[i] = v; }
     have = 1; fclose(f);
 }
+float mach64_zbias = 0.0f;
 float mach64_zforce = -1.0f;
 
 /* GL depth + stencil state -> Z_CNTL and the stencil/depth emulation (gld_stencil.c).  gli+0x6340 bit24 = GL_DEPTH_TEST, +0x633c >> 16 = glDepthFunc,

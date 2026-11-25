@@ -125,7 +125,7 @@ static void pack_at(const void *vp, float gx, float gy, float fb_h, m64_vertex *
 {
     const unsigned char *v = (const unsigned char *)vp;
     float w     = *(const float *)(v + GVOFF_W);              /* 1/w_clip */
-    float depth = *(const float *)(v + 0x18) * w * 0.5f + 0.5f; /* clip_z*(1/w) -> NDC -> [0,1] */
+    float depth = *(const float *)(v + 0x18) * w * 0.5f + 0.5f + mach64_zbias; /* clip_z*(1/w) -> NDC -> [0,1] */
     uint32_t argb = (chan(*(const float *)(v + 0x3c)) << 24)          /* vertex alpha: blended points/lines need it */
                   | (chan(*(const float *)(v + GVOFF_R)) << 16)
                   | (chan(*(const float *)(v + GVOFF_G)) <<  8)
@@ -375,8 +375,22 @@ static int pm_mode(gld_context *ctx, const void *g0, const void *g1, const void 
 static void pm_outline(gld_context *ctx, const void *const *gv, uint32_t n, int mode)
 {
     float fb_h = FBH_OF(ctx), w = gli_size(ctx, GLI_LINE_WIDTH) * 0.5f, s = gli_size(ctx, GLI_POINT_SIZE) * 0.5f; uint32_t i;
-    if (mode == 2) { for (i = 0; i < n; i++) draw_point(ctx, gv[i], fb_h, s); return; }
-    for (i = 0; i < n; i++) draw_line(ctx, gv[i], gv[(i + 1) % n], fb_h, w);
+    /* GL_POLYGON_OFFSET_LINE (+0x66f0 bit 24) / _POINT (+0x66ec bit 0): z += factor * max slope of the polygon + units * r, r = one chip depth step (2 / 65535) */
+    int off = (mode == 2) ? (int)(mach64_gli_u32(ctx, 0x66ecu) & 1u) : (int)((mach64_gli_u32(ctx, GLI_OFFSET_EN) >> 24) & 1u);
+    if (off && n >= 3) {
+        const unsigned char *a = (const unsigned char *)gv[0], *b = (const unsigned char *)gv[1], *c = (const unsigned char *)gv[2];
+        float x0 = *(const float *)(a + GVOFF_X), y0 = *(const float *)(a + GVOFF_Y), x1 = *(const float *)(b + GVOFF_X), y1 = *(const float *)(b + GVOFF_Y), x2 = *(const float *)(c + GVOFF_X), y2 = *(const float *)(c + GVOFF_Y);
+        float z0 = *(const float *)(a + 0x18) * *(const float *)(a + GVOFF_W) * 0.5f, z1 = *(const float *)(b + 0x18) * *(const float *)(b + GVOFF_W) * 0.5f, z2 = *(const float *)(c + 0x18) * *(const float *)(c + GVOFF_W) * 0.5f;
+        float det = (x1 - x0) * (y2 - y0) - (x2 - x0) * (y1 - y0), m = 0.0f;
+        if (det != 0.0f) {
+            float dzdx = ((z1 - z0) * (y2 - y0) - (z2 - z0) * (y1 - y0)) / det, dzdy = ((z2 - z0) * (x1 - x0) - (z1 - z0) * (x2 - x0)) / det;
+            if (dzdx < 0) dzdx = -dzdx; if (dzdy < 0) dzdy = -dzdy; m = dzdx > dzdy ? dzdx : dzdy;
+        }
+        mach64_zbias = gli_f(ctx, GLI_OFFSET_FACTOR) * m + gli_f(ctx, GLI_OFFSET_UNITS) * (2.0f / 65535.0f);
+    }
+    if (mode == 2) { for (i = 0; i < n; i++) draw_point(ctx, gv[i], fb_h, s); }
+    else for (i = 0; i < n; i++) draw_line(ctx, gv[i], gv[(i + 1) % n], fb_h, w);
+    mach64_zbias = 0.0f;
 }
 static void emit_tri_rv(gld_context *ctx, const m64_vertex *r0, const m64_vertex *r1, const m64_vertex *r2,
                         const void *gv0, const void *gv1, const void *gv2)

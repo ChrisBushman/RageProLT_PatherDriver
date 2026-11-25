@@ -13,6 +13,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+static int g_errcode;
 
 #ifndef GL_GENERATE_MIPMAP_SGIS
 #define GL_GENERATE_MIPMAP_SGIS 0x8191
@@ -39,6 +40,8 @@ static int have_ext(const char *e) { return g_exts && strstr(g_exts, e) != 0; }
 static void report(const char *name, int r, const char *note)
 {
     char nb[256]; if (g_act[0]) { snprintf(nb, sizeof nb, "%s%s", note ? note : "", g_act); note = nb; g_act[0] = 0; }
+    if (r < 0 && g_errcode) { size_t n; if (note != nb) { snprintf(nb, sizeof nb, "%s", note ? note : ""); note = nb; } n = strlen(nb); snprintf(nb + n, sizeof nb - n, " [glError 0x%x]", g_errcode); }
+    g_errcode = 0;
     if (r > 0) { g_pass++; printf("PASS         %-34s %s\n", name, note ? note : ""); }
     else if (r == 0) { g_fail++; printf("FAIL         %-34s %s\n", name, note ? note : ""); }
     else { g_unsup++; printf("UNSUPPORTED  %-34s %s\n", name, note ? note : ""); }
@@ -74,7 +77,7 @@ static void quad(float x0, float y0, float x1, float y1, float r, float g, float
 {
     glColor4f(r, g, b, a); glBegin(GL_QUADS); glVertex2f(x0, y0); glVertex2f(x1, y0); glVertex2f(x1, y1); glVertex2f(x0, y1); glEnd();
 }
-static int glerr(void) { return glGetError() != GL_NO_ERROR; }
+static int glerr(void) { GLenum e = glGetError(); if (e != GL_NO_ERROR) { g_errcode = (int)e; return 1; } return 0; }
 
 /* ---- blending ---------------------------------------------------------- */
 static int blendeq(GLenum eq, int er, int eg, int eb, const char *name)
@@ -599,6 +602,7 @@ static void t_accum2(void)
     reset(0, 0, 0); glClearAccum(0.25f, 0.25f, 0.25f, 0); glClear(GL_ACCUM_BUFFER_BIT); glAccum(GL_RETURN, 1.0f); px(50, 50, &r, &g, &b);
     snprintf(n, sizeof n, "ClearAccum 0.25 then RETURN: %d,%d,%d (want 64,64,64)", r, g, b); report("accum: glClearAccum + RETURN", glerr() ? -1 : near3(50, 50, 64, 64, 64, 20), n);
 }
+#include "gl_probe_audit.inc"
 typedef void (*tfn)(void);
 static const struct { const char *name; tfn fn; const char *ext; } TESTS[] = {
     { "clearcolor", t_clearcolor, 0 }, { "blend_subtract", t_blend_subtract, "GL_EXT_blend_subtract" }, { "blend_revsub", t_blend_revsub, "GL_EXT_blend_subtract" }, { "blend_min", t_blend_min, "GL_EXT_blend_minmax" },
@@ -620,6 +624,7 @@ static const struct { const char *name; tfn fn; const char *ext; } TESTS[] = {
     { "depth_clamp", t_depth_clamp_bounds, "GL_NV_depth_clamp" }, { "accum", t_accum, 0 }, { "accum2", t_accum2, 0 },
     { "fence", t_fence, "GL_APPLE_fence" }, { "flush_render", t_flush_render, "GL_APPLE_flush_render" }, { "vao", t_vao, "GL_APPLE_vertex_array_object" }, { "multidraw", t_multidraw, "GL_EXT_multi_draw_arrays" },
     { "range_elements", t_range_elements, "GL_EXT_draw_range_elements" }, { "genmip", t_genmip, "GL_SGIS_generate_mipmap" }, { "windowpos", t_windowpos, "GL_ARB_window_pos" },
+    AUDIT_ENTRIES
 };
 
 int main(int argc, char **argv)
@@ -639,6 +644,8 @@ int main(int argc, char **argv)
     ctx = aglCreateContext(pf, NULL); g_ctx = ctx; aglSetDrawable(ctx, GetWindowPort(win)); aglSetCurrentContext(ctx);
     printf("GL_RENDERER %s | GL_VERSION %s\n", glGetString(GL_RENDERER), glGetString(GL_VERSION));
     g_exts = (const char *)glGetString(GL_EXTENSIONS);
+    if (getenv("PROBE_EXTS")) { const char *q = g_exts; int n = 0; printf("GL_VENDOR %s\n", glGetString(GL_VENDOR)); while (q && *q) { const char *e = strchr(q, ' '); int l = e ? (int)(e - q) : (int)strlen(q); if (l) printf("EXT %.*s\n", l, q), n++; q = e ? e + 1 : 0; } printf("%d extensions\n", n);
+        { GLint v; glGetIntegerv(GL_MAX_TEXTURE_SIZE, &v); printf("MAX_TEXTURE_SIZE %d\n", (int)v); glGetIntegerv(GL_MAX_TEXTURE_UNITS, &v); printf("MAX_TEXTURE_UNITS %d\n", (int)v); glGetIntegerv(GL_MAX_LIGHTS, &v); printf("MAX_LIGHTS %d\n", (int)v); glGetIntegerv(GL_MAX_CLIP_PLANES, &v); printf("MAX_CLIP_PLANES %d\n", (int)v); glGetIntegerv(GL_STENCIL_BITS, &v); printf("STENCIL_BITS %d\n", (int)v); glGetIntegerv(GL_DEPTH_BITS, &v); printf("DEPTH_BITS %d\n", (int)v); glGetIntegerv(GL_ALPHA_BITS, &v); printf("ALPHA_BITS %d\n", (int)v); glGetIntegerv(GL_MAX_ELEMENTS_VERTICES, &v); printf("MAX_ELEMENTS_VERTICES %d\n", (int)v); } }
     for (i = 0; i < (int)(sizeof TESTS / sizeof TESTS[0]); i++) {
         run = (argc < 2);
         for (a = 1; a < argc; a++) if (!strcmp(argv[a], TESTS[i].name)) run = 1;
