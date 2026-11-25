@@ -178,6 +178,37 @@ static float gli_size(gld_context *ctx, uint32_t off)
 }
 
 
+/* ARB_point_parameters.  GLEngine only stores the state (glPointParameterfv, GLEngine 0x2aff0: min +0x6634, max +0x6638, fade threshold +0x663c, distance attenuation a,b,c
+ * +0x6640/44/48) and copies it to the driver state block; it does not attenuate, so the size is derived here per vertex.  Eye distance d comes from the clip coordinates
+ * (+0x18 z, +0x1c w) and the projection matrix (glMatrixMode 0x22088: GL_PROJECTION is slot 3, current matrix at gli+0x4e60+3*64): perspective w = m11*z_eye + m15,
+ * orthographic z_clip = m10*z_eye + m14.  size' = size / sqrt(a + b*d + c*d*d), clamped to [min, max]. */
+static int pt_fade_q8 = 256;      /* GL_POINT_FADE_THRESHOLD_SIZE: alpha factor for the point being drawn, Q8 */
+static float pt_half(gld_context *ctx, const void *vp, float base_half)
+{
+    pt_fade_q8 = 256;
+    float a = gli_f(ctx, 0x6640), b = gli_f(ctx, 0x6644), c = gli_f(ctx, 0x6648), mn = gli_f(ctx, 0x6634), mx = gli_f(ctx, 0x6638), d, den, sz;
+    /* the context default for the maximum is exactly 1.0 (read live), which is GLEngine's "unset", not a request to clamp every point to one pixel */
+    uint32_t any = mach64_gli_u32(ctx, 0x6640) | mach64_gli_u32(ctx, 0x6644) | mach64_gli_u32(ctx, 0x6648);
+    if (mx == 1.0f) mx = 0.0f;
+    int atten = any && !(a == 1.0f && b == 0.0f && c == 0.0f);
+    if (!atten && mn <= 0.0f && (mx <= 0.0f || mx >= 8192.0f)) return base_half;
+    sz = base_half * 2.0f;
+    if (atten) {
+        const unsigned char *v = (const unsigned char *)vp;
+        float m10 = gli_f(ctx, 0x4f20 + 40), m11 = gli_f(ctx, 0x4f20 + 44), m14 = gli_f(ctx, 0x4f20 + 56), m15 = gli_f(ctx, 0x4f20 + 60);
+        float zc = *(const float *)(v + 0x18), wc = *(const float *)(v + 0x1c);
+        if (m11 != 0.0f) d = (wc - m15) / m11; else if (m10 != 0.0f) d = (zc - m14) / m10; else d = 0.0f;
+        if (d < 0.0f) d = -d;
+        den = a + d * (b + c * d);
+        if (den > 0.0f) sz = sz * __builtin_sqrtf(1.0f / den); else sz = mx > 0.0f ? mx : sz;
+    }
+    if (sz < mn) sz = mn;
+    if (mx > 0.0f && sz > mx) sz = mx;
+    if (atten) { float th = gli_f(ctx, 0x663c); if (th > 0.0f && sz < th) { float f = sz / th; pt_fade_q8 = (int)(f * f * 256.0f); } }
+    sz *= 0.5f;
+    return sz < 0.5f ? 0.5f : sz;
+}
+
 /* ---- GL_POINT_SMOOTH / GL_LINE_SMOOTH: the chip has no coverage unit, so the primitive is built from geometry whose vertex alpha ramps from the vertex's
  * alpha (inside) to 0 (one pixel outside); with the app's usual glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA) the edge pixels blend by coverage.
  * gli+0x63a0 bit 16 = LINE_SMOOTH, gli+0x6650 bit 24 = POINT_SMOOTH. -------------------------------------------------------------------------------- */
@@ -246,6 +277,7 @@ static void draw_point(gld_context *ctx, const void *vp, float fb_h, float s)
     pack_at(vp, x + s, y - s, fb_h, &b, tw, th);
     pack_at(vp, x - s, y + s, fb_h, &c, tw, th);
     pack_at(vp, x + s, y + s, fb_h, &d, tw, th);
+    if (pt_fade_q8 != 256) { m64_vertex *q[4] = { &a, &b, &c, &d }; int k; for (k = 0; k < 4; k++) set_alpha(q[k], (((q[k]->argb >> 24) * (uint32_t)pt_fade_q8) + 128) >> 8); }
     if (p->hw.textured && (mach64_gli_u32(ctx, GLI_POINT_SPRITE) & 0x00010000u) && (mach64_gli_u32(ctx, GLI_COORD_REPLACE) & 1u)) {     /* GL_POINT_SPRITE + GL_COORD_REPLACE: (s,t) run over the point, t = 0 at the top */
         m64_vertex *q[4] = { &a, &b, &c, &d }; static const float cs[4] = { 0.0f, 1.0f, 0.0f, 1.0f }, ct[4] = { 1.0f, 1.0f, 0.0f, 0.0f }; int k;
         for (k = 0; k < 4; k++) {
@@ -388,7 +420,7 @@ static void pm_outline(gld_context *ctx, const void *const *gv, uint32_t n, int 
         }
         mach64_zbias = gli_f(ctx, GLI_OFFSET_FACTOR) * m + gli_f(ctx, GLI_OFFSET_UNITS) * (2.0f / 65535.0f);
     }
-    if (mode == 2) { for (i = 0; i < n; i++) draw_point(ctx, gv[i], fb_h, s); }
+    if (mode == 2) { for (i = 0; i < n; i++) draw_point(ctx, gv[i], fb_h, pt_half(ctx, gv[i], s)); }
     else for (i = 0; i < n; i++) draw_line(ctx, gv[i], gv[(i + 1) % n], fb_h, w);
     mach64_zbias = 0.0f;
 }
@@ -634,7 +666,7 @@ void mach64_render_points(gld_context *ctx, const void *v, uint32_t n)
     PRIM_SANE(n);
     mach64_sync_depth_from_gli(ctx);
     mach64_bind_texture(ctx);          /* honour current texture state (usu. off) */
-    for (i = 0; i < n; i++) draw_point(ctx, VTX(v, i), fb_h, s);
+    for (i = 0; i < n; i++) draw_point(ctx, VTX(v, i), fb_h, pt_half(ctx, VTX(v, i), s));
 }
 void mach64_render_lines(gld_context *ctx, const void *v, uint32_t n)
 {
@@ -673,7 +705,7 @@ void mach64_render_elt_points(gld_context *ctx, const void *v, uint32_t n)
     mach64_sync_depth_from_gli(ctx);
     mach64_bind_texture(ctx);
     for (i = 0; i < n; i++)
-        if (elt_is_ptr(pa[i])) draw_point(ctx, (const void *)(uintptr_t)pa[i], fb_h, s);
+        if (elt_is_ptr(pa[i])) draw_point(ctx, (const void *)(uintptr_t)pa[i], fb_h, pt_half(ctx, (const void *)(uintptr_t)pa[i], s));
 }
 void mach64_render_elt_lines(gld_context *ctx, const void *v, uint32_t n)
 {

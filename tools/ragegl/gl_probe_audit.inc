@@ -442,6 +442,16 @@ static void a_point_atten(void)
     att[0] = 1; att[1] = 0; att[2] = 0; glPointParameterfvARB(GL_POINT_DISTANCE_ATTENUATION_ARB, att);
     aq("point parameters: distance attenuation changes size", glerr() ? -1 : (big && small), big ? "" : "near point not size 8");
 }
+static void a_point_fade(void)
+{
+    GLfloat att[3] = { 1, 0, 100 }; int dim, full;
+    reset(0, 0, 0); glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA); glPointSize(8); glPointParameterfvARB(GL_POINT_DISTANCE_ATTENUATION_ARB, att);
+    glPointParameterfARB(GL_POINT_FADE_THRESHOLD_SIZE_ARB, 4.0f); glPointParameterfARB(GL_POINT_SIZE_MIN_ARB, 0.0f); glColor4f(1, 1, 1, 1);
+    glBegin(GL_POINTS); glVertex3f(30, 64, 0); glVertex3f(90, 64, -0.5f); glEnd();                           /* near: size 8 (opaque); d 0.5: 8/sqrt(26) = 1.57 -> alpha (1.57/4)^2 = 0.15 */
+    glDisable(GL_BLEND); att[2] = 0; glPointParameterfvARB(GL_POINT_DISTANCE_ATTENUATION_ARB, att); glPointParameterfARB(GL_POINT_FADE_THRESHOLD_SIZE_ARB, 1.0f);
+    { int r, g, b; px(30, 64, &r, &g, &b); full = r > 240; px(90, 64, &r, &g, &b); dim = r > 10 && r < 90; }
+    aq("point parameters: fade threshold dims small points", glerr() ? -1 : (full && dim), 0);
+}
 static void a_depth_texture(void)
 {
     static const float d[4] = { 0.1f, 0.4f, 0.7f, 0.9f }; GLuint id; int e;
@@ -464,4 +474,4 @@ static void a_multisample_attr(void)
     { "select", a_select, 0 }, { "feedback", a_feedback, 0 }, { "interleaved", a_interleaved, 0 }, { "fog_modes", a_fog_modes, 0 }, { "depth_funcs", a_depth_funcs, 0 }, \
     { "alpha_funcs", a_alpha_funcs, 0 }, { "logic_ops", a_logic_ops, 0 }, { "multitexture", a_multitexture, "GL_ARB_multitexture" }, { "multitexture_rep", a_multitexture_rep, "GL_ARB_multitexture" }, { "crossbar", a_crossbar, "GL_ARB_texture_env_crossbar" }, \
     { "blend_eq_sep", a_blend_eq_sep, "GL_EXT_blend_equation_separate" }, { "vbo", a_vbo, "GL_ARB_vertex_buffer_object" }, { "cva", a_cva, "GL_EXT_compiled_vertex_array" }, \
-    { "point_atten", a_point_atten, "GL_ARB_point_parameters" }, { "depth_texture", a_depth_texture, "GL_ARB_depth_texture" }, { "multisample", a_multisample_attr, "GL_ARB_multisample" },
+    { "point_atten", a_point_atten, "GL_ARB_point_parameters" }, { "point_fade", a_point_fade, "GL_ARB_point_parameters" }, { "depth_texture", a_depth_texture, "GL_ARB_depth_texture" }, { "multisample", a_multisample_attr, "GL_ARB_multisample" },

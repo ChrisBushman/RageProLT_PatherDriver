@@ -52,7 +52,7 @@ static void rage_fill_descriptor(gld_context *ctx)
             static const unsigned char bits[] = { 5, 23, 19 /* ARB_texture_non_power_of_two */, 22 /* EXT_texture_rectangle */, 6 /* ARB_texture_cube_map */, 35 /* EXT_secondary_color */, 17 /* ARB_point_sprite */, 32 /* EXT_paletted_texture */, 10 /* ARB_texture_compression */, 40 /* EXT_texture_compression_s3tc */, 24 /* EXT_blend_color */, 25 /* EXT_blend_minmax */, 26 /* EXT_blend_subtract */, 16 /* ARB_occlusion_query */, 27 /* EXT_texture_lod_bias */,
                                                   30 /* EXT_stencil_wrap */, 34 /* EXT_separate_specular_color */, 36 /* EXT_blend_func_separate */, 38 /* EXT_stencil_two_side */,
                                                   69 /* SGIS_texture_edge_clamp */, 11 /* ARB_texture_mirrored_repeat */, 3 /* ARB_texture_border_clamp */, 42 /* EXT_texture_mirror_clamp */,
-                                                  4 /* ARB_multitexture */, 9 /* ARB_texture_env_combine */, 7 /* ARB_texture_env_dot3 */, 41 /* EXT_blend_equation_separate */,
+                                                  1 /* ARB_point_parameters */, 4 /* ARB_multitexture */, 9 /* ARB_texture_env_combine */, 7 /* ARB_texture_env_dot3 */, 41 /* EXT_blend_equation_separate */,
                                                   20 /* ARB_vertex_buffer_object */, 21 /* EXT_compiled_vertex_array */, 28 /* EXT_abgr */, 29 /* EXT_bgra */ };
             unsigned i; for (i = 0; i < sizeof bits; i++) dd[0x104 / 4 + bits[i] / 32] |= 1u << (bits[i] & 31);
         }
