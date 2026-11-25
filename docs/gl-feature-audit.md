@@ -51,7 +51,7 @@ separate_specular_color, texture_mirror_clamp, compiled_vertex_array, abgr, bgra
 | Extension | Status | Note |
 |---|---|---|
 | ARB_multitexture | tested | needs descriptor +0xae = 2; secondary textures 1x1..16x4 verified. Hardware multiplies with a 4-bit secondary factor (about +8% on mid values) |
-| ARB_texture_env_combine | tested | ADD_SIGNED is exact by default (CPU compositing); `RAGE_ADD_SIGNED=fast` in the environment (or `-DGLD_APPROX_ADD_SIGNED` as build default) keeps the hardware approximation for speed. Quirk: in fast mode a process whose very first draw is a COMBINE draw renders white once |
+| ARB_texture_env_combine | tested | ADD_SIGNED is exact by default (CPU compositing); `RAGE_ADD_SIGNED=fast` in the environment (or `-DGLD_APPROX_ADD_SIGNED` as build default) keeps the hardware approximation for speed. Fast mode result for the probe is 198,132,66 (exact: 123,198,198), so the probe fails in fast mode by design |
 | ARB_texture_env_dot3 | tested (CPU) | |
 | ARB_texture_env_crossbar | tested (CPU two-unit compositor), not advertised (no extension bit identified) | primary colour and both texels nameable |
 | ARB_point_parameters | tested, advertised | per-vertex size from eye distance (clip w / projection slot 3), min/max clamp, fade threshold |
@@ -66,7 +66,7 @@ separate_specular_color, texture_mirror_clamp, compiled_vertex_array, abgr, bgra
 | EXT_texture_filter_anisotropic | accepted-only, not advertised | filter ignored |
 | ARB_point_sprite | tested | |
 | ARB_occlusion_query, ARB_vertex_program, APPLE_* (fence, flush_render, VAO), multi_draw_arrays, draw_range_elements, SGIS_generate_mipmap, ARB_window_pos | tested | GLEngine-side or driver-assisted |
-| ARB_fragment_program | **failing** (accepted, not executed: draws with the primary colour) | static analysis (GLEngine 0x9d104..0x9e488): programs are parsed by the external PP library (PPParserParse) and compiled to a PPEmulatorProgram kept in the context; the driver never receives the text. Needs the PP stream chunk format decoded plus a CPU interpreter (fixed-point). GLEngine advertises ARB shader names in its fixed list, so they cannot be removed |
+| ARB_fragment_program | **failing** (accepted, not executed: draws with the primary colour) | static analysis (GLEngine 0x9d104..0x9e488): programs are parsed by the external PP library (PPParserParse) and compiled to a PPEmulatorProgram kept in the context; the driver never receives the text. GLEngine keeps the fragment PPStream at program-object+0 (object = ctx+0x10000+0x8724+4*target index) and does not build an emulator program for it (vertex programs do, and run through PPEmulatorRun, 0xd9908). Two routes: (a) the driver dlopens libGLProgrammability (present on Panther: PPEmulatorProgramCreate/ConvertFromPPStream/InitialiseHandleBanks/Run, emulator struct fields +0x2d0 program, +0x2d8/+0x2dc data blocks, 0x100-byte stride; it also spawns a secondary thread, which conflicts with the single-core rule) or (b) decode the PP stream and write an own fixed-point interpreter. Neither is small; no target app uses ARB_fragment_program (2003-era Panther titles). GLEngine advertises ARB shader names in its fixed list, so they cannot be removed |
 | 3D textures | tested (CPU shaded) | descriptor +0xb4 = MAX_3D_TEXTURE_SIZE; nearest/trilinear, wrap S/T/R; level 0 only |
 | ARB_depth_texture / shadow | accepted-only (upload) | not implemented |
 | ARB_multisample | pixel format offered only | no multisampling |
