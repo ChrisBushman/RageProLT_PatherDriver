@@ -261,6 +261,45 @@ static void a_copypixels(void)
     px(63, 63, &r, &g, &b); ok = ok && r < 12;
     aq("CopyPixels with zoom 3 and pixel transfer", glerr() ? -1 : ok, 0);
 }
+static void a_spot_light(void)
+{
+    static const GLfloat pos[4] = { 64, 64, 50, 1 }, dir[3] = { 0, 0, -1 }, wh[4] = { 1, 1, 1, 1 }; int cx, cy, r, g, b, c1, c2;
+    reset(0, 0, 0); glEnable(GL_LIGHTING); glEnable(GL_LIGHT0); glLightfv(GL_LIGHT0, GL_POSITION, pos); glLightfv(GL_LIGHT0, GL_SPOT_DIRECTION, dir);
+    glLightf(GL_LIGHT0, GL_SPOT_CUTOFF, 20.0f); glLightf(GL_LIGHT0, GL_SPOT_EXPONENT, 0.0f); glLightfv(GL_LIGHT0, GL_DIFFUSE, wh);
+    glLightModelfv(GL_LIGHT_MODEL_AMBIENT, (const GLfloat[4]){ 0, 0, 0, 1 }); glColor3f(1, 1, 1); glNormal3f(0, 0, 1);
+    glBegin(GL_QUADS);                                                                                    /* a 16 x 16 grid: lighting is per vertex */
+    for (cy = 0; cy < 16; cy++) for (cx = 0; cx < 16; cx++) { float x = (float)cx * 8, y = (float)cy * 8; glVertex2f(x, y); glVertex2f(x + 8, y); glVertex2f(x + 8, y + 8); glVertex2f(x, y + 8); }
+    glEnd(); glDisable(GL_LIGHTING);
+    glLightf(GL_LIGHT0, GL_SPOT_CUTOFF, 180.0f); glDisable(GL_LIGHT0);                                      /* leave the light as the other probes expect it */
+    px(64, 64, &r, &g, &b); c1 = r > 200; px(20, 64, &r, &g, &b); c2 = r < 30;                               /* cone radius 50 * tan 20 = 18 px */
+    aq("spot light (cutoff 20, cone lit / outside dark)", glerr() ? -1 : (c1 && c2), 0);
+}
+static void a_texgen_eye(void)
+{
+    static const unsigned char v[6] = { 255, 0, 0, 0, 255, 0 }; static const GLfloat ps[4] = { 1.0f / 128, 0, 0, 0 }, pt[4] = { 0, 0, 0, 0.5f }; GLuint id; int r, g, b, ok;
+    reset(0, 0, 0); glGenTextures(1, &id); glBindTexture(GL_TEXTURE_2D, id); glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST); glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP); glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, 2, 1, 0, GL_RGB, GL_UNSIGNED_BYTE, v); glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+    glEnable(GL_TEXTURE_2D); glTexGeni(GL_S, GL_TEXTURE_GEN_MODE, GL_EYE_LINEAR); glTexGeni(GL_T, GL_TEXTURE_GEN_MODE, GL_EYE_LINEAR);
+    glTexGenfv(GL_S, GL_EYE_PLANE, ps); glTexGenfv(GL_T, GL_EYE_PLANE, pt); glEnable(GL_TEXTURE_GEN_S); glEnable(GL_TEXTURE_GEN_T);
+    glColor3f(1, 1, 1); glBegin(GL_QUADS); glVertex2f(10, 10); glVertex2f(120, 10); glVertex2f(120, 100); glVertex2f(10, 100); glEnd();
+    glDisable(GL_TEXTURE_GEN_S); glDisable(GL_TEXTURE_GEN_T); glDisable(GL_TEXTURE_2D);
+    px(30, 50, &r, &g, &b); ok = r > 230 && g < 25; px(100, 50, &r, &g, &b); ok = ok && g > 230 && r < 25;      /* s = x / 128: red below 64, green above */
+    aq("texgen EYE_LINEAR", glerr() ? -1 : ok, 0);
+}
+static void a_copyteximage1d(void)
+{
+    GLuint id; int r, g, b, ok;
+    reset(0, 0, 0); quad(0, 5, 2, 6, 1, 0, 0, 1); quad(2, 5, 4, 6, 0, 1, 0, 1); glFinish();
+    glGenTextures(1, &id); glBindTexture(GL_TEXTURE_1D, id); glTexParameteri(GL_TEXTURE_1D, GL_TEXTURE_MIN_FILTER, GL_NEAREST); glTexParameteri(GL_TEXTURE_1D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_1D, GL_TEXTURE_WRAP_S, GL_CLAMP); glCopyTexImage1D(GL_TEXTURE_1D, 0, GL_RGB, 0, 5, 4, 0);
+    ok = glerr() == 0; reset(0, 0, 0); glEnable(GL_TEXTURE_1D); glColor3f(1, 1, 1);
+    glBegin(GL_QUADS); glTexCoord1f(0); glVertex2f(10, 10); glTexCoord1f(1); glVertex2f(110, 10); glTexCoord1f(1); glVertex2f(110, 100); glTexCoord1f(0); glVertex2f(10, 100); glEnd();
+    glDisable(GL_TEXTURE_1D);
+    px(30, 50, &r, &g, &b); ok = ok && r > 230 && g < 25; px(90, 50, &r, &g, &b); ok = ok && g > 230 && r < 25;
+    aq("glCopyTexImage1D", glerr() ? -1 : ok, 0);
+}
 static void a_pixel_map(void)
 {
     static const GLfloat inv[2] = { 1.0f, 0.0f }; static const unsigned char lo[3] = { 40, 200, 50 }; int r, g, b, ok;
@@ -388,7 +427,7 @@ static void mt_run(const char *name, GLenum env0)
     unsigned char ta[8 * 8 * 3], tb[8 * 8 * 3]; int ok, i; GLuint a, b;
     for (i = 0; i < 64; i++) { int x = i & 7; ta[i * 3] = x < 4 ? 255 : 0; ta[i * 3 + 1] = x < 4 ? 0 : 255; ta[i * 3 + 2] = 0; tb[i * 3] = 128; tb[i * 3 + 1] = 255; tb[i * 3 + 2] = 255; }
     reset(0, 0, 0); STEP(0); a = mktex(GL_TEXTURE_2D, 8, 8, ta, GL_NEAREST, GL_CLAMP); (void)a; STEP(1);
-    glActiveTextureARB(GL_TEXTURE1); STEP(2); glEnable(GL_TEXTURE_2D); b = mktex(GL_TEXTURE_2D, 8, 8, tb, GL_NEAREST, GL_CLAMP); (void)b; STEP(3); glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE); STEP(4);
+    glActiveTextureARB(GL_TEXTURE1); STEP(2); glEnable(GL_TEXTURE_2D); { int bw = 8, bh = 8; const char *e = getenv("SZB"); if (e) sscanf(e, "%dx%d", &bw, &bh); b = mktex(GL_TEXTURE_2D, bw, bh, tb, GL_NEAREST, GL_CLAMP); } (void)b; STEP(3); glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE); STEP(4);
     glActiveTextureARB(GL_TEXTURE0); glEnable(GL_TEXTURE_2D); glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, env0); STEP(5);
     glColor3f(1, 1, 1); glBegin(GL_QUADS);
     glMultiTexCoord2fARB(GL_TEXTURE0, 0, 0); glMultiTexCoord2fARB(GL_TEXTURE1, 0, 0); glVertex2f(10, 10); glMultiTexCoord2fARB(GL_TEXTURE0, 1, 0); glMultiTexCoord2fARB(GL_TEXTURE1, 1, 0); glVertex2f(100, 10);
@@ -485,7 +524,7 @@ static void a_multisample_attr(void)
     { "texgen", a_texgen, 0 }, { "texgen_sphere", a_texgen_sphere, 0 }, { "texmatrix", a_texmatrix, 0 }, { "texsubimage", a_texsubimage, 0 }, { "texsubimage1d", a_texsubimage1d, 0 }, \
     { "tex_objects", a_tex_objects, 0 }, { "tex_internal", a_tex_internal, 0 }, { "tex_bgra", a_tex_bgra, "GL_EXT_bgra" }, { "tex_abgr", a_tex_abgr, "GL_EXT_abgr" }, \
     { "tex_maxlevel", a_tex_maxlevel, 0 }, { "pixel_transfer", a_pixel_transfer, 0 }, { "pixel_store", a_pixel_store, 0 }, { "pixel_zoom", a_pixel_zoom_readback, 0 }, \
-    { "draw_front", a_draw_front, 0 }, { "color_matrix", a_color_matrix, "GL_SGI_color_matrix" }, { "post_matrix", a_post_matrix, "GL_SGI_color_matrix" }, { "pixel_map", a_pixel_map, 0 }, { "copypixels", a_copypixels, 0 }, { "two_side_light", a_two_side_light, 0 }, { "color_material", a_color_material, 0 }, \
+    { "draw_front", a_draw_front, 0 }, { "color_matrix", a_color_matrix, "GL_SGI_color_matrix" }, { "post_matrix", a_post_matrix, "GL_SGI_color_matrix" }, { "pixel_map", a_pixel_map, 0 }, { "spot_light", a_spot_light, 0 }, { "texgen_eye", a_texgen_eye, 0 }, { "copyteximage1d", a_copyteximage1d, 0 }, { "copypixels", a_copypixels, 0 }, { "two_side_light", a_two_side_light, 0 }, { "color_material", a_color_material, 0 }, \
     { "select", a_select, 0 }, { "feedback", a_feedback, 0 }, { "interleaved", a_interleaved, 0 }, { "fog_modes", a_fog_modes, 0 }, { "depth_funcs", a_depth_funcs, 0 }, \
     { "alpha_funcs", a_alpha_funcs, 0 }, { "logic_ops", a_logic_ops, 0 }, { "multitexture", a_multitexture, "GL_ARB_multitexture" }, { "multitexture_rep", a_multitexture_rep, "GL_ARB_multitexture" }, { "crossbar", a_crossbar, "GL_ARB_texture_env_crossbar" }, \
     { "blend_eq_sep", a_blend_eq_sep, "GL_EXT_blend_equation_separate" }, { "vbo", a_vbo, "GL_ARB_vertex_buffer_object" }, { "cva", a_cva, "GL_EXT_compiled_vertex_array" }, \

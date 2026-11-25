@@ -179,7 +179,7 @@ void mach64_texture_deleted(void *texobj)
     TEX_UNLOCK();
 }
 
-static mach64_tex_slot *g_cpu_slot; static uint32_t g_cpu_unit; static int g_cpu_multi;
+static mach64_tex_slot *g_cpu_slot, *g_cpu_slot2; static uint32_t g_cpu_unit; static int g_cpu_multi;
 static uint32_t potge(uint32_t v) { uint32_t r = 1; while (r < v) r <<= 1; return r; }
 static uint32_t ilog2u(uint32_t v) { uint32_t r = 0; while (v > 1) { v >>= 1; r++; } return r; }
 
@@ -1013,7 +1013,7 @@ int mach64_bind_texture(gld_context *ctx)
         if (bound) { mach64_tex_noinset = bound->noinset; mach64_tex_mscale[0] = bound->wscale[0]; mach64_tex_mscale[1] = bound->wscale[1]; mach64_tex_mbias[0] = bound->wbias[0]; mach64_tex_mbias[1] = bound->wbias[1]; }
     }
     tex_on = bound != 0;
-    g_cpu_slot = bound; g_cpu_unit = (uint32_t)punit; g_cpu_multi = bound2 != 0;
+    g_cpu_slot = bound; g_cpu_slot2 = bound2; g_cpu_unit = (uint32_t)punit; g_cpu_multi = bound2 != 0;
 
     if (!bound || !tex_on) {               /* no bound texture, or texturing off */
         /* Untextured gouraud: honour glEnable(GL_BLEND) on the shade pipe.  The
@@ -1278,14 +1278,29 @@ int mach64_env_needs_cpu(uint32_t gli)
 {
     const uint32_t *w = (const uint32_t *)(uintptr_t)gli;
     uint32_t en = w[0x6748 / 4], mode = w[0x674c / 4] >> 16;
-    if (!(en & (GLI_TEXANY_BITS | GLI_TEX3D_BIT)) || (w[(0x6748 + GLI_UNIT_STRIDE) / 4] & GLI_TEXANY_BITS)) return 0;
+    if (!(en & (GLI_TEXANY_BITS | GLI_TEX3D_BIT))) return 0;
+    if (w[(0x6748 + GLI_UNIT_STRIDE) / 4] & GLI_TEXANY_BITS) {              /* two units: one-pass hardware compositing, unless unit 1's COMBINE names a texture unit (crossbar) */
+        const uint32_t *u1 = w + (GLI_UNIT_STRIDE / 4); uint32_t k, sr[6];
+        if ((w[0x674c / 4 + GLI_UNIT_STRIDE / 4] >> 16) != ENV_COMBINE) return 0;
+        sr[0] = u1[0x6754 / 4] >> 16; sr[1] = u1[0x6754 / 4] & 0xffffu; sr[2] = u1[0x6758 / 4] >> 16; sr[3] = u1[0x6758 / 4] & 0xffffu; sr[4] = u1[0x675c / 4] >> 16; sr[5] = u1[0x675c / 4] & 0xffffu;
+        for (k = 0; k < 6; k++) if (sr[k] == 0x84c0u || sr[k] == 0x84c1u) return 1;
+        return 0;
+    }
     if (en & (GLI_TEXCUBE_BIT | GLI_TEX3D_BIT)) return 1;       /* off, or two units (one-pass hardware compositing) */
     if (mode == ENV_BLEND) return 1;
     if (mode != ENV_COMBINE) return 0;
     {   uint32_t rf = w[0x6750 / 4] >> 16, af = w[0x6750 / 4] & 0xffffu;
-#ifndef GLD_EXACT_ADD_SIGNED
-        if (rf == 0x8574u && (af == ENV_MODULATE || af == ENV_REPLACE)) return 0;     /* Sonic R's overbright ADD_SIGNED stays on the hardware approximation (see bind_texture): the CPU path would cost its frame rate */
+        /* ADD_SIGNED (+ MODULATE/REPLACE alpha) has no exact hardware form: the chip approximates it (Sonic R's overbright path).  Exact (CPU compositing) is the default;
+         * RAGE_ADD_SIGNED=fast in the environment (read once per process) keeps the hardware approximation for speed; -DGLD_APPROX_ADD_SIGNED makes that the build default. */
+        static int fast = -1;
+        if (fast < 0) { const char *e = getenv("RAGE_ADD_SIGNED");
+#ifdef GLD_APPROX_ADD_SIGNED
+            fast = !(e && (e[0] == 'e' || e[0] == 'E'));
+#else
+            fast = (e && (e[0] == 'f' || e[0] == 'F' || e[0] == 'h' || e[0] == 'H' || e[0] == 'a' || e[0] == 'A'));
 #endif
+        }
+        if (fast && rf == 0x8574u && (af == ENV_MODULATE || af == ENV_REPLACE)) return 0;
         (void)af; (void)rf;
         return 1;
     }
@@ -1385,13 +1400,11 @@ static int vol_env(gld_context *ctx, m64_cpuenv *o)
     return 1;
 }
 /* Fill *o for the CPU rasteriser: the bound texture's level 0 as ARGB8888 and the environment.  Returns 0 if the texture cannot be sampled on the CPU. */
-int mach64_cpu_env(gld_context *ctx, m64_cpuenv *o)
+static int slot_env(gld_context *ctx, mach64_tex_slot *sl, uint32_t u, m64_cpuenv *o)
 {
-    mach64_priv *p = MACH64_PRIV(ctx); mach64_tex_slot *sl = g_cpu_slot; uint32_t u = g_cpu_unit * GLI_UNIT_STRIDE, k;
+    mach64_priv *p = MACH64_PRIV(ctx); uint32_t k;
     memset(o, 0, sizeof *o);
-    if (g_cube_state) return cube_env(ctx, o);
-    if (g_vol_state) return vol_env(ctx, o);
-    if (!sl || g_cpu_multi || !sl->rsize) return 0;
+    if (!sl || !sl->rsize) return 0;
     if (sl->hwfmt == 11u || sl->hwfmt == 12u) return 0;
     if (!sl->cpu) {
         uint32_t w = sl->lvl_w[0], h = sl->lvl_h[0], n = w * h, bytes = (n * sl->bpt + 3u) & ~3u, done = 0; unsigned char *raw; int rc = 0;
@@ -1414,6 +1427,23 @@ int mach64_cpu_env(gld_context *ctx, m64_cpuenv *o)
     if (o->rscale < 1) o->rscale = 1; if (o->ascale < 1) o->ascale = 1;
     for (k = 0; k < 4; k++) { uint32_t q = fl_to_q8(mach64_gli_u32(ctx, 0x6738u + u + k * 4u)); o->ec[k] = (int)(q > 255u ? 255u : q); }
     return 1;
+}
+static m64_cpuenv g_env2;      /* unit 1 of a two-unit CPU composite (single render thread) */
+int mach64_cpu_env(gld_context *ctx, m64_cpuenv *o)
+{
+    mach64_tex_slot *sl = g_cpu_slot; uint32_t u = g_cpu_unit * GLI_UNIT_STRIDE;
+    memset(o, 0, sizeof *o);
+    if (g_cube_state) return cube_env(ctx, o);
+    if (g_vol_state) return vol_env(ctx, o);
+    if (!sl) return 0;
+    if (g_cpu_multi) {                                    /* only reached for crossbar: unit 0 and unit 1 are both sampled and combined here */
+        mach64_tex_slot *s2 = g_cpu_slot2;
+        if (!s2 || g_cpu_unit != 0) return 0;
+        if (!slot_env(ctx, s2, GLI_UNIT_STRIDE, &g_env2)) return 0;
+        if (!slot_env(ctx, sl, u, o)) return 0;
+        o->e2 = &g_env2; return 1;
+    }
+    return slot_env(ctx, sl, u, o);
 }
 
 /* glCopyTexSubImage (dispatch slot 0x74; reference glCopyTexSubImage_impl(ctx, texobj, face, level, xoff, yoff, zoff, srcx, srcy, w, h)): copy a rectangle of the colour buffer into a

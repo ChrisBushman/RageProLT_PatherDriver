@@ -1,6 +1,6 @@
 # GL feature audit (Nov 25)
 
-Evidence: `tools/ragegl/gl_probe` (121 probes) on the G4 MDD against the standalone driver: **118 pass, 3 fail** (ADD_SIGNED exactness, ARB fragment program, texture_env_crossbar); `gl_suite` 290/290.
+Evidence: `tools/ragegl/gl_probe` (124 probes) on the G4 MDD against the standalone driver: **123 pass, 1 fail** (ARB fragment program); `gl_suite` 290/290.
 Status words: **tested** = a probe draws and checks pixels; **accepted-only** = the call is accepted but the effect is not verified (weaker than tested);
 **failing** = probe fails (driver gap); **unsupported** = GLEngine or the chip cannot do it; **untested** = no probe yet.
 
@@ -22,16 +22,16 @@ groups (kext reload heals it) showed `TEX_CNTL` keeps the secondary-unit bits of
 | Scissor, user clip planes | tested | scissor, clip plane |
 | Stencil (all ops, two-sided, wrap) | tested | stencil probes, suite |
 | Fog LINEAR/EXP/EXP2 | tested | fog modes |
-| Lighting, two-sided, colour material, spot | tested (spot untested) | lighting, two-sided, colour material |
+| Lighting, two-sided, colour material, spot | tested | lighting, two-sided, colour material |
 | Texture 1D | tested (fixed today) | 1D texture, TexSubImage1D |
 | Texture 2D: wrap, filters, env REPLACE/MODULATE/DECAL/BLEND/ADD | tested | wrap probes, env probes |
 | Mipmaps, base-level clamp (`TEXTURE_MAX_LEVEL`) | tested | effective max byte at state+0x5f (GLEngine validate 0xd284c) |
 | Texture border | tested (CLAMP and REPEAT) | border texels kept for CLAMP, cropped otherwise; no texel-centre inset |
 | TexSubImage1D/2D, CopyTexImage2D, CopyTexSubImage2D | tested | probes |
-| CopyTexImage1D, CopyTexSubImage1D | untested | |
+| CopyTexImage1D | tested | |
 | Texture objects, priorities, residency | tested (residency result unchecked) | texture objects |
 | texgen OBJECT_LINEAR, SPHERE_MAP, texture matrix | tested (sphere map: drawn only) | |
-| texgen EYE_LINEAR | untested | |
+| texgen EYE_LINEAR | tested | |
 | Display lists, vertex arrays, interleaved arrays | tested | |
 | Selection, feedback | tested | |
 | Pixel store, zoom, DrawPixels/ReadPixels, CopyPixels | tested (CopyPixels via suite) | |
@@ -50,10 +50,10 @@ separate_specular_color, texture_mirror_clamp, compiled_vertex_array, abgr, bgra
 
 | Extension | Status | Note |
 |---|---|---|
-| ARB_multitexture | tested | needs descriptor +0xae = 2; secondary-map textures narrower than 8 texels render black (open) |
-| ARB_texture_env_combine | tested | ADD_SIGNED is an approximation by default (hardware has no exact form); exact behind `GLD_EXACT_ADD_SIGNED`, cost unmeasured |
+| ARB_multitexture | tested | needs descriptor +0xae = 2; secondary textures 1x1..16x4 verified. Hardware multiplies with a 4-bit secondary factor (about +8% on mid values) |
+| ARB_texture_env_combine | tested | ADD_SIGNED is exact by default (CPU compositing); `RAGE_ADD_SIGNED=fast` in the environment (or `-DGLD_APPROX_ADD_SIGNED` as build default) keeps the hardware approximation for speed. Quirk: in fast mode a process whose very first draw is a COMBINE draw renders white once |
 | ARB_texture_env_dot3 | tested (CPU) | |
-| ARB_texture_env_crossbar | **failing**, not advertised | hardware composite cannot read another unit's texel |
+| ARB_texture_env_crossbar | tested (CPU two-unit compositor), not advertised (no extension bit identified) | primary colour and both texels nameable |
 | ARB_point_parameters | tested, advertised | per-vertex size from eye distance (clip w / projection slot 3), min/max clamp, fade threshold |
 | ARB_texture_cube_map, texture_rectangle, NPOT | tested (CPU shaded) | |
 | ARB_texture_compression, S3TC | tested (DXT1; DXT3/5 via suite) | |

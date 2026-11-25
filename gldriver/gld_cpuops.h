@@ -106,9 +106,11 @@ static uint32_t vol_sample_q8(const m64_cpuenv *e, int32_t fu, int32_t fv, int32
 }
 static inline float fx_abs(float f) { uint32_t b; __builtin_memcpy(&b, &f, 4); b &= 0x7fffffffu; __builtin_memcpy(&f, &b, 4); return f; }
 static inline int sat255(int v) { return v < 0 ? 0 : v > 255 ? 255 : v; }
+/* Two-unit CPU compositing (ARB_texture_env_crossbar): while unit 1 is evaluated, the primary colour and both units' texels are reachable by name. */
+static struct { int on; uint32_t pri, t0, t1; } g_xb;
 static int env_arg(const m64_cpuenv *e, uint32_t src, uint32_t op, int ch, uint32_t cf, uint32_t ct)    /* ch 0..2 = R,G,B, 3 = A */
 {
-    uint32_t c = src == 0x1702u ? ct : src == 0x8576u ? (((uint32_t)e->ec[3] << 24) | ((uint32_t)e->ec[0] << 16) | ((uint32_t)e->ec[1] << 8) | (uint32_t)e->ec[2]) : cf;     /* TEXTURE / CONSTANT / PRIMARY and PREVIOUS (unit 0) */
+    uint32_t c = (g_xb.on && src == 0x84c0u) ? g_xb.t0 : (g_xb.on && src == 0x84c1u) ? g_xb.t1 : (g_xb.on && src == 0x8577u) ? g_xb.pri : src == 0x1702u ? ct : src == 0x8576u ? (((uint32_t)e->ec[3] << 24) | ((uint32_t)e->ec[0] << 16) | ((uint32_t)e->ec[1] << 8) | (uint32_t)e->ec[2]) : cf;     /* TEXTURE / CONSTANT / PRIMARY and PREVIOUS (unit 0) */
     int v;
     if (op == 0x0302u || op == 0x0303u) v = (int)(c >> 24); else v = (int)((c >> (ch == 0 ? 16 : ch == 1 ? 8 : ch == 2 ? 0 : 24)) & 255u);
     return (op == 0x0301u || op == 0x0303u) ? 255 - v : v;
