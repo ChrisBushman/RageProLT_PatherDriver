@@ -191,6 +191,49 @@ static void t_alphatest(void)
     printf("    (alpha .75 pixel = 0x%08x)\n", px(80, 50));
     CHECK("alpha test GREATER 0.5: alpha 0.75 passes", ch(px(80, 50), 8) > 200);
 }
+/* glReadPixels / glDrawPixels / glCopyPixels / glBitmap through the renderer hook slots (headless: no GLEngine gc, so default pack/unpack state) */
+static void t_pixelops(void)
+{
+    unsigned char rd[4 * 4 * 4], img[4 * 4 * 4], bm[4]; float rp[3]; int i; unsigned short z2[2];
+    default_state(); sync(); clear_rt(0);
+    tri(20, 16, 0xffff0000u, 140, 16, 0xffff0000u, 80, 130, 0xffff0000u, 0.0f); mach64_flush_batch(ctx); rgb_fence(&P->rb);
+    memset(rd, 0, sizeof rd);
+    mach64_ctl08(ctx, 80, (int)P->rb.h - 1 - 50, 1, 1, 0x1908u, 0x1401u, rd);       /* GL y = H-1-fb row */
+    printf("    (readpixels RGBA at (80,50 fb): %02x %02x %02x %02x)\n", rd[0], rd[1], rd[2], rd[3]);
+    CHECK("glReadPixels RGBA/UBYTE: red triangle pixel", rd[0] > 230 && rd[1] < 16 && rd[2] < 16 && rd[3] == 255);
+    memset(rd, 0, sizeof rd);
+    mach64_ctl08(ctx, 80, (int)P->rb.h - 1 - 50, 1, 1, 0x80E0u, 0x1401u, rd);       /* BGR */
+    CHECK("glReadPixels BGR/UBYTE: byte order", rd[2] > 230 && rd[0] < 16);
+    mach64_ctl08(ctx, 80, (int)P->rb.h - 1 - 50, 1, 1, 0x1902u, 0x1403u, z2);
+    printf("    (depth readback %u)\n", z2[0]);
+    CHECK("glReadPixels depth: 16-bit value in range, not the cleared far plane", z2[0] != 0xffff && z2[0] != 0);
+    /* DrawPixels: 4x4 RGBA, left half green right half blue, at raster (100,100) */
+    for (i = 0; i < 16; i++) { img[i*4] = 0; img[i*4+1] = (i & 3) < 2 ? 255 : 0; img[i*4+2] = (i & 3) < 2 ? 0 : 255; img[i*4+3] = 255; }
+    rp[0] = 100.0f; rp[1] = 100.0f; rp[2] = 0.0f;
+    clear_rt(0); mach64_ctl0c(ctx, (uint32_t)(uintptr_t)rp, 4, 4, 0x1908u, 0x1401u, (uint32_t)(uintptr_t)img);
+    memset(rd, 0, 4); mach64_ctl08(ctx, 101, 101, 1, 1, 0x1908u, 0x1401u, rd);
+    CHECK("glDrawPixels: left half green", rd[1] > 240 && rd[0] < 16 && rd[2] < 16);
+    memset(rd, 0, 4); mach64_ctl08(ctx, 102, 101, 1, 1, 0x1908u, 0x1401u, rd);
+    CHECK("glDrawPixels: right half blue", rd[2] > 240 && rd[1] < 16);
+    memset(rd, 0xaa, 4); mach64_ctl08(ctx, 104, 101, 1, 1, 0x1908u, 0x1401u, rd);
+    CHECK("glDrawPixels: outside the image untouched (black)", rd[0] < 16 && rd[1] < 16 && rd[2] < 16);
+    /* CopyPixels (overlap-safe): copy the 4x4 block from (100,100) to raster (102,100) */
+    rp[0] = 102.0f; mach64_ctl10(ctx, (uint32_t)(uintptr_t)rp, 100, 100, 4, 4, 0x1800u);
+    memset(rd, 0, 4); mach64_ctl08(ctx, 102, 101, 1, 1, 0x1908u, 0x1401u, rd);
+    CHECK("glCopyPixels: overlapping copy, new left half green", rd[1] > 240 && rd[2] < 16);
+    memset(rd, 0, 4); mach64_ctl08(ctx, 105, 101, 1, 1, 0x1908u, 0x1401u, rd);
+    CHECK("glCopyPixels: far right blue", rd[2] > 240 && rd[1] < 16);
+    /* Bitmap: 8x1 mask 1010 0000 at raster (10,10), colour white (no gc: white) */
+    bm[0] = 0xa0; rp[0] = 10.0f; rp[1] = 10.0f;
+    clear_rt(0); mach64_ctl14(ctx, (uint32_t)(uintptr_t)rp, 8, 1, 0, 0, (uint32_t)(uintptr_t)bm);
+    memset(rd, 0, 4); mach64_ctl08(ctx, 10, 10, 1, 1, 0x1908u, 0x1401u, rd);
+    CHECK("glBitmap: set bit drawn", rd[0] > 240 && rd[1] > 240);
+    memset(rd, 0xaa, 4); mach64_ctl08(ctx, 11, 10, 1, 1, 0x1908u, 0x1401u, rd);
+    CHECK("glBitmap: clear bit skipped", rd[0] < 16 && rd[1] < 16);
+    memset(rd, 0, 4); mach64_ctl08(ctx, 12, 10, 1, 1, 0x1908u, 0x1401u, rd);
+    CHECK("glBitmap: second set bit drawn", rd[0] > 240);
+    rgb_fence(&P->rb);
+}
 static void t_prims(void)
 {
     unsigned char *vb; int n;
@@ -1303,7 +1346,7 @@ static void free_tex(void *t) { if (!t) return; free((void *)(uintptr_t)*(uint32
 
 static const struct { const char *name; void (*fn)(void); } TESTS[] = {
     {"gouraud", t_gouraud}, {"flat", t_flat}, {"colormask", t_colormask}, {"depth", t_depth}, {"blend", t_blend},
-    {"alphatest", t_alphatest}, {"prims", t_prims}, {"clear", t_clear}, {"prims2", t_prims2}, {"fog", t_fog}, {"stipple", t_stipple}, {"logicop", t_logicop}, {"tex_replace", t_tex_replace}, {"multitex", t_multitex}, {"dstalpha", t_dstalpha}, {"texfmt8", t_texfmt8}, {"texfmt", t_texfmt}, {"texfmt_fallback", t_texfmt_fallback}, {"texfmt_mt", t_texfmt_mt}, {"specular", t_specular}, {"multitex_min", t_multitex_min}, {"tex_alpha", t_tex_alpha}, {"tex_wrap", t_tex_wrap}, {"tex_filter", t_tex_filter}, {"tex_alpha_edge", t_tex_alpha_edge}, {"tex_alpha_decal_probe", t_tex_alpha_decal_probe}, {"tex_alpha_bilinear", t_tex_alpha_bilinear}, {"tex_churn", t_tex_churn}, {"tex_highptr", t_tex_highptr}, {"tex_mip", t_tex_mip}, {"tex_mip_nonsq", t_tex_mip_nonsq}, {"tex_bit8", t_tex_bit8}, {"tex_lodbias", t_tex_lodbias}, {"tex_mip_prims", t_tex_mip_prims}, {"tex_mip_fog", t_tex_mip_fog}, {"tex_mip_gouraud", t_tex_mip_gouraud}, {"tex_hwmip", t_tex_hwmip}, {"tex_minlin", t_tex_minlin}, {"multictx", t_multictx}, 
+    {"alphatest", t_alphatest}, {"prims", t_prims}, {"pixelops", t_pixelops}, {"clear", t_clear}, {"prims2", t_prims2}, {"fog", t_fog}, {"stipple", t_stipple}, {"logicop", t_logicop}, {"tex_replace", t_tex_replace}, {"multitex", t_multitex}, {"dstalpha", t_dstalpha}, {"texfmt8", t_texfmt8}, {"texfmt", t_texfmt}, {"texfmt_fallback", t_texfmt_fallback}, {"texfmt_mt", t_texfmt_mt}, {"specular", t_specular}, {"multitex_min", t_multitex_min}, {"tex_alpha", t_tex_alpha}, {"tex_wrap", t_tex_wrap}, {"tex_filter", t_tex_filter}, {"tex_alpha_edge", t_tex_alpha_edge}, {"tex_alpha_decal_probe", t_tex_alpha_decal_probe}, {"tex_alpha_bilinear", t_tex_alpha_bilinear}, {"tex_churn", t_tex_churn}, {"tex_highptr", t_tex_highptr}, {"tex_mip", t_tex_mip}, {"tex_mip_nonsq", t_tex_mip_nonsq}, {"tex_bit8", t_tex_bit8}, {"tex_lodbias", t_tex_lodbias}, {"tex_mip_prims", t_tex_mip_prims}, {"tex_mip_fog", t_tex_mip_fog}, {"tex_mip_gouraud", t_tex_mip_gouraud}, {"tex_hwmip", t_tex_hwmip}, {"tex_minlin", t_tex_minlin}, {"multictx", t_multictx}, 
 };
 
 int main(int argc, char **argv)
