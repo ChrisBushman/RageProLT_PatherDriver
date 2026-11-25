@@ -1314,14 +1314,15 @@ int mach64_env_needs_cpu(uint32_t gli)
     if (mode == ENV_BLEND) return 1;
     if (mode != ENV_COMBINE) return 0;
     {   uint32_t rf = w[0x6750 / 4] >> 16, af = w[0x6750 / 4] & 0xffffu;
-        /* ADD_SIGNED (+ MODULATE/REPLACE alpha) has no exact hardware form: the chip approximates it (Sonic R's overbright path).  Exact (CPU compositing) is the default;
-         * RAGE_ADD_SIGNED=fast in the environment (read once per process) keeps the hardware approximation for speed; -DGLD_APPROX_ADD_SIGNED makes that the build default. */
+        /* ADD_SIGNED (+ MODULATE/REPLACE alpha) has no exact hardware form: the chip approximates it (Sonic R's overbright path).  Exact needs the CPU compositor, which costs a
+         * kernel round trip per triangle: Sonic R's title screen crawled with it (measured Nov 25), so the hardware approximation is the DEFAULT.
+         * RAGE_ADD_SIGNED=exact in the environment (read once per process) selects exact CPU compositing; -DGLD_EXACT_ADD_SIGNED makes that the build default. */
         static int fast = -1;
         if (fast < 0) { const char *e = getenv("RAGE_ADD_SIGNED");
-#ifdef GLD_APPROX_ADD_SIGNED
-            fast = !(e && (e[0] == 'e' || e[0] == 'E'));
+#ifdef GLD_EXACT_ADD_SIGNED
+            fast = e && (e[0] == 'f' || e[0] == 'F' || e[0] == 'h' || e[0] == 'H' || e[0] == 'a' || e[0] == 'A');
 #else
-            fast = (e && (e[0] == 'f' || e[0] == 'F' || e[0] == 'h' || e[0] == 'H' || e[0] == 'a' || e[0] == 'A'));
+            fast = !(e && (e[0] == 'e' || e[0] == 'E'));
 #endif
         }
         if (fast && rf == 0x8574u && (af == ENV_MODULATE || af == ENV_REPLACE)) return 0;

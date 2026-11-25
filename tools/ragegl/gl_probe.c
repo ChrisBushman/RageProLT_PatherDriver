@@ -633,6 +633,7 @@ int main(int argc, char **argv)
     GLint rid_req = getenv("PROBE_RID") ? (GLint)strtol(getenv("PROBE_RID"), 0, 0) : 0;
     GLint attrs[] = { AGL_RGBA, AGL_DOUBLEBUFFER, AGL_ACCELERATED, AGL_DEPTH_SIZE, 16, AGL_STENCIL_SIZE, 8, AGL_RENDERER_ID, 0, AGL_NONE };
     setvbuf(stdout, NULL, _IONBF, 0);
+    setenv("RAGE_ADD_SIGNED", "exact", 0);                  /* the driver defaults to the fast hardware approximation; the probes check the exact path */
     if (CreateNewWindow(kDocumentWindowClass, kWindowStandardDocumentAttributes, &bounds, &win) || !win) { printf("no window\n"); return 1; }
     ShowWindow(win);
     { CGDirectDisplayID ids[8]; CGDisplayCount nd = 0, k; CGGetActiveDisplayList(8, ids, &nd);

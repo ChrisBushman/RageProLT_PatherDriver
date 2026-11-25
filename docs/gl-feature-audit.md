@@ -51,7 +51,7 @@ separate_specular_color, texture_mirror_clamp, compiled_vertex_array, abgr, bgra
 | Extension | Status | Note |
 |---|---|---|
 | ARB_multitexture | tested | needs descriptor +0xae = 2; secondary textures 1x1..16x4 verified. Hardware multiplies with a 4-bit secondary factor (about +8% on mid values) |
-| ARB_texture_env_combine | tested | ADD_SIGNED is exact by default (CPU compositing); `RAGE_ADD_SIGNED=fast` in the environment (or `-DGLD_APPROX_ADD_SIGNED` as build default) keeps the hardware approximation for speed. Fast mode result for the probe is 198,132,66 (exact: 123,198,198), so the probe fails in fast mode by design |
+| ARB_texture_env_combine | tested | ADD_SIGNED: the hardware approximation is the DEFAULT (exact needs the CPU compositor: one kernel round trip per triangle made Sonic R's title screen crawl). `RAGE_ADD_SIGNED=exact` in the environment selects exact CPU compositing (the probes set it); `-DGLD_EXACT_ADD_SIGNED` makes exact the build default |
 | ARB_texture_env_dot3 | tested (CPU) | |
 | ARB_texture_env_crossbar | tested (CPU two-unit compositor), not advertised (no extension bit identified) | primary colour and both texels nameable |
 | ARB_point_parameters | tested, advertised | per-vertex size from eye distance (clip w / projection slot 3), min/max clamp, fade threshold |
@@ -79,3 +79,8 @@ CPU 2D textures use one mip level per triangle (nearest level from the texel/pix
 
 ## Resolved (Nov 25): texture deleted while its draw was unsubmitted
 glDeleteTextures freed the texture's VRAM immediately, but the draw that sampled it could still sit in the unsubmitted batch; the kernel validates texture offsets against live allocations, so that draw sampled garbage (a stale red block in the probes). Apps that delete a texture before the frame ends (common) were exposed. `mach64_texture_deleted` now takes the context and submits the batch first when the slot was bound in the current batch. Regression probe: `tex_delete_before_read`. The bug looked like a heisenbug (any extra getenv/fprintf call moved the batch flush) and took a long bisect; lesson: when a probe result changes with unrelated code, suspect batching/lifetime races before hardware state.
+
+## Phase 4 notes
+- Chess (windowed, Rage display): board, textured pieces, lighting correct.
+- Sonic R (windowed): title screen renders; profiling with `sample` showed the CPU compositor (mach64_cb_open -> win_get kernel readback per triangle) took ~90% of the time under exact ADD_SIGNED, then `face_build` (stencil tables rebuilt every draw) ~25%. Fixed: hardware approximation default, face tables cached. Title is now frame-capped (WaitForFrameCap sleeping).
+- Display setup: apps open on the main display, so `mach64_arrange rage` (tools/mach64_arrange.c, session scope) makes the Rage display primary; gl_probe then needs AGL_MAIN=1. `~/drag` and `~/key` on the MDD move the mouse / press keys through CGPostMouseEvent / CGPostKeyboardEvent.

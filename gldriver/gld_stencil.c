@@ -35,7 +35,7 @@
 #define F_ALWAYS 0x207u
 
 typedef struct {
-    uint16_t func, sfail, dpfail, dppass; uint8_t ref, vmask, wmask;
+    uint16_t func, sfail, dpfail, dppass; uint8_t ref, vmask, wmask; uint8_t built;      /* built: the tables below match the fields above */
     uint8_t spass[256], nsf[256], ndf[256], ndp[256];      /* per old stencil value: test passes / value after sfail, dpfail, dppass (write mask applied) */
 } zs_face;
 enum { LOC_UNI, LOC_CPU, LOC_HW };
@@ -228,12 +228,12 @@ static void face_build(zs_face *f)
 static void face_read(zs_face *f, uint32_t gli, uint32_t face)
 {
     uint32_t fb = gli + 0x6700u + face * 0x10u;
-    f->func = *(const uint16_t *)(uintptr_t)(fb + 0x14); f->sfail = *(const uint16_t *)(uintptr_t)(fb + 0x16);
-    f->dpfail = *(const uint16_t *)(uintptr_t)(fb + 0x18); f->dppass = *(const uint16_t *)(uintptr_t)(fb + 0x1a);
-    f->ref = (uint8_t)*(const uint32_t *)(uintptr_t)(fb + 0x10); f->vmask = (uint8_t)*(const uint32_t *)(uintptr_t)(fb + 0x0c);
-    f->wmask = (uint8_t)*(const uint32_t *)(uintptr_t)(gli + 0x63acu + face * 4u);
-    if (f->func < F_NEVER || f->func > F_ALWAYS) f->func = F_ALWAYS;
-    face_build(f);
+    uint16_t func = *(const uint16_t *)(uintptr_t)(fb + 0x14), sfail = *(const uint16_t *)(uintptr_t)(fb + 0x16), dpfail = *(const uint16_t *)(uintptr_t)(fb + 0x18), dppass = *(const uint16_t *)(uintptr_t)(fb + 0x1a);
+    uint8_t ref = (uint8_t)*(const uint32_t *)(uintptr_t)(fb + 0x10), vmask = (uint8_t)*(const uint32_t *)(uintptr_t)(fb + 0x0c), wmask = (uint8_t)*(const uint32_t *)(uintptr_t)(gli + 0x63acu + face * 4u);
+    if (func < F_NEVER || func > F_ALWAYS) func = F_ALWAYS;
+    if (f->built && f->func == func && f->sfail == sfail && f->dpfail == dpfail && f->dppass == dppass && f->ref == ref && f->vmask == vmask && f->wmask == wmask) return;     /* unchanged: no table rebuild (this ran on every draw) */
+    f->func = func; f->sfail = sfail; f->dpfail = dpfail; f->dppass = dppass; f->ref = ref; f->vmask = vmask; f->wmask = wmask;
+    face_build(f); f->built = 1;
 }
 /* can the chip's Z buffer run this exactly?  -> reference, Z function, Z write op */
 static int mode1_ok(const zs_face *f, uint32_t *ref, uint32_t *zfunc, uint32_t *wop)
