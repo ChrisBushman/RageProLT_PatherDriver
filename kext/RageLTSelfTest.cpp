@@ -177,7 +177,7 @@ IOReturn RageLTDevice::engineSelfTest(uint32_t mask, uint32_t *passmask, uint32_
         }
         tri[n++] = MACH64_ONE_OVER_AREA_UC; tri[n++] = 0x37995b4du;
         { uint32_t s0 = fenceSubmitted();
-          if (submitBatch(owner, tri, n / 2) == kIOReturnSuccess && fenceSubmitted() == s0 + 1 && fenceCompleted() == fenceSubmitted()) {
+          if (submitBatch(owner, tri, n / 2) == kIOReturnSuccess && fenceSubmitted() == s0 + 1 && waitFence(fenceSubmitted()) == kIOReturnSuccess && fenceCompleted() == fenceSubmitted()) {   /* DMA returns early; the fence completes at waitFence */
               SCAN(3, ex = (x >= 64 && x <= 127 && y >= 32 && y <= 95) ? C3 : C1);     /* triangle covers the whole box (4096 px), none outside */
               if (!bad_outside) pass |= 1u << 3;
           } }

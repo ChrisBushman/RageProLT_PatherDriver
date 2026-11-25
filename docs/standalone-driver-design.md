@@ -379,3 +379,10 @@ Results (same G4 boot, tools/ragegl): ragegl_test 27/27 with DMA and with PIO, r
 | 20000 x 5 | 24 | 10 |
 
 DMA is 1.5x (single triangle batches) to 4.7x (large batches) faster in submission cost.  Open: texture upload by DMA (VRAM writes still use the CPU path), interrupt completion (O6).
+
+### 11.17 Backend library and hardware core test (G4, Nov 24)
+
+* Kernel: **texture binding** (`RAGE_GL_SET_TEXTURE`): TEX_0..10_OFF / SECONDARY_TEX_OFF and the texel formats (DP_PIX_WIDTH[31:28], [7:4]) are kernel state per context, validated against ownership and written by the kernel prologue (PIO and DMA); the engine only READS texels, so only the start of a bound level is checked.  DMA stream coalesces consecutive registers into one packet (a vertex run must stay a burst or per-vertex colour does not latch).
+* `vramCopyIn` now reads back from the last written word before returning: posted writes must reach VRAM before the engine fetches them as texels (without it the first textured draw sampled garbage; with it 7/7 runs exact).
+* `gldriver/rage_backend.[ch]` (new bundle's only hardware door): open, surface (colour + Z from the kernel allocator), flush of the existing packet emitter's stream (kernel-owned registers are routed to the kernel calls, not written), fill, fence, present, texture alloc/upload/readback.
+* `tools/ragegl/gldcore_test` on the G4 (22 checks, repeated 7x identical): gouraud via DMA (corner colours dominate, centroid balanced 10/21/10), depth test with Z buffer in either draw order, RGB565 textured quad exact in all four quadrants, scissor containment through the bundle path (a stream trying to widen the scissor is ignored), present, 14 kernel-owned register writes routed away.

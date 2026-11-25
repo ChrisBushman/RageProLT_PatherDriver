@@ -110,15 +110,51 @@ IOReturn RageLTDevice::setZBuffer(uint32_t owner, uint32_t off, uint32_t pitch_p
     return rc;
 }
 
-/* The kernel's own prologue: everything that decides WHERE the engine writes. */
+IOReturn RageLTDevice::setTexture(uint32_t owner, uint32_t index, uint32_t off, uint32_t fmt)
+{
+    struct rage_ctx *c; IOReturn rc = kIOReturnBadArgument;
+    if (index > 11u || !(fmt == 0 || fmt == 3 || fmt == 4 || fmt == 6 || fmt == 15)) return rc;
+    IOLockLock(fLock);
+    c = ctxFor(owner, false);
+    if (c) {
+        if (off == 0xfffffffeu) {                                                      /* format only */
+            if (fmt) { if (index == 11u) c->tex2_fmt = fmt; else c->tex_fmt = fmt; }
+            rc = kIOReturnSuccess;
+        }
+        else if (off == 0xffffffffu) { c->tex_set &= ~(1u << index); rc = kIOReturnSuccess; }
+        else if (!(off & 7u) && rage_vram_owns(&fVram, off, 8u, owner)) {            /* only the start is checked: the engine READS beyond it, never writes */
+            c->tex_off[index] = off; c->tex_set |= 1u << index;
+            if (fmt) { if (index == 11u) c->tex2_fmt = fmt; else c->tex_fmt = fmt; }
+            rc = kIOReturnSuccess;
+        }
+    }
+    IOLockUnlock(fLock);
+    return rc;
+}
+
+/* The kernel's own prologue: everything that decides WHERE the engine writes or reads. */
+uint32_t RageLTDevice::prologuePairs(const struct rage_ctx *c, uint32_t *o)
+{
+    uint32_t n = 0, k, dpw = c->tgt_bpp == 2 ? RAGE_PIXW_565 : 0x60060666u;
+    if (c->tex_fmt) dpw = (dpw & ~0xf0000000u) | (c->tex_fmt << 28);
+    if (c->tex2_fmt) dpw = (dpw & ~0xf0u) | (c->tex2_fmt << 4);
+#define PR(r, v) do { o[n++] = (r); o[n++] = (v); } while (0)
+    PR(RAGE_R_DST_CNTL, 3u);
+    PR(MACH64_DP_PIX_WIDTH, dpw);
+    PR(MACH64_DST_OFF_PITCH, ((c->tgt_pitch / 8u) << 22) | (c->tgt_off >> 3));
+    PR(MACH64_SC_LEFT_RIGHT, (c->sc_r << 16) | c->sc_l);
+    PR(MACH64_SC_TOP_BOTTOM, (c->sc_b << 16) | c->sc_t);
+    if (c->z_set) PR(MACH64_Z_OFF_PITCH, ((c->z_pitch / 8u) << 22) | (c->z_off >> 3));
+    for (k = 0; k < 11u; k++) if (c->tex_set & (1u << k)) PR(MACH64_TEX_0_OFF + 4u * k, c->tex_off[k]);
+    if (c->tex_set & (1u << 11)) PR(MACH64_SECONDARY_TEX_OFF, c->tex_off[11]);
+#undef PR
+    return n / 2;
+}
+
 static void eng_prologue(volatile uint8_t *regs, const struct rage_ctx *c)
 {
-    eng_wq(regs, RAGE_R_DST_CNTL, 3u);
-    eng_wq(regs, MACH64_DP_PIX_WIDTH, c->tgt_bpp == 2 ? RAGE_PIXW_565 : 0x60060666u);
-    eng_wq(regs, MACH64_DST_OFF_PITCH, ((c->tgt_pitch / 8u) << 22) | (c->tgt_off >> 3));
-    eng_wq(regs, MACH64_SC_LEFT_RIGHT, (c->sc_r << 16) | c->sc_l);
-    eng_wq(regs, MACH64_SC_TOP_BOTTOM, (c->sc_b << 16) | c->sc_t);
-    if (c->z_set) eng_wq(regs, MACH64_Z_OFF_PITCH, ((c->z_pitch / 8u) << 22) | (c->z_off >> 3));
+    uint32_t p[64], n = RageLTDevice::prologuePairs(c, p), i;
+    for (i = 0; i < n; i++) eng_wq(regs, p[2 * i], p[2 * i + 1]);
 }
 
 IOReturn RageLTDevice::fenceWait(uint32_t seq)

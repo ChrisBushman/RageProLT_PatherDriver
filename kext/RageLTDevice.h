@@ -17,6 +17,7 @@ struct rage_ctx {
     uint32_t tgt_off, tgt_pitch, tgt_bpp, tgt_w, tgt_h;   /* tgt_bpp 0 = no target set */
     uint32_t sc_l, sc_r, sc_t, sc_b;
     uint32_t z_off, z_pitch, z_set;
+    uint32_t tex_off[12], tex_set, tex_fmt, tex2_fmt;   /* TEX_0..10_OFF, SECONDARY_TEX_OFF (index 11); tex_set = bitmask of bound ones; texel formats (DP_PIX_WIDTH) */
 };
 #define RAGE_MAX_CTX 16u
 #define RAGE_MAX_FB  4u
@@ -72,6 +73,8 @@ public:
     IOReturn     setRenderTarget(uint32_t owner, uint32_t off, uint32_t pitch_px, uint32_t bpp, uint32_t w, uint32_t h);
     IOReturn     setScissor(uint32_t owner, int32_t l, int32_t r, int32_t t, int32_t b);
     IOReturn     setZBuffer(uint32_t owner, uint32_t off, uint32_t pitch_px);
+    IOReturn     setTexture(uint32_t owner, uint32_t index, uint32_t off, uint32_t fmt);   /* index 0..10 = TEX_n_OFF, 11 = SECONDARY_TEX_OFF; off 0xffffffff unbinds */
+    static uint32_t prologuePairs(const struct rage_ctx *c, uint32_t *out);                  /* kernel-owned state as {reg,val} pairs (max 32 pairs) */
     IOReturn     fillRect(uint32_t owner, int32_t x, int32_t y, int32_t w, int32_t h, uint32_t color565);
     IOReturn     present(uint32_t owner, uint32_t sx, uint32_t sy, uint32_t w, uint32_t h, uint32_t dx, uint32_t dy);
     IOReturn     vramCopyIn(uint32_t owner, uint32_t off, const uint8_t *src, uint32_t len, uint32_t flags);     /* src = kernel buffer */

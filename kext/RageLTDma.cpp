@@ -95,16 +95,19 @@ IOReturn RageLTDevice::dmaSubmit(const struct rage_ctx *c, const uint32_t *pairs
     if (rc) return rc;
     if (eng_wait_idle(fRegs)) return kIOReturnTimeout;
 #define PUT(reg, val) do { OSWriteLittleInt32((void *)w, 4u * n, MACH64_ADRINDEX(reg)); OSWriteLittleInt32((void *)w, 4u * n + 4u, (val)); n += 2; } while (0)
-    PUT(RAGE_R_DST_CNTL, 3u);
-    PUT(MACH64_DP_PIX_WIDTH, c->tgt_bpp == 2 ? RAGE_PIXW_565 : 0x60060666u);
-    PUT(MACH64_DST_OFF_PITCH, ((c->tgt_pitch / 8u) << 22) | (c->tgt_off >> 3));
-    PUT(MACH64_SC_LEFT_RIGHT, (c->sc_r << 16) | c->sc_l);
-    PUT(MACH64_SC_TOP_BOTTOM, (c->sc_b << 16) | c->sc_t);
-    if (c->z_set) PUT(MACH64_Z_OFF_PITCH, ((c->z_pitch / 8u) << 22) | (c->z_off >> 3));
-    for (i = 0; i < npairs; i++) {
-        uint32_t val = pairs[2 * i + 1];
-        if (pairs[2 * i] == MACH64_Z_CNTL && !c->z_set) val = 0;
-        PUT(pairs[2 * i], val);
+    { uint32_t pp[64], np = prologuePairs(c, pp), k; for (k = 0; k < np; k++) PUT(pp[2 * k], pp[2 * k + 1]); }
+    /* Consecutive registers (reg, reg+4, ...) leave as ONE packet: the burst form is what latches per-vertex colour into the interpolator (a vertex
+     * written as individual register packets gives flat colour, docs/re-notes/bus-master-ring.md), so a client's {S,T,W,SPEC,Z,ARGB,X_Y} run must stay a run. */
+    for (i = 0; i < npairs; ) {
+        uint32_t reg = pairs[2 * i], run = 1, k;
+        while (i + run < npairs && run < 32u && pairs[2 * (i + run)] == reg + 4u * run && (reg < 0x400u) == (reg + 4u * run < 0x400u)) run++;
+        OSWriteLittleInt32((void *)w, 4u * n, MACH64_ADRINDEX(reg) | ((run - 1u) << 16)); n++;
+        for (k = 0; k < run; k++) {
+            uint32_t val = pairs[2 * (i + k) + 1];
+            if (pairs[2 * (i + k)] == MACH64_Z_CNTL && !c->z_set) val = 0;
+            OSWriteLittleInt32((void *)w, 4u * n, val); n++;
+        }
+        i += run;
     }
     PUT(MACH64_SRC_CNTL, 0);                                           /* terminator: leaves SRC_CNTL as the PIO path expects */
 #undef PUT

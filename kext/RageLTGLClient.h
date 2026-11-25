@@ -39,6 +39,7 @@ public:
     IOReturn selVramWrite(uint32_t off, uint32_t addr, uint32_t len, uint32_t flags);
     IOReturn selVramRead(uint32_t off, uint32_t addr, uint32_t len, uint32_t flags);
     IOReturn selDisplay(uint32_t *gen, uint32_t *w, uint32_t *h, uint32_t *pitch, uint32_t *bpp, uint32_t *base);
+    IOReturn selSetTexture(uint32_t index, uint32_t off, uint32_t fmt);
     IOReturn selConfig(uint32_t key, uint32_t value);
     IOReturn selScanoutRead(uint32_t byteOff, uint32_t addr, uint32_t len);
 };

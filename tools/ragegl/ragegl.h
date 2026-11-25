@@ -50,3 +50,4 @@ static inline kern_return_t ragegl_scanout_read(ragegl_t c, uint32_t boff, void 
 { return RGL_CALL(RAGE_GL_SCANOUT_READ, 3, 0, boff, (uint32_t)(uintptr_t)p, len); }
 #endif
 static inline kern_return_t ragegl_config(ragegl_t c, uint32_t key, uint32_t v) { return RGL_CALL(RAGE_GL_CONFIG, 2, 0, key, v); }
+static inline kern_return_t ragegl_texture(ragegl_t c, uint32_t index, uint32_t off, uint32_t fmt) { return RGL_CALL(RAGE_GL_SET_TEXTURE, 3, 0, index, off, fmt); }

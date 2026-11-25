@@ -171,7 +171,12 @@ IOReturn RageLTDevice::vramCopyIn(uint32_t owner, uint32_t off, const uint8_t *s
     if (rage_vram_owns(&fVram, off, len, owner)) {
         rc = kIOReturnSuccess;
         if (fEngineLive && idleWait()) rc = kIOReturnTimeout;      /* the CPU must not touch the aperture while the engine writes it */
-        else for (i = 0; i < len; i += 4) OSWriteLittleInt32((void *)vram, off + i, xfer_word(src + i, flags));
+        else {
+            for (i = 0; i < len; i += 4) OSWriteLittleInt32((void *)vram, off + i, xfer_word(src + i, flags));
+            __asm__ volatile("sync" ::: "memory");
+            (void)OSReadLittleInt32((void *)vram, off + len - 4);       /* read back from the last word written: posted writes must have reached VRAM before the engine reads them as texels */
+            __asm__ volatile("sync" ::: "memory");
+        }
     }
     IOLockUnlock(fLock);
     return rc;

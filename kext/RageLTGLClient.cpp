@@ -40,6 +40,7 @@ bool RageLTGLClient::start(IOService *provider)
     M(RAGE_GL_VRAM_WRITE,  selVramWrite,  kIOUCScalarIScalarO, 4, 0);
     M(RAGE_GL_VRAM_READ,   selVramRead,   kIOUCScalarIScalarO, 4, 0);
     M(RAGE_GL_DISPLAY,     selDisplay,    kIOUCScalarIScalarO, 0, 6);
+    M(RAGE_GL_SET_TEXTURE, selSetTexture, kIOUCScalarIScalarO, 3, 0);
     M(RAGE_GL_CONFIG,      selConfig,     kIOUCScalarIScalarO, 2, 0);
     M(RAGE_GL_SCANOUT_READ, selScanoutRead, kIOUCScalarIScalarO, 3, 0);
 #undef M
@@ -167,6 +168,9 @@ IOReturn RageLTGLClient::selVramRead(uint32_t off, uint32_t addr, uint32_t len, 
     IOFree(buf, XFER_CHUNK);
     return rc;
 }
+
+IOReturn RageLTGLClient::selSetTexture(uint32_t index, uint32_t off, uint32_t fmt)
+{ return fDev ? fDev->setTexture(fOwner, index, off, fmt) : kIOReturnNotAttached; }
 
 IOReturn RageLTGLClient::selConfig(uint32_t key, uint32_t value)
 {
