@@ -1,6 +1,6 @@
 /* cgmode                 : list every active display (id, size, bounds, vendor/model)
  * cgmode ID              : list the modes of display ID
- * cgmode ID W H [secs]  : switch display ID to WxH at 16 bpp (what System Preferences does).  Refuses the main display. */
+ * cgmode ID W H [secs [force]] : switch display ID to WxH at 16 bpp (what System Preferences does).  Refuses the main display. */
 #include <ApplicationServices/ApplicationServices.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -26,7 +26,7 @@ int main(int argc, char **argv)
             printf("mode %d: %dx%d %dbpp %dHz\n", (int)k, w, h, b, hz); }
         return 0;
     }
-    if (CGDisplayIsMain(d)) { printf("refusing: that is the main display\n"); return 1; }
+    if (CGDisplayIsMain(d) && argc < 6) { printf("refusing: that is the main display (add a 5th argument, e.g. force, if the Rage was made primary on purpose)\n"); return 1; }
     boolean_t exact; CFDictionaryRef m = CGDisplayBestModeForParameters(d, 16, atoi(argv[2]), atoi(argv[3]), &exact);
     printf("best mode exact=%d\n", (int)exact); if (!exact) return 1;
     printf("switch -> %d\n", (int)CGDisplaySwitchToMode(d, m)); fflush(stdout);
