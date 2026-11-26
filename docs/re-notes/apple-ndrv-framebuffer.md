@@ -99,3 +99,18 @@ Constants read from the unpacked data section (data base 0x1001a930): 64.0, 4096
 - **Apple FIFO trial** (stub property `rage-dsp-apple`, `stubctl dsp 1`, default off; applies at the next mode set; `chipinfo` reads DSP_CONFIG/DSP_ON_OFF back). 1024x768 32 bpp 65 MHz: default formula DSP_CONFIG 0x00280628 DSP_ON_OFF 0x02b005ee (read back = host model); Apple's 0x002a0627 / 0x01b005e0 (DSP_ON 688 -> 432, latency field 8 -> 10). The user judged both holds clean (no tearing/flicker/garbage), and the Apple setting clean under load: Atlantis 90 s, Flurry 90 s, Chess 30 s, Sonic R 100 s (layout_exercise.sh, Rage primary: `mach64_arrange rage` first), guard passed after every app, no crash.
 - **Limits of that result:** one mode (the user's eyes, no underrun status register exists); the FIFO-limited extreme (1280x1024 at 16 bpp, 108 MHz, Apple's DSP_ON about 0.62x ours) and the 800x600 / 1024x768 16 bpp modes were not run with Apple's setting. The default stays the X.Org-derived formula.
 - **Test-procedure mistakes made on the way (not product bugs):** the first exercise ran with the Rage not primary (Atlantis opened on the other monitor) and, after the reboots, with ATIRageProLT.kext not loaded (white window, 0 callbacks/s). After every reboot run `tools/rig/redeploy_release.sh` and `mach64_arrange rage`; check `kextstat | grep ATIRageProLT`.
+
+## 14. Apple FIFO formula on every rig mode (Nov 26, user's eyes, Atlantis running)
+`tools/rig/trymode.sh W H BITS` holds the mode (`cgmode ... force`), reads the FIFO back (`chipinfo`) and runs Atlantis 120 s on the Rage (Rage primary, ATIRageProLT loaded, `stubctl dsp 1` first). The readback equalled the host model's Apple values at every mode. The user judged each hold CLEAN (no tearing, flicker, noise or garbage):
+
+| mode | pixel clock | DSP_CONFIG / DSP_ON_OFF read back | DSP_ON (Apple vs default) |
+|---|---|---|---|
+| 640x480 16 | 25.175 MHz | 004a07f6 / 006c07b0 | 108 vs ROM-exact 156 |
+| 640x480 32 | 25.175 | 003a07f6 / 00d807a8 | 216 vs 344 |
+| 800x600 16 | 40.0 | 004a04fd / 006c04d0 | 108 vs 172 |
+| 800x600 32 | 40.0 | 003a04fd / 00d804c8 | 216 vs 344 |
+| 1024x768 16 | 65.0 | 003a0627 / 00d805e8 | 216 vs 344 |
+| 1024x768 32 | 65.0 | 002a0627 / 01b005e0 | 432 vs 688 (also clean under Flurry, Chess, Sonic R, section 13) |
+| 1280x1024 16 | 108.0 | 002a076b / 01b00710 | 432 vs 688 (the tightest case) |
+
+Limits: judged by eye with a GL load only (no underrun status register exists); holds of a few minutes, no long soak; the memory type was read from CONFIG_STAT0 = 4 on this card only. The default is still the X.Org-derived formula (`rm_dsp_apple = 0`); switching is a one-line change plus a reboot.
