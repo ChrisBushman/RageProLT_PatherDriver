@@ -40,5 +40,16 @@ int main(void)
     for (i = 4; i <= 0xb; i++) if (pll[i] != hwpll[i]) { printf("DIFF pll %02x: plan %02x hw %02x\n", i, pll[i], hwpll[i]); bad++; }
     for (i = 5; i <= 6; i++) if (pll[i] != hwpll[i]) {}
     printf("%d differing registers (DSP_ON_OFF is the known, unexplained one)\n", bad);
-    return 0;
+    /* every offered mode (15 and 32 bpp): the plan is accepted, depth and pitch are in GEN_CNTL / OFF_PITCH, the FIFO scales with the depth */
+    for (i = 0; i < (int)(sizeof kRageModes / sizeof kRageModes[0]); i++) {
+        const struct rage_mode *q = &kRageModes[i]; struct rm_plan pl; int k; unsigned gen = 0, pitch = 0, xc = 0;
+        if ((q->bpp != 15 && q->bpp != 32) || (q->pclk_khz != 25175 && q->pclk_khz != 40000 && q->pclk_khz != 65000 && q->pclk_khz != 108000)) continue;
+        if (rm_plan_mode(q, &cur, 8192, 4, &pl)) { printf("FAIL %dx%d %d bpp: plan refused\n", q->w, q->h, q->bpp); bad++; continue; }
+        for (k = 0; k < pl.n; k++) { if (pl.op[k].kind == RM_WR32 && pl.op[k].a == RM_CRTC_GEN) gen = pl.op[k].b; if (pl.op[k].kind == RM_WR32 && pl.op[k].a == RM_CRTC_OFFPITCH) pitch = pl.op[k].b;
+                                      if (pl.op[k].kind == RM_WR32 && pl.op[k].a == RM_DSP_CONFIG) xc = pl.op[k].b; }
+        printf("%dx%d %2d bpp: GEN_CNTL pixwidth %u, pitch %u px, DSP_CONFIG 0x%08x\n", q->w, q->h, q->bpp, (gen >> 8) & 7, (pitch >> 22) * 8, xc);
+        if (((gen >> 8) & 7) != (q->bpp == 32 ? 6u : 3u) || (pitch >> 22) * 8 != q->w) { printf("FAIL: depth/pitch field\n"); bad++; }
+    }
+    printf("%d problems\n", bad);
+    return bad != 0;
 }

@@ -20,9 +20,10 @@ class RageStubFB : public IOFramebuffer
     volatile UInt8 *fRegs;
     bool mapRegisters(void);
     bool replayInit(void);
-    const struct rage_mode *fModes[8]; int fNModes, fMode;   /* modes offered (15 bpp, 60 Hz rows of rage_modes.h); fMode = the one the chip is running */
+    const struct rage_mode *fModes[8], *fModes32[8]; int fNModes, fMode, fDepth;   /* fModes32[i] = the 32 bpp row of mode i or 0; fDepth 0 = 15 bpp, 1 = 32 bpp */   /* modes offered (15 bpp, 60 Hz rows of rage_modes.h); fMode = the one the chip is running */
     void pickModes(void);
-    bool applyMode(int idx);
+    bool applyMode(int idx, int depth);
+    const struct rage_mode *curRow(void) { return fDepth ? fModes32[fMode] : fModes[fMode]; }
     UInt32 pllRead(UInt32 reg);
     void pllWrite(UInt32 reg, UInt32 val);
     void clearScanout(void);

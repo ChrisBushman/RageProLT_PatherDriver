@@ -1,6 +1,6 @@
 /* cgmode                 : list every active display (id, size, bounds, vendor/model)
  * cgmode ID              : list the modes of display ID
- * cgmode ID W H [secs [force]] : switch display ID to WxH at 16 bpp (what System Preferences does).  Refuses the main display. */
+ * cgmode ID W H [secs [force [bits]]] : switch display ID to WxH at 16 bpp (what System Preferences does).  Refuses the main display. */
 #include <ApplicationServices/ApplicationServices.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -11,7 +11,7 @@ int main(int argc, char **argv)
     CGGetActiveDisplayList(16, ids, &n);
     if (argc == 1) {
         for (i = 0; i < n; i++) { CGRect b = CGDisplayBounds(ids[i]);
-            printf("display id %u: %dx%d at (%d,%d) main=%d vendor %x model %x\n", (unsigned)ids[i], (int)b.size.width, (int)b.size.height, (int)b.origin.x, (int)b.origin.y,
+            printf("display id %u: %dx%d %dbpp at (%d,%d) main=%d vendor %x model %x\n", (unsigned)ids[i], (int)b.size.width, (int)b.size.height, (int)CGDisplayBitsPerPixel(ids[i]), (int)b.origin.x, (int)b.origin.y,
                    (int)CGDisplayIsMain(ids[i]), (unsigned)CGDisplayVendorNumber(ids[i]), (unsigned)CGDisplayModelNumber(ids[i])); }
         return 0;
     }
@@ -27,7 +27,7 @@ int main(int argc, char **argv)
         return 0;
     }
     if (CGDisplayIsMain(d) && argc < 6) { printf("refusing: that is the main display (add a 5th argument, e.g. force, if the Rage was made primary on purpose)\n"); return 1; }
-    boolean_t exact; CFDictionaryRef m = CGDisplayBestModeForParameters(d, 16, atoi(argv[2]), atoi(argv[3]), &exact);
+    boolean_t exact; CFDictionaryRef m = CGDisplayBestModeForParameters(d, argc > 6 ? atoi(argv[6]) : 16, atoi(argv[2]), atoi(argv[3]), &exact);
     printf("best mode exact=%d\n", (int)exact); if (!exact) return 1;
     printf("switch -> %d\n", (int)CGDisplaySwitchToMode(d, m)); fflush(stdout);
     sleep(argc > 4 ? atoi(argv[4]) : 25);   /* the switch is undone when this process exits: stay alive while it is looked at */

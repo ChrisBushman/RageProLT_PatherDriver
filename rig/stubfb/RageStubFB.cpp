@@ -19,9 +19,9 @@ enum { kRegBlock = 0x400, kCrtcOffPitch = 0x14, kCrtcGenCntl = 0x1c, kMemCntl = 
 /* MEM_CNTL bits 27:26 = UPPER_APER_ENDIAN (the 8-16 MB view of BAR0): 00 little endian, 01 big endian 16 bpp swapping, 10 big endian 32 bpp swapping.
  * The lower 8 MB view stays unswapped (everything else here -- Apple's kext, the plugin, the tools -- uses it); WindowServer draws 15 bpp pixels
  * through the upper view, which swaps the bytes of every 16-bit word, so the big-endian CPU's pixels reach the chip in its little-endian order. */
-enum { kMemUpperEndianShift = 26, kMemUpperEndianMask = 3, kUpperEndian16 = 1 };
+enum { kMemUpperEndianShift = 26, kMemUpperEndianMask = 3, kUpperEndian16 = 1, kUpperEndian32 = 2 };
 enum { kGenDisplayDis = 1u << 6, kGenExtDispEn = 1u << 24, kGenCrtcEn = 1u << 25, kGenPixWidthShift = 8, kGenPixWidthMask = 7 };
-enum { kExpectPixWidth = 3 /* 15 bpp 5-5-5 */, kExpectOffPitch = 0x14000000 /* boot mode: offset 0, pitch 640 px (replayInit only) */ };
+enum { kExpectOffPitch = 0x14000000 /* boot mode: offset 0, pitch 640 px (replayInit only) */ };
 
 bool RageStubFB::mapRegisters(void)
 {
@@ -47,12 +47,13 @@ void RageStubFB::checkDisplay(bool unblank)
     UInt32 gen = rd(kCrtcGenCntl), op = rd(kCrtcOffPitch);
     IOLog("RageStubFB: CRTC_GEN_CNTL 0x%08x CRTC_OFF_PITCH 0x%08x\n", (unsigned)gen, (unsigned)op);
     if (!(gen & kGenCrtcEn) || !(gen & kGenExtDispEn)) { IOLog("RageStubFB: CRTC is not running in extended mode (the ROM mode set has not been done); leaving the chip alone\n"); return; }
-    if (op != (((UInt32)fModes[fMode]->w / 8) << 22) || ((gen >> kGenPixWidthShift) & kGenPixWidthMask) != kExpectPixWidth) {
-        IOLog("RageStubFB: the running mode is not %dx%d 15 bpp at offset 0; leaving the chip alone\n", (int)fModes[fMode]->w, (int)fModes[fMode]->h); return; }
-    UInt32 mem = rd(kMemCntl);
-    if (((mem >> kMemUpperEndianShift) & kMemUpperEndianMask) != kUpperEndian16) {
-        wr(kMemCntl, (mem & ~(kMemUpperEndianMask << kMemUpperEndianShift)) | (kUpperEndian16 << kMemUpperEndianShift));
-        IOLog("RageStubFB: MEM_CNTL 0x%08x -> 0x%08x (upper aperture: big-endian 16 bpp swapping)\n", (unsigned)mem, (unsigned)rd(kMemCntl));
+    const struct rage_mode *cm = curRow();
+    if (op != (((UInt32)cm->w / 8) << 22) || ((gen >> kGenPixWidthShift) & kGenPixWidthMask) != cm->pixwidth) {
+        IOLog("RageStubFB: the running mode is not %dx%d %d bpp at offset 0; leaving the chip alone\n", (int)cm->w, (int)cm->h, (int)cm->bpp); return; }
+    UInt32 mem = rd(kMemCntl), wantEnd = fDepth ? kUpperEndian32 : kUpperEndian16;
+    if (((mem >> kMemUpperEndianShift) & kMemUpperEndianMask) != wantEnd) {
+        wr(kMemCntl, (mem & ~(kMemUpperEndianMask << kMemUpperEndianShift)) | (wantEnd << kMemUpperEndianShift));
+        IOLog("RageStubFB: MEM_CNTL 0x%08x -> 0x%08x (upper aperture: big-endian %d bpp swapping)\n", (unsigned)mem, (unsigned)rd(kMemCntl), fDepth ? 32 : 16);
     }
     if (unblank && (gen & kGenDisplayDis)) { wr(kCrtcGenCntl, gen & ~kGenDisplayDis); IOLog("RageStubFB: display un-blanked (CRTC_GEN_CNTL now 0x%08x)\n", (unsigned)rd(kCrtcGenCntl)); }
     else if (gen & kGenDisplayDis) IOLog("RageStubFB: display is blanked\n");
@@ -297,7 +298,7 @@ IOReturn RageStubFB::setProperties(OSObject *props)
     if (d && d->getObject("rage-edid"))    { probeEdid(); return kIOReturnSuccess; }
     if (d && d->getObject("rage-setmode")) {
         OSNumber *n = OSDynamicCast(OSNumber, d->getObject("rage-setmode"));
-        if (!n || !applyMode((int)n->unsigned32BitValue())) return kIOReturnBadArgument;
+        if (!n || !applyMode((int)(n->unsigned32BitValue() & 15u), (int)(n->unsigned32BitValue() >> 4))) return kIOReturnBadArgument;   /* N = mode index + 16 * depth */
         notifyModeChange(); return kIOReturnSuccess; }
     if (d && d->getObject("rage-check"))   { checkDisplay(false); return kIOReturnSuccess; }
     return super::setProperties(props);
@@ -350,17 +351,23 @@ IODeviceMemory *RageStubFB::getVRAMRange(void)
     return m;
 }
 
-const char *RageStubFB::getPixelFormats(void) { return IO16BitDirectPixels; }   /* 15 bpp 5-5-5: VBE mode 0110h of the Rage ROM */
+const char *RageStubFB::getPixelFormats(void) { return IO16BitDirectPixels "\0" IO32BitDirectPixels; }   /* depth 0: 15 bpp 5-5-5 (VBE 0110h of the ROM); depth 1: 32 bpp ARGB (not in the ROM: see rage-bios-vbe-modeset.md) */
 
 /* The modes offered: the 15 bpp rows of rage_modes.h at their 60 Hz pixel clocks (gentlest on the monitor; every row already passed the Dell 828FI limits in
  * tools/rageinit/gen_modes.py and is re-checked by rm_plan_mode).  Index 0 must be the boot mode (640x480). */
 void RageStubFB::pickModes(void)
 {
     static const unsigned clocks[] = { 25175, 40000, 65000, 108000 };
-    fNModes = 0; fMode = kBootMode;
-    for (unsigned c = 0; c < sizeof clocks / sizeof clocks[0]; c++)
-        for (unsigned i = 0; i < sizeof kRageModes / sizeof kRageModes[0]; i++)
-            if (kRageModes[i].bpp == 15 && kRageModes[i].pclk_khz == clocks[c] && fNModes < 8) { fModes[fNModes++] = &kRageModes[i]; break; }
+    fNModes = 0; fMode = kBootMode; fDepth = 0;
+    for (unsigned c = 0; c < sizeof clocks / sizeof clocks[0]; c++) {
+        const struct rage_mode *m15 = 0, *m32 = 0;
+        for (unsigned i = 0; i < sizeof kRageModes / sizeof kRageModes[0]; i++) {
+            if (kRageModes[i].pclk_khz != clocks[c]) continue;
+            if (kRageModes[i].bpp == 15 && !m15) m15 = &kRageModes[i];
+            if (kRageModes[i].bpp == 32 && !m32) m32 = &kRageModes[i];
+        }
+        if (m15 && fNModes < 8) { fModes32[fNModes] = m32; fModes[fNModes++] = m15; }
+    }
 }
 
 IOItemCount RageStubFB::getDisplayModeCount(void) { return fNModes; }
@@ -373,7 +380,7 @@ IOReturn RageStubFB::getInformationForDisplayMode(IODisplayModeID mode, IODispla
     const struct rage_mode *m = fModes[mode - 1];
     bzero(info, sizeof *info);
     info->nominalWidth = m->w; info->nominalHeight = m->h;
-    info->refreshRate = 60 << 16; info->maxDepthIndex = 0;
+    info->refreshRate = 60 << 16; info->maxDepthIndex = fModes32[mode - 1] ? 1 : 0;
     info->flags = kDisplayModeValidFlag | (mode == kBootMode + 1 ? kDisplayModeSafeFlag : 0);
     return kIOReturnSuccess;
 }
@@ -382,45 +389,55 @@ UInt64 RageStubFB::getPixelFormatsForDisplayMode(IODisplayModeID, IOIndex) { ret
 
 IOReturn RageStubFB::getPixelInformation(IODisplayModeID mode, IOIndex depth, IOPixelAperture ap, IOPixelInformation *pi)
 {
-    if (mode < 1 || mode > fNModes || depth != 0 || ap != kIOFBSystemAperture) return kIOReturnUnsupportedMode;
-    const struct rage_mode *m = fModes[mode - 1];
+    if (mode < 1 || mode > fNModes || depth < 0 || depth > 1 || ap != kIOFBSystemAperture) return kIOReturnUnsupportedMode;
+    const struct rage_mode *m = depth ? fModes32[mode - 1] : fModes[mode - 1];
+    if (!m) return kIOReturnUnsupportedMode;
     bzero(pi, sizeof *pi);
-    pi->bytesPerRow = m->w * 2; pi->bitsPerPixel = 16; pi->pixelType = kIORGBDirectPixels;
-    pi->componentCount = 3; pi->bitsPerComponent = 5;
-    pi->componentMasks[0] = 0x00007c00; pi->componentMasks[1] = 0x000003e0; pi->componentMasks[2] = 0x0000001f;
-    strcpy(pi->pixelFormat, IO16BitDirectPixels);
+    pi->pixelType = kIORGBDirectPixels; pi->componentCount = 3;
+    if (depth) {
+        pi->bytesPerRow = m->w * 4; pi->bitsPerPixel = 32; pi->bitsPerComponent = 8;
+        pi->componentMasks[0] = 0x00ff0000; pi->componentMasks[1] = 0x0000ff00; pi->componentMasks[2] = 0x000000ff;
+        strcpy(pi->pixelFormat, IO32BitDirectPixels);
+    } else {
+        pi->bytesPerRow = m->w * 2; pi->bitsPerPixel = 16; pi->bitsPerComponent = 5;
+        pi->componentMasks[0] = 0x00007c00; pi->componentMasks[1] = 0x000003e0; pi->componentMasks[2] = 0x0000001f;
+        strcpy(pi->pixelFormat, IO16BitDirectPixels);
+    }
     pi->activeWidth = m->w; pi->activeHeight = m->h;
     return kIOReturnSuccess;
 }
 
 IOReturn RageStubFB::getCurrentDisplayMode(IODisplayModeID *mode, IOIndex *depth)
 {
-    IOLog("RageStubFB: getCurrentDisplayMode -> %d\n", fMode + 1);
+    IOLog("RageStubFB: getCurrentDisplayMode -> %d depth %d\n", fMode + 1, fDepth);
     if (mode) *mode = fMode + 1;
-    if (depth) *depth = 0;
+    if (depth) *depth = fDepth;
     return kIOReturnSuccess;
 }
 
 /* Programs the chip for fModes[idx] with the plan of rage_modeset.h (see docs/re-notes/rage-bios-vbe-modeset.md).  Every write is logged. */
-bool RageStubFB::applyMode(int idx)
+bool RageStubFB::applyMode(int idx, int depth)
 {
     static const UInt32 kPllReg[] = { 5, 6, 0xb, 4 };
-    if (idx < 0 || idx >= fNModes || !mapRegisters()) return false;
-    const struct rage_mode *m = fModes[idx];
+    if (idx < 0 || idx >= fNModes || depth < 0 || depth > 1 || !mapRegisters()) return false;
+    const struct rage_mode *m = depth ? fModes32[idx] : fModes[idx];
+    if (!m) return false;
     struct rm_cur cur; struct rm_plan plan;
     cur.gen_cntl = rd(kCrtcGenCntl); cur.mem_cntl = rd(kMemCntl); cur.dsp_config = rd(0x20);
     UInt32 pv[4];
     for (int i = 0; i < 4; i++) pv[i] = pllRead(kPllReg[i]);
     cur.pll5 = pv[0]; cur.pll6 = pv[1]; cur.pllb = pv[2]; cur.pll4 = pv[3];
     if (rm_plan_mode(m, &cur, 8192, 4, &plan)) { IOLog("RageStubFB: mode %dx%d refused by the plan (limits)\n", (int)m->w, (int)m->h); return false; }
-    IOLog("RageStubFB: applyMode %dx%d: %d writes (PLL5 %02x PLL6 %02x PLLB %02x MCLKFB %02x)\n", (int)m->w, (int)m->h, plan.n, (unsigned)pv[0], (unsigned)pv[1], (unsigned)pv[2], (unsigned)pv[3]);
+    IOLog("RageStubFB: applyMode %dx%d %d bpp: %d writes (PLL5 %02x PLL6 %02x PLLB %02x MCLKFB %02x)\n", (int)m->w, (int)m->h, (int)m->bpp, plan.n, (unsigned)pv[0], (unsigned)pv[1], (unsigned)pv[2], (unsigned)pv[3]);
     for (int i = 0; i < plan.n; i++) {
         const struct rm_op *o = &plan.op[i];
         if (o->kind == RM_WR32) { IOLog("RageStubFB:   reg %02x <- %08x\n", (unsigned)o->a, (unsigned)o->b); wr(o->a, o->b); }
         else if (o->kind == RM_PLL) { IOLog("RageStubFB:   pll %02x <- %02x\n", (unsigned)o->a, (unsigned)o->b); pllWrite(o->a, o->b); }
         else IODelay(o->b);
     }
-    fMode = idx;
+    { UInt32 mem = rd(kMemCntl), we = depth ? kUpperEndian32 : kUpperEndian16;      /* the CPU's byte order for the upper aperture follows the depth (RRG MEM_CNTL UPPER_APER_ENDIAN) */
+      wr(kMemCntl, (mem & ~(kMemUpperEndianMask << kMemUpperEndianShift)) | (we << kMemUpperEndianShift)); IOLog("RageStubFB:   MEM_CNTL %08x -> %08x\n", (unsigned)mem, (unsigned)rd(kMemCntl)); }
+    fMode = idx; fDepth = depth;
     IOLog("RageStubFB: applyMode done: HTD %08x VTD %08x GEN %08x OFF_PITCH %08x\n", (unsigned)rd(0), (unsigned)rd(8), (unsigned)rd(kCrtcGenCntl), (unsigned)rd(kCrtcOffPitch));
     return true;
 }
@@ -428,8 +445,8 @@ bool RageStubFB::applyMode(int idx)
 IOReturn RageStubFB::setDisplayMode(IODisplayModeID mode, IOIndex depth)
 {
     IOLog("RageStubFB: setDisplayMode(%d, %d)\n", (int)mode, (int)depth);
-    if (mode < 1 || mode > fNModes || depth != 0) return kIOReturnUnsupportedMode;
-    if (mode - 1 != fMode && !applyMode(mode - 1)) return kIOReturnUnsupportedMode;
+    if (mode < 1 || mode > fNModes || depth < 0 || depth > 1 || (depth && !fModes32[mode - 1])) return kIOReturnUnsupportedMode;
+    if ((mode - 1 != fMode || depth != fDepth) && !applyMode(mode - 1, depth)) return kIOReturnUnsupportedMode;
     checkDisplay(true);
     return kIOReturnSuccess;
 }

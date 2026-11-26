@@ -37,6 +37,11 @@ for vbe, w, h, bpp, pw, pclk, mask in MODES:
     hf = pclk / float(htot); vf = pclk * 1000.0 / (htot * vtot)
     ok = LIM["hmin"] <= hf <= LIM["hmax"] and LIM["vmin"] <= vf <= LIM["vmax"] and pclk <= LIM["pmax"]
     rows.append((vbe, w, h, bpp, pw, pclk, ht, hs, vt, vs, r["CRTC_OFF_PITCH"], r["CRTC_GEN_CNTL"], r["DSP_CONFIG"], r["DSP_ON_OFF"], htot, hstart, hwid, vtot, vstart, vwid, hf, vf, ok))
+    if bpp == 24 and w <= 1024:
+        # The ROM has no 32 bpp mode.  32 bpp reuses the ROM's 24 bpp CRTC values (nearest depth; the only depth-dependent CRTC fields are the pixel width,
+        # the sub-character sync start offset -- a few pixels of picture position -- and the display FIFO, which the stub computes) with CRTC_PIX_WIDTH = 6.
+        # 1280x1024 is not offered at 32 bpp: scanout + render target + Z do not fit the 8 MB.  DSP columns are the simulator's 24 bpp values: unused by the stub.
+        rows.append((vbe, w, h, 32, 6, pclk, ht, hs, vt, vs, r["CRTC_OFF_PITCH"], (r["CRTC_GEN_CNTL"] & ~0x700) | 0x600, r["DSP_CONFIG"], r["DSP_ON_OFF"], htot, hstart, hwid, vtot, vstart, vwid, hf, vf, ok))
     print("%04x %4dx%-4d %2dbpp pclk %6.2f MHz  H %4d/%d+%d  V %4d/%d+%d  pitch %4d  %.2f kHz %.2f Hz  %s" %
           (vbe, w, h, bpp, pclk / 1000.0, htot, hstart, hwid, vtot, vstart, vwid, pitch, hf, vf, "OK" if ok else "OUT OF RANGE"))
 with open(out, "w") as f:
