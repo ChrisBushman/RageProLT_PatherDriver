@@ -66,3 +66,10 @@ Run: `BIOS_POKE=8c:40000000 BIOS_PREMODE=a083 BIOS_PRECX=0000 [BIOS_POKE2=80:050
 ## Accelerator after a mode change (Nov 25, G4 MDD)
 Standalone stack only (stub from the kernel cache + `redeploy.sh` = ATIRageProLT + ragelt daemon; **no Apple ATIRagePro / Mach64Accelerator**), Rage made primary with `mach64_arrange rage`, mode switched through WindowServer with `cgmode ID W H 330 force` and `gl_probe` run in the GUI session (`rungui.sh OUT T "AGL_MAIN=1 .../gl_probe"`): **128 pass / 1 fail (ARB fragment program, deferred) at 640x480, 800x600, 1024x768 and 1280x1024** - identical to the baseline; the accelerator keeps working across mode (pitch) changes.
 Mistake that cost an hour: running `/Library/RageProLT/bringup.sh` (Apple's ATIRagePro) first. ATIRageProLT has the same IOMatchCategory (IOAccelerator) so it never attached (no RageLTDevice, "ragelt: no RageLTDevice"), gl_probe gave 14 pass / 115 fail with GL_RENDERER (null). Apple's kext cannot be unloaded safely: reboot. gl_probe also gets deleted by a bare `make gl_probe` link failure: build it with `cc -O1 -w gl_probe.c -o gl_probe -framework AGL -framework OpenGL -framework Carbon`.
+
+## 32 bpp scanout (Nov 25, verified live)
+
+* The ROM has no 32 bpp mode. Rows are the ROM's 24 bpp CRTC values with CRTC_PIX_WIDTH = 6 (`gen_modes.py`); DSP_CONFIG/DSP_ON_OFF come from the formula; MEM_CNTL UPPER_APER_ENDIAN = 2 (32 bpp) / 1 (16 bpp), switched with the depth.
+* Offered at 640x480, 800x600, 1024x768 (60 Hz). 1280x1024 stays 15 bpp (VRAM budget).
+* Supervised live results on the Dell 828FI via WindowServer (depth index 1, 25 s hold): all three modes stable, correct colours, correct picture position (user: "good colors, good image, position looks correct", "800x600 looks good", "looks good"). Accelerator at 32 bpp not yet exercised (step 2).
+* Not verified: DSP_ON_OFF vs ROM (still unexplained), long-duration FIFO underrun behaviour under load.
