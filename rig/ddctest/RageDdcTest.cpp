@@ -32,10 +32,29 @@ void RageDdcTest::wr(UInt32 reg, UInt32 val) { OSWriteLittleInt32((volatile void
  * Spec (RAGE PRO GCS 4.4/6.13, RAGE LT PRO RRG GP_IO 0_1E): DDC serial data = GIO0, serial clock = GIO4; GP_IO bit n is the pin level, bit 16+n its
  * direction (1 = output).  Open-drain emulation: a line is driven low by direction=1/value=0 and released (high, pulled up by the monitor
  * cable) by direction=0.  Only bits 0, 4, 16 and 20 are touched; the original value is restored afterwards. */
-enum { kGpIo = 0x78, kDdcDat = 1u << 0, kDdcClk = 1u << 4, kDdcDatDir = 1u << 16, kDdcClkDir = 1u << 20 };
+enum { kGpIo = 0x78 };
+static UInt32 kDdcDat = 1u << 0, kDdcClk = 1u << 4, kDdcDatDir = 1u << 16, kDdcClkDir = 1u << 20;
+static void ddcPins(int clkBit, int datBit) { kDdcClk = 1u << clkBit; kDdcDat = 1u << datBit; kDdcClkDir = 1u << (16 + clkBit); kDdcDatDir = 1u << (16 + datBit); }
 #define DDC_US 10
+static int g_mode = 0, g_ltClk = 0, g_ltDat = 1;
+enum { kLcdIndex = 0xa4, kLcdData = 0xa8 };   /* 0 = GP_IO GIO0/GIO4, 1 = I2C_CNTL_0 bits 14/15 */
+enum { kI2cCntl0 = 0x3c, kI2cCntl1 = 0xbc, kI2cScl = 1u << 14, kI2cSda = 1u << 15 };
 void RageDdcTest::ddcSet(int clk, int dat)
 {
+    if (g_mode == 2) {
+        UInt32 v = rd(kLcdData) | (1u << g_ltClk) | (1u << g_ltDat);
+        if (!clk) v = (v & ~(1u << g_ltClk)) | (1u << (16 + g_ltClk)); else v &= ~(1u << (16 + g_ltClk));
+        if (!dat) v = (v & ~(1u << g_ltDat)) | (1u << (16 + g_ltDat)); else v &= ~(1u << (16 + g_ltDat));
+        wr(kLcdData, v); IODelay(DDC_US);
+        if (clk) for (int i = 0; i < 500 && !(rd(kLcdData) & (1u << g_ltClk)); i++) IODelay(10);
+        return;
+    }
+    if (g_mode == 1) {
+        wr(kI2cCntl0, (rd(kI2cCntl0) & 0xffff0000u) | (clk ? kI2cScl : 0) | (dat ? kI2cSda : 0));
+        IODelay(DDC_US);
+        if (clk) for (int i = 0; i < 500 && !(rd(kI2cCntl0) & kI2cScl); i++) IODelay(10);
+        return;
+    }
     UInt32 v = rd(kGpIo) & ~(kDdcDat | kDdcClk | kDdcDatDir | kDdcClkDir);
     v |= kDdcClk | kDdcDat;                       /* latches 1: a released line follows the pin */
     if (!clk) v = (v & ~kDdcClk) | kDdcClkDir;
@@ -44,8 +63,8 @@ void RageDdcTest::ddcSet(int clk, int dat)
     IODelay(DDC_US);
     if (clk) for (int i = 0; i < 500 && !(rd(kGpIo) & kDdcClk); i++) IODelay(10);   /* clock stretching */
 }
-int RageDdcTest::ddcClk(void) { return (rd(kGpIo) & kDdcClk) != 0; }
-int RageDdcTest::ddcDat(void) { return (rd(kGpIo) & kDdcDat) != 0; }
+int RageDdcTest::ddcClk(void) { if (g_mode == 2) return (rd(kLcdData) >> g_ltClk) & 1; return g_mode == 1 ? (rd(kI2cCntl0) & kI2cScl) != 0 : (rd(kGpIo) & kDdcClk) != 0; }
+int RageDdcTest::ddcDat(void) { if (g_mode == 2) return (rd(kLcdData) >> g_ltDat) & 1; return g_mode == 1 ? (rd(kI2cCntl0) & kI2cSda) != 0 : (rd(kGpIo) & kDdcDat) != 0; }
 bool RageDdcTest::ddcStart(void)
 {
     ddcSet(1, 1);
@@ -144,7 +163,7 @@ void RageDdcTest::ddcSample(void)
     wr(kGpIo, save & ~(kDdcDat | kDdcClk | kDdcDatDir | kDdcClkDir));
     IODelay(1000);
     int trans = 0, last = ddcDat(), run = 0, shown = 0, ones = 0, n = 40000;
-    char line[160]; int pos = 0;
+    char line[160]; line[0] = 0; int pos = 0;
     for (int i = 0; i < n; i++) {
         IODelay(25);
         int v = ddcDat(); ones += v; run++;
@@ -157,17 +176,37 @@ void RageDdcTest::ddcSample(void)
 void RageDdcTest::ddcScan(void)
 {
     if (!mapRegisters()) return;
-    UInt32 save = rd(kGpIo);
-    char line[200]; int pos = 0, found = 0;
-    ddcSet(1, 1); ddcStop();
-    for (int a = 0; a < 128; a++) {
-        ddcStart();
-        bool ack = ddcPutByte((UInt8)(a << 1));
+    UInt32 idx = rd(kLcdIndex);
+    wr(kLcdIndex, (idx & ~0x3fu) | 7); IODelay(10);
+    UInt32 lt0 = rd(kLcdData);
+    IOLog("RageDdcTest: LCD_INDEX %08x, LT_GIO (idx 7) = %08x\n", (unsigned)idx, (unsigned)lt0);
+    g_mode = 2;
+    for (int clk = 0; clk < 3; clk++) for (int dat = 0; dat < 3; dat++) {
+        if (clk == dat) continue;
+        g_ltClk = clk; g_ltDat = dat;
+        ddcSet(1, 1);
+        int idleC = ddcClk(), idleD = ddcDat();
+        ddcSet(0, 1); int c0 = ddcClk(); ddcSet(1, 0); int d0 = ddcDat(); ddcSet(1, 1);
+        char line[200]; line[0] = 0; int pos = 0, found = 0;
         ddcStop();
-        if (ack) { found++; pos += snprintf(line + pos, sizeof line - pos, "0x%02x ", a); }
+        for (int a = 0; a < 128; a++) {
+            ddcStart(); bool ack = ddcPutByte((UInt8)(a << 1)); ddcStop();
+            if (ack) { found++; pos += snprintf(line + pos, sizeof line - pos, "0x%02x ", a); }
+        }
+        IOLog("RageDdcTest: LT_GIO clk %d dat %d: idle %d/%d, drive-low check clk %d dat %d, answers %d %s\n", clk, dat, idleC, idleD, c0, d0, found, line);
+        if (found) {
+            UInt8 e[128]; bool ok = false;
+            for (int t = 0; t < 2 && !ok; t++) ok = readEdid(e, 0);
+            IOLog("RageDdcTest: EDID %s\n", ok ? "READ OK" : "not read");
+            if (ok) for (int r = 0; r < 8; r++)
+                IOLog("RageDdcTest: EDID %02x: %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x\n", r * 16,
+                      e[r*16+0], e[r*16+1], e[r*16+2], e[r*16+3], e[r*16+4], e[r*16+5], e[r*16+6], e[r*16+7],
+                      e[r*16+8], e[r*16+9], e[r*16+10], e[r*16+11], e[r*16+12], e[r*16+13], e[r*16+14], e[r*16+15]);
+        }
+        wr(kLcdData, lt0);
     }
-    IOLog("RageDdcTest: I2C scan on GIO0/GIO4: %d address(es) answered %s\n", found, line);
-    wr(kGpIo, save);
+    g_mode = 0;
+    wr(kLcdData, lt0); wr(kLcdIndex, idx);
 }
 
 bool RageDdcTest::start(IOService *provider)
