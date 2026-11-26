@@ -10,7 +10,11 @@
 enum { RM_WR32 = 0, RM_PLL = 1, RM_DELAY = 2 };
 struct rm_op { unsigned char kind; unsigned short a; unsigned b; };       /* WR32: a=offset b=value; PLL: a=pll reg b=value; DELAY: b=us */
 struct rm_plan { struct rm_op op[40]; int n; };
-struct rm_cur { unsigned gen_cntl, pll5, pll6, pllb, pll4, mem_cntl, dsp_config; };   /* register state read just before */
+struct rm_cur { unsigned gen_cntl, pll5, pll6, pllb, pll4, mem_cntl, dsp_config, fb_off; };   /* register state read just before; fb_off = frame buffer byte offset in VRAM to program (0 = the ROM's layout) */
+
+/* Apple's ATI NDRV (the Lombard's framebuffer driver) puts the frame buffer at (2 MB mod pitch) raised by whole lines to at least 0x440: the hardware-cursor image
+ * lives at VRAM 0x40..0x440 below it.  docs/re-notes/apple-ndrv-framebuffer.md D1/D2.  The stub offers this layout so the G4 exercises what the Lombard has. */
+static unsigned rm_fb_offset(unsigned pitch_bytes) { unsigned off = 0x200000u % pitch_bytes; while (off < 0x440u) off += pitch_bytes; return off; }
 
 enum { RM_CRTC_HTD = 0x00, RM_CRTC_HSYNC = 0x04, RM_CRTC_VTD = 0x08, RM_CRTC_VSYNC = 0x0c, RM_CRTC_OFFPITCH = 0x14, RM_CRTC_GEN = 0x1c,
        RM_DSP_CONFIG = 0x20, RM_DSP_ON_OFF = 0x24 };
@@ -55,7 +59,7 @@ static int rm_plan_mode(const struct rage_mode *m, const struct rm_cur *cur, uns
     rm_add(p, RM_WR32, RM_CRTC_HSYNC, m->h_sync_strt_wid);
     rm_add(p, RM_WR32, RM_CRTC_VTD, m->v_total_disp);
     rm_add(p, RM_WR32, RM_CRTC_VSYNC, m->v_sync_strt_wid);
-    rm_add(p, RM_WR32, RM_CRTC_OFFPITCH, (m->w / 8u) << 22);                                 /* offset 0 */
+    rm_add(p, RM_WR32, RM_CRTC_OFFPITCH, ((m->w / 8u) << 22) | ((cur->fb_off >> 3) & 0xfffffu));   /* pitch in 8-px units, offset in qwords */
     gen = (cur->gen_cntl & ~(7u << 8)) | ((unsigned)m->pixwidth << 8) | RM_GEN_DISPLAY_DIS;
     rm_add(p, RM_WR32, RM_CRTC_GEN, gen);
     rm_add(p, RM_WR32, RM_CRTC_GEN, gen & ~RM_GEN_DISPLAY_DIS);                              /* un-blank */

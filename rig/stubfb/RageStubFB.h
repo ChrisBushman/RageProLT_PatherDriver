@@ -18,6 +18,9 @@ class RageStubFB : public IOFramebuffer
     IOPCIDevice *fPCI;
     IOMemoryMap *fRegMap;        /* last 2 KB of BAR0: the chip's register block */
     volatile UInt8 *fRegs;
+    bool fNdrv;                  /* frame buffer at Apple's NDRV offset (property RageNdrvLayout, default on); off = frame buffer at VRAM 0 as the ROM leaves it */
+    UInt32 fFbOff;               /* byte offset of the frame buffer in VRAM for the current mode */
+    UInt32 fbOffsetFor(const struct rage_mode *m, int depth);
     bool mapRegisters(void);
     bool replayInit(void);
     const struct rage_mode *fModes[8], *fModes32[8]; int fNModes, fMode, fDepth;   /* fModes32[i] = the 32 bpp row of mode i or 0; fDepth 0 = 15 bpp, 1 = 32 bpp */   /* modes offered (15 bpp, 60 Hz rows of rage_modes.h); fMode = the one the chip is running */

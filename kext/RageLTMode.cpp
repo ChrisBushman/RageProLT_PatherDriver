@@ -78,6 +78,7 @@ void RageLTDevice::modeWillChange(void)
     for (k = 0; k < RAGE_MAX_CTX; k++) if (fCtx[k].owner) { fCtx[k].tgt_bpp = 0; fCtx[k].z_set = 0; }   /* every cached offset is stale after the framebuffer re-lays VRAM */
     if (fDispReserved) {
         rage_vram_unreserve(&fVram, fDisp.base);
+        if (fDisp.base) rage_vram_unreserve(&fVram, 0);     /* the block below the frame buffer */
         rage_vram_unreserve(&fVram, 0x770000u);
         fDispReserved = false;
     }

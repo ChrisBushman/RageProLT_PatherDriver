@@ -30,7 +30,7 @@ int main(void)
     regs[RM_CRTC_HTD / 4] = 0; regs[RM_CRTC_HSYNC / 4] = 0; regs[RM_CRTC_VTD / 4] = 0; regs[RM_CRTC_VSYNC / 4] = 0; regs[RM_DSP_CONFIG / 4] = 0; regs[RM_DSP_ON_OFF / 4] = 0;
     pll[6] = hwpll[6] & ~(3u << 6); pll[0xa] = 0; pll[5] = 0x03; regs[RM_CRTC_GEN / 4] = hw[RM_CRTC_GEN / 4] & ~(7u << 8);
     regs[RM_CRTC_OFFPITCH / 4] = 0;
-    cur.gen_cntl = regs[RM_CRTC_GEN / 4]; cur.pll5 = pll[5]; cur.pll6 = pll[6]; cur.pllb = pll[0xb]; cur.pll4 = pll[4]; cur.mem_cntl = 0x10751a7b; cur.dsp_config = hw[RM_DSP_CONFIG / 4];
+    cur.fb_off = 0; cur.gen_cntl = regs[RM_CRTC_GEN / 4]; cur.pll5 = pll[5]; cur.pll6 = pll[6]; cur.pllb = pll[0xb]; cur.pll4 = pll[4]; cur.mem_cntl = 0x10751a7b; cur.dsp_config = hw[RM_DSP_CONFIG / 4];
     if (rm_plan_mode(m, &cur, 8192, 4, &p)) { printf("plan refused\n"); return 1; }
     for (i = 0; i < p.n; i++) {
         if (p.op[i].kind == RM_WR32) regs[p.op[i].a / 4] = p.op[i].b; else if (p.op[i].kind == RM_PLL) pll[p.op[i].a] = p.op[i].b;
@@ -50,6 +50,14 @@ int main(void)
         printf("%dx%d %2d bpp: GEN_CNTL pixwidth %u, pitch %u px, DSP_CONFIG 0x%08x\n", q->w, q->h, q->bpp, (gen >> 8) & 7, (pitch >> 22) * 8, xc);
         if (((gen >> 8) & 7) != (q->bpp == 32 ? 6u : 3u) || (pitch >> 22) * 8 != q->w) { printf("FAIL: depth/pitch field\n"); bad++; }
     }
+    /* the NDRV frame buffer layout (docs/re-notes/apple-ndrv-framebuffer.md D1) */
+    { static const struct { unsigned pitch, off; } t[] = { { 1280, 0x700 }, { 1600, 0x480 }, { 2048, 0x800 }, { 2560, 0xc00 }, { 4096, 0x1000 }, { 3200, 0x480 }, { 5120, 0xc00 } };
+      for (i = 0; i < (int)(sizeof t / sizeof t[0]); i++) { unsigned o = rm_fb_offset(t[i].pitch);
+          if (o != t[i].off || o < 0x440u || (0x200000u - o) % t[i].pitch) { printf("FAIL rm_fb_offset(%u) = 0x%x, expected 0x%x\n", t[i].pitch, o, t[i].off); bad++; } }
+      cur.fb_off = rm_fb_offset(2048); m = &kRageModes[0];
+      for (i = 0; i < (int)(sizeof kRageModes / sizeof kRageModes[0]); i++) if (kRageModes[i].w == 1024 && kRageModes[i].bpp == 15) m = &kRageModes[i];
+      if (!rm_plan_mode(m, &cur, 8192, 4, &p)) { unsigned op = 0; int k; for (k = 0; k < p.n; k++) if (p.op[k].kind == RM_WR32 && p.op[k].a == RM_CRTC_OFFPITCH) op = p.op[k].b;
+          if (op != ((128u << 22) | (0x800u >> 3))) { printf("FAIL OFF_PITCH with fb_off: %08x\n", op); bad++; } } }
     printf("%d problems\n", bad);
     return bad != 0;
 }

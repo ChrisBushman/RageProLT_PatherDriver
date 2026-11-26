@@ -26,6 +26,7 @@
       <key>IOPCIMatch</key>          <string>0x4c491002</string>
       <key>IOMatchCategory</key>     <string>RageStubFB</string>
       <key>RageReplayInit</key>      <true/>
+      <key>RageNdrvLayout</key>      <true/>
     </dict>
   </dict>
 </dict>

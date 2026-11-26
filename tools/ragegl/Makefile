@@ -1,7 +1,7 @@
 # Build on the Panther host: make -C tools/ragegl
 CFLAGS ?= -O2 -Wall -I../../common
 BUNDLE_SRC = ../../gldriver/gld_core.c ../../gldriver/gld_context.c ../../gldriver/gld_entry.c ../../gldriver/gld_prims.c ../../gldriver/gld_dispatch.c ../../gldriver/gld_pixelformat.c ../../gldriver/gld_cgs.c ../../gldriver/gld_glue.c ../../gldriver/gld_pixels.c ../../gldriver/gld_texture.c ../../gldriver/gld_stencil.c ../../gldriver/rage_backend.c ../../common/mach64_emit.c
-all: scanshot ragegl_test depth32_test alpha_test alpha16_test ovl_dump ovl_b0 ovl_b ovl_off ovl_flip ovl_sweep ovl_blocks ovl_probe ovl_gate quad_test fs_test ragegl_bench xfer_test gldcore_test bundle_test gl_suite
+all: scanshot ragegl_test depth32_test alpha_test alpha16_test ovl_dump ovl_b0 ovl_b ovl_off ovl_flip ovl_sweep ovl_blocks ovl_probe ovl_gate fb_layout quad_test fs_test ragegl_bench xfer_test gldcore_test bundle_test gl_suite
 ragegl_test: ragegl_test.c ragegl.h
 	cc $(CFLAGS) -o $@ ragegl_test.c -framework IOKit -framework CoreFoundation
 depth32_test: depth32_test.c ragegl.h
@@ -38,6 +38,8 @@ bundle_test: bundle_test.c $(BUNDLE_SRC) ../../gldriver/gld.h
 	cc $(CFLAGS) -I../../gldriver -std=gnu99 -o $@ bundle_test.c $(BUNDLE_SRC) -framework IOKit -framework CoreFoundation -framework ApplicationServices
 fs_test: fs_test.c $(BUNDLE_SRC) ../../gldriver/gld.h ragegl.h
 	cc $(CFLAGS) -I../../gldriver -std=gnu99 -o $@ fs_test.c $(BUNDLE_SRC) -framework IOKit -framework CoreFoundation -framework ApplicationServices
+fb_layout: fb_layout.c ragegl.h
+	cc $(CFLAGS) -std=gnu99 -o $@ fb_layout.c -framework IOKit -framework CoreFoundation
 ovl_gate: ovl_gate.c $(BUNDLE_SRC) ../../gldriver/gld.h ragegl.h
 	cc $(CFLAGS) -I../../gldriver -std=gnu99 -o $@ ovl_gate.c $(BUNDLE_SRC) -framework IOKit -framework CoreFoundation -framework ApplicationServices
 gl_suite: ../../tests/suite/gl_suite.c $(BUNDLE_SRC) ../../gldriver/gld.h
@@ -45,4 +47,4 @@ gl_suite: ../../tests/suite/gl_suite.c $(BUNDLE_SRC) ../../gldriver/gld.h
 scanshot: scanshot.c ../../gldriver/rage_backend.c ../../gldriver/rage_backend.h
 	cc $(CFLAGS) -I../../gldriver -std=gnu99 -o $@ scanshot.c ../../gldriver/rage_backend.c -framework IOKit -framework CoreFoundation
 clean:
-	rm -f scanshot ragegl_test depth32_test alpha_test alpha16_test ovl_dump ovl_b0 ovl_b ovl_off ovl_flip ovl_sweep ovl_blocks ovl_probe ovl_gate quad_test fs_test ragegl_bench xfer_test gldcore_test bundle_test gl_suite
+	rm -f scanshot ragegl_test depth32_test alpha_test alpha16_test ovl_dump ovl_b0 ovl_b ovl_off ovl_flip ovl_sweep ovl_blocks ovl_probe ovl_gate fb_layout quad_test fs_test ragegl_bench xfer_test gldcore_test bundle_test gl_suite

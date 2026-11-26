@@ -53,6 +53,7 @@ IOReturn RageLTDevice::reserveDisplay(void)
     if (!fDispReserved) {
         rc = rage_vram_reserve(&fVram, fDisp.base, bytes) || rage_vram_reserve(&fVram, 0x770000u, RAGE_VRAM_USABLE_END - 0x770000u);
         if (rc) rage_vram_unreserve(&fVram, fDisp.base);
+        else if (fDisp.base && rage_vram_reserve(&fVram, 0, fDisp.base)) { rage_vram_unreserve(&fVram, 0x770000u); rage_vram_unreserve(&fVram, fDisp.base); rc = -1; }   /* everything below the frame buffer is the framebuffer driver's (the hardware-cursor image at 0x40..0x440 under Apple's NDRV layout) */
         else fDispReserved = true;
     }
     IOLockUnlock(fLock);

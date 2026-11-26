@@ -38,6 +38,9 @@ bool RageStubFB::mapRegisters(void)
 UInt32 RageStubFB::rd(UInt32 reg) { return OSReadLittleInt32((volatile void *)fRegs, kRegBlock + reg); }
 void RageStubFB::wr(UInt32 reg, UInt32 val) { OSWriteLittleInt32((volatile void *)fRegs, kRegBlock + reg, val); eieio(); }
 
+/* Frame buffer offset in VRAM for a mode: Apple's NDRV layout (rm_fb_offset; the cursor image sits below it) or 0. */
+UInt32 RageStubFB::fbOffsetFor(const struct rage_mode *m, int depth) { return fNdrv ? rm_fb_offset((UInt32)m->w * (depth ? 4u : 2u)) : 0; }
+
 /* The card's ROM mode set leaves the sync outputs running but the pixel path blanked (CRTC_DISPLAY_DIS, "forces the blanking
  * signal active"; the ROM would normally clear the VGA sequencer screen-off bit, which the boot-time emulator does not forward).
  * Only un-blank when the CRTC is enabled, in extended mode, and is the 640x480 15 bpp mode this stub reports. */
@@ -48,8 +51,14 @@ void RageStubFB::checkDisplay(bool unblank)
     IOLog("RageStubFB: CRTC_GEN_CNTL 0x%08x CRTC_OFF_PITCH 0x%08x\n", (unsigned)gen, (unsigned)op);
     if (!(gen & kGenCrtcEn) || !(gen & kGenExtDispEn)) { IOLog("RageStubFB: CRTC is not running in extended mode (the ROM mode set has not been done); leaving the chip alone\n"); return; }
     const struct rage_mode *cm = curRow();
-    if (op != (((UInt32)cm->w / 8) << 22) || ((gen >> kGenPixWidthShift) & kGenPixWidthMask) != cm->pixwidth) {
-        IOLog("RageStubFB: the running mode is not %dx%d %d bpp at offset 0; leaving the chip alone\n", (int)cm->w, (int)cm->h, (int)cm->bpp); return; }
+    if ((op >> 22) != (UInt32)cm->w / 8 || ((gen >> kGenPixWidthShift) & kGenPixWidthMask) != cm->pixwidth) {
+        IOLog("RageStubFB: the running mode is not %dx%d %d bpp; leaving the chip alone\n", (int)cm->w, (int)cm->h, (int)cm->bpp); return; }
+    fFbOff = fbOffsetFor(cm, fDepth);
+    if ((op & 0xfffffu) != (fFbOff >> 3)) {      /* the ROM mode set leaves offset 0: move the frame buffer to the layout of Apple's NDRV (the pixel data under it is garbage until repainted) */
+        wr(kCrtcOffPitch, (op & 0xfff00000u) | (fFbOff >> 3));
+        IOLog("RageStubFB: CRTC_OFF_PITCH 0x%08x -> 0x%08x (frame buffer at VRAM 0x%x)\n", (unsigned)op, (unsigned)rd(kCrtcOffPitch), (unsigned)fFbOff);
+        clearScanout();
+    }
     UInt32 mem = rd(kMemCntl), wantEnd = fDepth ? kUpperEndian32 : kUpperEndian16;
     if (((mem >> kMemUpperEndianShift) & kMemUpperEndianMask) != wantEnd) {
         wr(kMemCntl, (mem & ~(kMemUpperEndianMask << kMemUpperEndianShift)) | (wantEnd << kMemUpperEndianShift));
@@ -76,15 +85,16 @@ static bool gReplayDone = false;
 void RageStubFB::clearScanout(void)
 {
     IODeviceMemory *bar0 = fPCI ? fPCI->getDeviceMemoryWithRegister(kIOPCIConfigBaseAddress0) : 0;
-    IODeviceMemory *sub = bar0 ? IODeviceMemory::withSubRange(bar0, 0, kStubW * kStubH * 2) : 0;
+    const struct rage_mode *cm = curRow(); UInt32 bytes = fFbOff + (UInt32)cm->w * cm->h * (fDepth ? 4u : 2u);
+    IODeviceMemory *sub = bar0 ? IODeviceMemory::withSubRange(bar0, 0, bytes) : 0;
     IOMemoryMap *m = sub ? sub->map(kIOMapInhibitCache) : 0;
     if (sub) sub->release();
     if (!m) { IOLog("RageStubFB: clearScanout: cannot map the scanout buffer\n"); return; }
     volatile UInt32 *p = (volatile UInt32 *)m->getVirtualAddress();
-    for (UInt32 i = 0; i < (UInt32)(kStubW * kStubH * 2) / 4; i++) p[i] = 0;
+    for (UInt32 i = 0; i < bytes / 4; i++) p[i] = 0;
     eieio();
     m->release();
-    IOLog("RageStubFB: scanout cleared (%u bytes)\n", (unsigned)(kStubW * kStubH * 2));
+    IOLog("RageStubFB: scanout cleared (%u bytes, frame buffer at 0x%x)\n", (unsigned)bytes, (unsigned)fFbOff);
 }
 
 bool RageStubFB::replayInit(void)
@@ -99,7 +109,7 @@ bool RageStubFB::replayInit(void)
     UInt32 id = rd(0xe0), gen = rd(kCrtcGenCntl), op = rd(kCrtcOffPitch);
     IOLog("RageStubFB: replay: PCI command 0x%04x, CHIP_ID 0x%08x, CRTC_GEN_CNTL 0x%08x, CRTC_OFF_PITCH 0x%08x\n", (unsigned)cfg, (unsigned)id, (unsigned)gen, (unsigned)op);
     if ((id & 0xffff) != 0x4c49) { IOLog("RageStubFB: replay: CHIP_ID is not a Rage LT Pro (0x4c49); not touching the chip\n"); return false; }
-    if ((gen & kGenCrtcEn) && (gen & kGenExtDispEn) && op == kExpectOffPitch) { IOLog("RageStubFB: replay: the mode is already set (ROM init ran); not replaying\n"); return false; }
+    if ((gen & kGenCrtcEn) && (gen & kGenExtDispEn) && (op >> 22) == (kExpectOffPitch >> 22)) { IOLog("RageStubFB: replay: the mode is already set (ROM init ran); not replaying\n"); return false; }
     gReplayDone = true;
     const unsigned n = sizeof kRageInit / sizeof kRageInit[0], total = n;
     IOLog("RageStubFB: replay: %u operations\n", total);
@@ -128,7 +138,9 @@ bool RageStubFB::start(IOService *provider)
 {
     fPCI = OSDynamicCast(IOPCIDevice, provider);
     if (!fPCI) return false;
-    fRegMap = 0; fRegs = 0;
+    fRegMap = 0; fRegs = 0; fFbOff = 0;
+    { OSBoolean *nl = OSDynamicCast(OSBoolean, getProperty("RageNdrvLayout")); fNdrv = !nl || nl->isTrue(); }
+    { char tmp[8]; char nm[] = "rage_fb0"; if (PE_parse_boot_arg(nm, tmp)) fNdrv = false; }       /* boot-arg rage_fb0=1: frame buffer at VRAM 0 like the ROM */
     pickModes();
     IOLog("RageStubFB: start on %s\n", provider->getName());
     if (!super::start(provider)) return false;
@@ -340,7 +352,10 @@ IODeviceMemory *RageStubFB::getApertureRange(IOPixelAperture aperture)
 {
     if (aperture != kIOFBSystemAperture || !fPCI) return 0;
     IODeviceMemory *m = viewRange(0);
-    IOLog("RageStubFB: getApertureRange(%d) caller %p -> %s view\n", (int)aperture, __builtin_return_address(0), current_task() == kernel_task ? "lower" : "upper");
+    if (m && fFbOff) {        /* the frame starts fFbOff into VRAM: the aperture range starts there, the VRAM range (getVRAMRange) at 0, WindowServer places the frame at the difference */
+        IODeviceMemory *s = IODeviceMemory::withSubRange(m, fFbOff, (UInt32)m->getLength() - fFbOff); m->release(); m = s;
+    }
+    IOLog("RageStubFB: getApertureRange(%d) caller %p -> %s view, frame at +0x%x\n", (int)aperture, __builtin_return_address(0), current_task() == kernel_task ? "lower" : "upper", (unsigned)fFbOff);
     return m;
 }
 
@@ -423,7 +438,7 @@ bool RageStubFB::applyMode(int idx, int depth)
     const struct rage_mode *m = depth ? fModes32[idx] : fModes[idx];
     if (!m) return false;
     struct rm_cur cur; struct rm_plan plan;
-    cur.gen_cntl = rd(kCrtcGenCntl); cur.mem_cntl = rd(kMemCntl); cur.dsp_config = rd(0x20);
+    cur.gen_cntl = rd(kCrtcGenCntl); cur.mem_cntl = rd(kMemCntl); cur.dsp_config = rd(0x20); cur.fb_off = fbOffsetFor(m, depth);
     UInt32 pv[4];
     for (int i = 0; i < 4; i++) pv[i] = pllRead(kPllReg[i]);
     cur.pll5 = pv[0]; cur.pll6 = pv[1]; cur.pllb = pv[2]; cur.pll4 = pv[3];
@@ -437,7 +452,7 @@ bool RageStubFB::applyMode(int idx, int depth)
     }
     { UInt32 mem = rd(kMemCntl), we = depth ? kUpperEndian32 : kUpperEndian16;      /* the CPU's byte order for the upper aperture follows the depth (RRG MEM_CNTL UPPER_APER_ENDIAN) */
       wr(kMemCntl, (mem & ~(kMemUpperEndianMask << kMemUpperEndianShift)) | (we << kMemUpperEndianShift)); IOLog("RageStubFB:   MEM_CNTL %08x -> %08x\n", (unsigned)mem, (unsigned)rd(kMemCntl)); }
-    fMode = idx; fDepth = depth;
+    fMode = idx; fDepth = depth; fFbOff = cur.fb_off;
     IOLog("RageStubFB: applyMode done: HTD %08x VTD %08x GEN %08x OFF_PITCH %08x\n", (unsigned)rd(0), (unsigned)rd(8), (unsigned)rd(kCrtcGenCntl), (unsigned)rd(kCrtcOffPitch));
     return true;
 }
