@@ -50,6 +50,7 @@ bool RageLTGLClient::start(IOService *provider)
     M(RAGE_GL_PRESENT_SCALED, selPresentScaled, kIOUCScalarIScalarO, 5, 0);
     M(RAGE_GL_SCANOUT_READ, selScanoutRead, kIOUCScalarIScalarO, 3, 0);
     M(RAGE_GL_REG_DUMP,    selRegDump,    kIOUCScalarIScalarO, 2, 0);
+    M(RAGE_GL_OVL_B0,      selOvlB0,      kIOUCScalarIScalarO, 0, 3);
 #undef M
     fDev->logEvent(RAGE_EV_CLIENT_OPEN, fOwner, RAGE_CLIENT_GL, 0, 0, 0, 0);
     return true;
@@ -58,7 +59,7 @@ bool RageLTGLClient::start(IOService *provider)
 IOExternalMethod *RageLTGLClient::getTargetAndMethodForIndex(IOService **target, UInt32 index)
 {
     if (!fDev || index >= RAGE_GL_SEL_COUNT) return 0;
-    if ((index == RAGE_GL_SCANOUT_READ || index == RAGE_GL_REG_DUMP) && !RAGE_DEBUG_ENGTEST) return 0;
+    if ((index == RAGE_GL_SCANOUT_READ || index == RAGE_GL_REG_DUMP || index == RAGE_GL_OVL_B0) && !RAGE_DEBUG_ENGTEST) return 0;
     *target = this;
     return &fMethods[index];
 }
@@ -256,7 +257,13 @@ IOReturn RageLTGLClient::selRegDump(uint32_t addr, uint32_t len)
     if (len > n * 8) len = n * 8;
     return userOut(addr, (const uint8_t *)pairs, len & ~3u);
 }
+IOReturn RageLTGLClient::selOvlB0(uint32_t *before, uint32_t *readback, uint32_t *after)
+{
+    if (!fDev) return kIOReturnNotAttached;
+    return fDev->ovlB0(before, readback, after);
+}
 #else
 IOReturn RageLTGLClient::selScanoutRead(uint32_t, uint32_t, uint32_t) { return kIOReturnUnsupported; }
 IOReturn RageLTGLClient::selRegDump(uint32_t, uint32_t) { return kIOReturnUnsupported; }
+IOReturn RageLTGLClient::selOvlB0(uint32_t *, uint32_t *, uint32_t *) { return kIOReturnUnsupported; }
 #endif

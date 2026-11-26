@@ -1,7 +1,7 @@
 # Build on the Panther host: make -C tools/ragegl
 CFLAGS ?= -O2 -Wall -I../../common
 BUNDLE_SRC = ../../gldriver/gld_core.c ../../gldriver/gld_context.c ../../gldriver/gld_entry.c ../../gldriver/gld_prims.c ../../gldriver/gld_dispatch.c ../../gldriver/gld_pixelformat.c ../../gldriver/gld_cgs.c ../../gldriver/gld_glue.c ../../gldriver/gld_pixels.c ../../gldriver/gld_texture.c ../../gldriver/gld_stencil.c ../../gldriver/rage_backend.c ../../common/mach64_emit.c
-all: scanshot ragegl_test depth32_test alpha_test alpha16_test ovl_dump quad_test fs_test ragegl_bench xfer_test gldcore_test bundle_test gl_suite
+all: scanshot ragegl_test depth32_test alpha_test alpha16_test ovl_dump ovl_b0 ovl_b0 quad_test fs_test ragegl_bench xfer_test gldcore_test bundle_test gl_suite
 ragegl_test: ragegl_test.c ragegl.h
 	cc $(CFLAGS) -o $@ ragegl_test.c -framework IOKit -framework CoreFoundation
 depth32_test: depth32_test.c ragegl.h
@@ -12,6 +12,8 @@ alpha16_test: alpha16_test.c ragegl.h
 	cc $(CFLAGS) -o $@ alpha16_test.c -framework IOKit -framework CoreFoundation
 ovl_dump: ovl_dump.c ragegl.h
 	cc $(CFLAGS) -o $@ ovl_dump.c -framework IOKit -framework CoreFoundation
+ovl_b0: ovl_b0.c ragegl.h
+	cc $(CFLAGS) -o $@ ovl_b0.c -framework IOKit -framework CoreFoundation
 quad_test: quad_test.c ragegl.h
 	cc $(CFLAGS) -o $@ quad_test.c -framework IOKit -framework CoreFoundation
 xfer_test: xfer_test.c ragegl.h

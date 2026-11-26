@@ -258,6 +258,26 @@ IOReturn RageLTDevice::regDump(uint32_t *pairs, uint32_t maxPairs, uint32_t *n)
     *n = k;
     return kIOReturnSuccess;
 }
+
+/* Overlay plan step B0, the ONLY register write of the step: OVERLAY_VIDEO_KEY_CLR (block 1, window offset 0x008) is a colour-key compare value with no visible effect while the overlay is
+ * disabled (SCALE_CNTL = 0, KEY_CNTL = 0; checked below).  Write 0x005A5A5A, read it back, write the original value back, read again.  Proves block 1 latches writes. */
+IOReturn RageLTDevice::ovlB0(uint32_t *before, uint32_t *readback, uint32_t *after)
+{
+    const uint32_t kKeyClr = 0x008, kScaleCntl = 0x024, kKeyCntl = 0x018;
+    IOReturn rc = kIOReturnSuccess; uint32_t orig;
+    IOLockLock(fLock);
+    if (OSReadLittleInt32((volatile void *)fRegs, kScaleCntl) != 0 || OSReadLittleInt32((volatile void *)fRegs, kKeyCntl) != 0) rc = kIOReturnNotPermitted;   /* the overlay must be idle */
+    else {
+        orig = OSReadLittleInt32((volatile void *)fRegs, kKeyClr);
+        *before = orig;
+        OSWriteLittleInt32((volatile void *)fRegs, kKeyClr, 0x005A5A5Au); eieio();
+        *readback = OSReadLittleInt32((volatile void *)fRegs, kKeyClr);
+        OSWriteLittleInt32((volatile void *)fRegs, kKeyClr, orig); eieio();
+        *after = OSReadLittleInt32((volatile void *)fRegs, kKeyClr);
+    }
+    IOLockUnlock(fLock);
+    return rc;
+}
 #endif
 
 IOReturn RageLTDevice::scanoutCopyOut(uint32_t byteOff, uint8_t *dst, uint32_t len)

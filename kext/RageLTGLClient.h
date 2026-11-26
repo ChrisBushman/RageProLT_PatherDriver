@@ -46,6 +46,7 @@ public:
     IOReturn selPresentScaled(uint32_t s, uint32_t sz, uint32_t d, uint32_t dsz, uint32_t filter);
     IOReturn selScanoutRead(uint32_t byteOff, uint32_t addr, uint32_t len);
     IOReturn selRegDump(uint32_t addr, uint32_t len);       /* debug builds only, read-only */
+    IOReturn selOvlB0(uint32_t *before, uint32_t *readback, uint32_t *after);   /* debug builds only: overlay step B0 */
 };
 
 #endif
