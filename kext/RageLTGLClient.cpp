@@ -49,6 +49,7 @@ bool RageLTGLClient::start(IOService *provider)
     M(RAGE_GL_CONFIG,      selConfig,     kIOUCScalarIScalarO, 2, 0);
     M(RAGE_GL_PRESENT_SCALED, selPresentScaled, kIOUCScalarIScalarO, 5, 0);
     M(RAGE_GL_SCANOUT_READ, selScanoutRead, kIOUCScalarIScalarO, 3, 0);
+    M(RAGE_GL_REG_DUMP,    selRegDump,    kIOUCScalarIScalarO, 2, 0);
 #undef M
     fDev->logEvent(RAGE_EV_CLIENT_OPEN, fOwner, RAGE_CLIENT_GL, 0, 0, 0, 0);
     return true;
@@ -57,7 +58,7 @@ bool RageLTGLClient::start(IOService *provider)
 IOExternalMethod *RageLTGLClient::getTargetAndMethodForIndex(IOService **target, UInt32 index)
 {
     if (!fDev || index >= RAGE_GL_SEL_COUNT) return 0;
-    if (index == RAGE_GL_SCANOUT_READ && !RAGE_DEBUG_ENGTEST) return 0;
+    if ((index == RAGE_GL_SCANOUT_READ || index == RAGE_GL_REG_DUMP) && !RAGE_DEBUG_ENGTEST) return 0;
     *target = this;
     return &fMethods[index];
 }
@@ -245,6 +246,17 @@ IOReturn RageLTGLClient::selScanoutRead(uint32_t byteOff, uint32_t addr, uint32_
     IOFree(buf, XFER_CHUNK);
     return rc;
 }
+IOReturn RageLTGLClient::selRegDump(uint32_t addr, uint32_t len)
+{
+    enum { kDumpPairs = 48 };
+    uint32_t pairs[2 * kDumpPairs], n = 0; IOReturn rc;                  /* a pair is TWO words: the first version sized this in words and overran the kernel stack (panic Nov 25 22:2x) */
+    if (!fDev) return kIOReturnNotAttached;
+    rc = fDev->regDump(pairs, kDumpPairs, &n);
+    if (rc != kIOReturnSuccess || n > kDumpPairs) return rc != kIOReturnSuccess ? rc : kIOReturnOverrun;
+    if (len > n * 8) len = n * 8;
+    return userOut(addr, (const uint8_t *)pairs, len & ~3u);
+}
 #else
 IOReturn RageLTGLClient::selScanoutRead(uint32_t, uint32_t, uint32_t) { return kIOReturnUnsupported; }
+IOReturn RageLTGLClient::selRegDump(uint32_t, uint32_t) { return kIOReturnUnsupported; }
 #endif

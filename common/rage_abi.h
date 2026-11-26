@@ -34,7 +34,8 @@ enum {
                                 * texel format 0/3/4/6/8/11/12/15 for the primary unit (0 or 6 = unchanged), format for the secondary unit (0 = unchanged)}: every SET_TEXTURE of a flush plus
                                 * the submit in ONE kernel call (a flush used to cost 13+ round trips); the texture records apply exactly as SET_TEXTURE would, failures ignored */
     RAGE_GL_PRESENT_SCALED = 18, /* in 5 {sx | sy << 16, sw | sh << 16, dx | dy << 16, dw | dh << 16, filter (0 nearest, 1 bilinear)}: target rectangle -> scanout rectangle through the 3D engine (any pixel formats; needs a power-of-two target pitch) */
-    RAGE_GL_SEL_COUNT = 19
+    RAGE_GL_REG_DUMP = 19,     /* debug builds only (RAGE_DEBUG_ENGTEST), READ-ONLY: in 2 {user address, byte length}; fills {tag, value} word pairs for a fixed register list: tag 0x100|i = block-1 index i (overlay/scaler), tag 0x00..0xfc = block-0 byte offset, tag 0xf00 = PCI revision/class word (docs/re-notes/overlay-scaler-plan.md step A) */
+    RAGE_GL_SEL_COUNT = 20
 };
 #define RAGE_XFER_SWAP16 1u      /* VRAM_WRITE/READ flag: swap bytes inside every 16-bit unit */
 #define RAGE_XFER_SWAP32 2u      /* ... inside every 32-bit unit */

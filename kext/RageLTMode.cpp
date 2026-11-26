@@ -241,6 +241,25 @@ IOReturn RageLTDevice::vramCopyOut(uint32_t owner, uint32_t off, uint8_t *dst, u
     return rc;
 }
 
+#if RAGE_DEBUG_ENGTEST
+/* READ-ONLY, debug builds: a FIXED list (the caller cannot choose addresses).  Block-1 overlay/scaler registers sit at window offsets idx*4 (below the block-0 base 0x400);
+ * block-0 entries give the mode context.  Nothing here writes, and no engine wait is needed (plain register reads). */
+IOReturn RageLTDevice::regDump(uint32_t *pairs, uint32_t maxPairs, uint32_t *n)
+{
+    static const uint16_t b1[] = { 0x00,0x01,0x02,0x03,0x04,0x05,0x06,0x07,0x08,0x09,0x0a,0x0b,0x0c,0x0d,0x0e,0x0f,0x10,0x11,0x12,0x13,0x14,0x15, 0x54,0x55,0x56,0x57,0x58,0x59 };
+    static const uint16_t b0[] = { 0x00, 0x08, 0x14, 0x1c, 0xb0, 0xe0 };   /* CRTC_H_TOTAL_DISP, CRTC_V_TOTAL_DISP, CRTC_OFF_PITCH, CRTC_GEN_CNTL, MEM_CNTL, CONFIG_CHIP_ID */
+    uint32_t i, k = 0;
+    if (maxPairs < sizeof b1 / 2 + sizeof b0 / 2 + 1) return kIOReturnNoSpace;
+    IOLockLock(fLock);
+    for (i = 0; i < sizeof b1 / 2; i++) { pairs[2 * k] = 0x100u | b1[i]; pairs[2 * k + 1] = OSReadLittleInt32((volatile void *)fRegs, b1[i] * 4u); k++; }
+    for (i = 0; i < sizeof b0 / 2; i++) { pairs[2 * k] = b0[i]; pairs[2 * k + 1] = OSReadLittleInt32((volatile void *)fRegs, 0x400u + b0[i]); k++; }
+    pairs[2 * k] = 0xf00u; pairs[2 * k + 1] = fPCI->configRead32(0x08); k++;
+    IOLockUnlock(fLock);
+    *n = k;
+    return kIOReturnSuccess;
+}
+#endif
+
 IOReturn RageLTDevice::scanoutCopyOut(uint32_t byteOff, uint8_t *dst, uint32_t len)
 {
     volatile uint8_t *vram = (volatile uint8_t *)fMap->getVirtualAddress(); uint32_t i; IOReturn rc = kIOReturnBadArgument;

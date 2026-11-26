@@ -112,6 +112,7 @@ public:
     IOReturn     vramCopyIn(uint32_t owner, uint32_t off, const uint8_t *src, uint32_t len, uint32_t flags);     /* src = kernel buffer */
     IOReturn     vramCopyOut(uint32_t owner, uint32_t off, uint8_t *dst, uint32_t len, uint32_t flags);
     IOReturn     scanoutCopyOut(uint32_t byteOff, uint8_t *dst, uint32_t len);                                    /* debug */
+    IOReturn     regDump(uint32_t *pairs, uint32_t maxPairs, uint32_t *n);                                        /* debug, READ-ONLY fixed register list */
     IOReturn     displayInfo(struct rage_display *out, uint32_t *gen);
     uint32_t       modeGen(void) const { return fModeGen; }
     /* mode changes (RageLTMode.cpp) */
