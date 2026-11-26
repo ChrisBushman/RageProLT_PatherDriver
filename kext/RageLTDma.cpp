@@ -32,7 +32,8 @@ bool RageLTDevice::dmaInit(void)
 {
     IOOptionBits o = kIOMemoryPhysicallyContiguous | kIODirectionOutIn;
     IOByteCount seg; IOPhysicalAddress pc, pr;
-    fDmaOk = false; fDmaUse = false; fDmaPending = false;
+    fDmaOk = false; fDmaUse = false; fDmaPending = false; fGuiPending = false;
+    fXferOk = false; fXferUse = false; fXferPending = false; fXferStage = 0; fXferTab = 0; fStageLock = 0;
     fDmaCmd = IOBufferMemoryDescriptor::withOptions(o, DMA_CMD_BYTES, PAGE_SIZE);
     fDmaCmd2 = IOBufferMemoryDescriptor::withOptions(o, DMA_CMD_BYTES, PAGE_SIZE);        /* optional: without it submits stay strictly serial */
     fDmaRing = IOBufferMemoryDescriptor::withOptions(o, DMA_RING_BYTES, 0x4000);
@@ -61,16 +62,117 @@ bool RageLTDevice::dmaInit(void)
     fDmaUse = true;                                                     /* default on; RAGE_GL_CONFIG key 1 selects PIO */
     fPCI->setBusMasterEnable(true);                                    /* PCI command bit 2: without it the engine never fetches the ring (measured) */
     fDmaOk = true;
+    xferInit();
     logEvent(RAGE_EV_MARK, 0, 0xd0010000u, fDmaCmdBus, fDmaRingBus, 0, 0);
     return true;
 }
 
 void RageLTDevice::dmaFree(void)
 {
-    fDmaOk = false;
+    fDmaOk = false; fXferOk = false;
+    if (fXferStage) { fXferStage->complete(kIODirectionOutIn); fXferStage->release(); fXferStage = 0; }
+    if (fXferTab) { fXferTab->complete(kIODirectionOutIn); fXferTab->release(); fXferTab = 0; }
+    if (fStageLock) { IOLockFree(fStageLock); fStageLock = 0; }
     if (fDmaCmd) { fDmaCmd->complete(kIODirectionOutIn); fDmaCmd->release(); fDmaCmd = 0; }
     if (fDmaCmd2) { fDmaCmd2->complete(kIODirectionOutIn); fDmaCmd2->release(); fDmaCmd2 = 0; }
     if (fDmaRing) { fDmaRing->complete(kIODirectionOutIn); fDmaRing->release(); fDmaRing = 0; }
+}
+
+extern uint32_t pf_err;
+/* ---- texture/pixel upload by system transfer (docs/re-notes/texture-dma-upload-standalone.md) ---- */
+#define XFER_MAX_BYTES  0x100000u        /* preferred staging size = the largest single upload (1 MB); halved down to 64 KB if the contiguous allocation fails */
+#define XFER_DESC       4096u
+
+void RageLTDevice::xferInit(void)
+{
+    IOOptionBits o = kIOMemoryPhysicallyContiguous | kIODirectionOutIn;
+    IOByteCount seg; IOPhysicalAddress ps, pt; uint32_t sz;
+    fXferOk = false; fXferUse = false; fXferPending = false;
+    fStageLock = IOLockAlloc();
+    if (!fStageLock) return;
+    for (sz = XFER_MAX_BYTES; sz >= 0x10000u && !fXferStage; sz >>= 1) {
+        fXferStage = IOBufferMemoryDescriptor::withOptions(o, sz, PAGE_SIZE);
+        if (fXferStage && fXferStage->prepare(kIODirectionOutIn) != kIOReturnSuccess) { fXferStage->release(); fXferStage = 0; }
+        if (fXferStage) { ps = fXferStage->getPhysicalSegment(0, &seg); if (seg < sz || !ps || ps >= 0x80000000u || ((uint32_t)ps & 0xfffu)) { fXferStage->complete(kIODirectionOutIn); fXferStage->release(); fXferStage = 0; } else fXferStageBytes = sz; }
+    }
+    fXferTab = IOBufferMemoryDescriptor::withOptions(o, PAGE_SIZE, PAGE_SIZE);
+    if (fXferTab && fXferTab->prepare(kIODirectionOutIn) != kIOReturnSuccess) { fXferTab->release(); fXferTab = 0; }
+    if (!fXferStage || !fXferTab) { LOG("upload staging not allocated: CPU uploads only\n"); return; }
+    ps = fXferStage->getPhysicalSegment(0, &seg); pt = fXferTab->getPhysicalSegment(0, &seg);
+    fXferStageKva = (volatile uint8_t *)fXferStage->getBytesNoCopy(); fXferTabKva = (volatile uint8_t *)fXferTab->getBytesNoCopy();
+    if (!pt || pt >= 0x80000000u || seg < PAGE_SIZE || ((uint32_t)pt & 0xfu) || !fXferStageKva || !fXferTabKva) { LOG("upload table not usable\n"); return; }
+    fXferStageBus = (uint32_t)ps; fXferTabBus = (uint32_t)pt;
+    fXferOk = true; fXferUse = true;
+    logEvent(RAGE_EV_MARK, 0, 0xd0070000u, fXferStageBus, fXferTabBus, fXferStageBytes, 0);
+}
+
+IOReturn RageLTDevice::xferReserve(uint8_t **stage, uint32_t *maxBytes)
+{
+    IOReturn rc = kIOReturnSuccess;
+    if (!fXferOk || !fXferUse || !fEngineLive) return kIOReturnUnsupported;
+    IOLockLock(fStageLock);
+    IOLockLock(fLock);
+    if (fXferPending) rc = xferWait();                                  /* the stage is rewritten only after the previous transfer has finished */
+    IOLockUnlock(fLock);
+    if (rc || !fXferUse) { IOLockUnlock(fStageLock); return rc ? rc : kIOReturnUnsupported; }
+    *stage = (uint8_t *)fXferStageKva; *maxBytes = fXferStageBytes;
+    return kIOReturnSuccess;
+}
+
+void RageLTDevice::xferAbort(void) { IOLockUnlock(fStageLock); }
+
+IOReturn RageLTDevice::xferKick(uint32_t owner, uint32_t off, uint32_t len, uint32_t flags)
+{
+    uint32_t nd, i; IOReturn rc;
+    if ((off | len) & 3u || !len || len > fXferStageBytes || (flags & ~3u)) { IOLockUnlock(fStageLock); return kIOReturnBadArgument; }
+    if (flags) rage_xfer_inplace((uint8_t *)fXferStageKva, len, flags);   /* cached stores; the stage is ours alone (stage lock) and no transfer is in flight */
+    nd = (len + XFER_DESC - 1u) / XFER_DESC;
+    IOLockLock(fLock);
+    if (!rage_vram_owns(&fVram, off, len, owner)) { IOLockUnlock(fLock); IOLockUnlock(fStageLock); return kIOReturnBadArgument; }
+    rc = idleWait();                                                    /* engine idle: the destination may be in use by a draw; also finishes any GUI stream */
+    if (rc) { fXferUse = false; IOLockUnlock(fLock); IOLockUnlock(fStageLock); return rc; }
+    for (i = 0; i < nd; i++) {
+        uint32_t cnt = (i == nd - 1u) ? len - i * XFER_DESC : XFER_DESC; volatile uint8_t *d = fXferTabKva + 16u * i;
+        OSWriteLittleInt32((void *)d, 0, off + i * XFER_DESC);          /* frame buffer offset (explicit per descriptor) */
+        OSWriteLittleInt32((void *)d, 4, fXferStageBus + i * XFER_DESC);
+        OSWriteLittleInt32((void *)d, 8, cnt | ((i == nd - 1u) ? MACH64_DMA_EOL : 0u));
+        OSWriteLittleInt32((void *)d, 12, 0);
+    }
+    dmaFlush(fXferStageKva, len); dmaFlush(fXferTabKva, 16u * nd);
+    fXferDst = off; fXferLen = len; fXferEnd = fXferTabBus + 16u * nd;
+    fXferSaveBus = eng_rd(fRegs, MACH64_BUS_CNTL);
+    eng_wr(fRegs, MACH64_BUS_CNTL, (fXferSaveBus & ~MACH64_BUS_MASTER_DIS) | MACH64_BUS_EXT_REG_EN);
+    fXferPending = true; fDmaPending = true;
+    eng_wr(fRegs, MACH64_BM_SYSTEM_TABLE, fXferTabBus);                 /* SYSTEM_TRIGGER 0: memory -> frame buffer, starts now */
+    logEvent(RAGE_EV_MARK, owner, 0xd0071000u, off, len, nd, flags);
+    IOLockUnlock(fLock);
+    IOLockUnlock(fStageLock);
+    return kIOReturnSuccess;
+}
+
+/* caller holds fLock.  Done = descriptors consumed (BM_COMMAND EOL, table pointer at the end) AND the last word reads back from VRAM as staged. */
+IOReturn RageLTDevice::xferWait(void)
+{
+    volatile uint8_t *vram = (volatile uint8_t *)fMap->getVirtualAddress(); uint32_t spins, last, want; bool done = false;
+    if (!fXferPending) return kIOReturnSuccess;
+    last = fXferDst + fXferLen - 4u;
+    want = OSReadLittleInt32((void *)fXferStageKva, fXferLen - 4u);
+    for (spins = 0; spins < RAGE_WAIT_SPINS; spins++) {
+        if (eng_rd(fRegs, MACH64_BM_COMMAND) == 0x80000000u && (eng_rd(fRegs, MACH64_BM_SYSTEM_TABLE) & ~0xfu) == fXferEnd) { done = true; break; }
+    }
+    if (done) { done = false; for (spins = 0; spins < RAGE_WAIT_SPINS; spins++) if (OSReadLittleInt32((void *)vram, last) == want) { done = true; break; } }
+    fXferPending = false; fDmaPending = fGuiPending;
+    if (!done) {
+        pf_err++; fXferUse = false;                                    /* never trust it again this session: the CPU path from now on */
+        logEvent(RAGE_EV_ERROR, 0, 0xd0072000u, eng_rd(fRegs, MACH64_BM_SYSTEM_TABLE), eng_rd(fRegs, MACH64_BM_COMMAND), fXferDst, fXferLen);
+        logEvent(RAGE_EV_ERROR, 0, 0xd0073000u, eng_rd(fRegs, MACH64_BUS_CNTL), OSReadLittleInt32((void *)vram, last), want, fPCI->configRead32(kIOPCIConfigCommand));
+        eng_reset(fRegs, 1);
+        eng_wr(fRegs, MACH64_BUS_CNTL, fXferSaveBus);
+        fFenceCompleted = fFenceSubmitted;
+        return kIOReturnTimeout;
+    }
+    eng_wr(fRegs, MACH64_BUS_CNTL, fXferSaveBus);                       /* bus mastering exactly as found */
+    return kIOReturnSuccess;
 }
 
 /* PROFILE (always compiled, a few mftb reads per submit): ticks spent building the stream, waiting for the previous stream, waiting for engine idle before the kick, and in idleWait() from
@@ -84,12 +186,14 @@ IOReturn RageLTDevice::dmaWait(void)
 {
     uint32_t spins, idle = 0, end;
     if (!fDmaPending) return kIOReturnSuccess;
+    if (fXferPending) { IOReturn xr = xferWait(); if (xr) { fDmaPending = fGuiPending; return xr; } }   /* a texture/pixel upload in flight is always finished first */
+    if (!fGuiPending) { fDmaPending = false; return kIOReturnSuccess; }
     end = fDmaEnd;                                                     /* table end of the stream in flight (set at its kick) */
     for (spins = 0; spins < RAGE_WAIT_SPINS; spins++) {
         uint32_t tbl = eng_rd(fRegs, MACH64_BM_GUI_TABLE) & ~0xfu;
         if (tbl == end && !(eng_rd(fRegs, MACH64_GUI_STAT) & MACH64_GUI_ACTIVE)) { if (++idle >= 8) break; } else idle = 0;
     }
-    fDmaPending = false;
+    fDmaPending = false; fGuiPending = false;
     if (idle < 8) {
         pf_err++;
         logEvent(RAGE_EV_ERROR, 0, 0xd0020000u, eng_rd(fRegs, MACH64_BM_GUI_TABLE), eng_rd(fRegs, MACH64_GUI_STAT), eng_rd(fRegs, MACH64_FIFO_STAT), fDmaNDesc);
@@ -142,7 +246,7 @@ IOReturn RageLTDevice::dmaSubmit(const struct rage_ctx *c, const uint32_t *pairs
     dmaFlush((volatile uint8_t *)w, bytes);
     dmaFlush(tab, 16u * nd);
     t_b = tbl32();
-    if (fDmaPending) { pf_have++; if ((eng_rd(fRegs, MACH64_BM_GUI_TABLE) & ~0xfu) == fDmaEnd && !(eng_rd(fRegs, MACH64_GUI_STAT) & MACH64_GUI_ACTIVE)) pf_starved++; }   /* PROFILE: was the previous stream already finished (chip starved by the CPU)? */
+    if (fGuiPending) { pf_have++; if ((eng_rd(fRegs, MACH64_BM_GUI_TABLE) & ~0xfu) == fDmaEnd && !(eng_rd(fRegs, MACH64_GUI_STAT) & MACH64_GUI_ACTIVE)) pf_starved++; }   /* PROFILE: was the previous stream already finished (chip starved by the CPU)? */
     rc = dmaWait();                                                    /* the stream on the other buffer (if any) must be finished before the engine is reprogrammed */
     if (rc) return rc;
     t_c = tbl32();
@@ -154,7 +258,7 @@ IOReturn RageLTDevice::dmaSubmit(const struct rage_ctx *c, const uint32_t *pairs
     eng_wr(fRegs, MACH64_BUS_CNTL, (fDmaSaveBus & ~MACH64_BUS_MASTER_DIS) | MACH64_BUS_EXT_REG_EN);
     eng_wq(fRegs, MACH64_BM_GUI_TABLE_CMD, ringBus | MACH64_CIRCULAR_BUF_SIZE_16KB);
     eng_wq(fRegs, MACH64_SRC_CNTL, MACH64_SRC_BM_ENABLE | MACH64_SRC_BM_SYNC | MACH64_SRC_BM_OP_SYSTEM_TO_REG);
-    fDmaPending = true;
+    fDmaPending = true; fGuiPending = true;
     eng_wq(fRegs, MACH64_DST_HEIGHT_WIDTH, 0);                         /* kick */
     if (fDmaCmd2) fDmaCur ^= 1u;                                       /* the next stream is built in the twin while this one draws */
     logEvent(RAGE_EV_MARK, 0, 0xd0030000u, bytes, nd, npairs, b);
@@ -199,9 +303,14 @@ uint32_t RageLTDevice::dmaMinimalTest(uint32_t variant)
 }
 #endif
 #else
-bool RageLTDevice::dmaInit(void) { fDmaOk = false; fDmaUse = false; fDmaPending = false; return false; }
+bool RageLTDevice::dmaInit(void) { fDmaOk = false; fDmaUse = false; fDmaPending = false; fGuiPending = false; fXferOk = false; fXferUse = false; fXferPending = false; return false; }
 void RageLTDevice::dmaFree(void) {}
 IOReturn RageLTDevice::dmaWait(void) { return kIOReturnSuccess; }
+IOReturn RageLTDevice::xferReserve(uint8_t **, uint32_t *) { return kIOReturnUnsupported; }
+void RageLTDevice::xferAbort(void) {}
+IOReturn RageLTDevice::xferKick(uint32_t, uint32_t, uint32_t, uint32_t) { return kIOReturnUnsupported; }
+IOReturn RageLTDevice::xferWait(void) { return kIOReturnSuccess; }
+void RageLTDevice::xferInit(void) {}
 IOReturn RageLTDevice::dmaSubmit(const struct rage_ctx *, const uint32_t *, uint32_t) { return kIOReturnUnsupported; }
 #endif
 
@@ -220,5 +329,6 @@ void RageLTDevice::dmaConfig(uint32_t key, uint32_t value)
 {
     IOLockLock(fLock);
     if (key == 1) { (void)dmaWait(); fDmaUse = fDmaOk && value; }
+    if (key == 2) { (void)dmaWait(); fXferUse = fXferOk && value; }       /* texture/pixel upload by system transfer on/off */
     IOLockUnlock(fLock);
 }

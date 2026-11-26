@@ -65,7 +65,13 @@ class RageLTDevice : public IOAccelerator
     IOMemoryMap         *fDmaCmdMap, *fDmaRingMap;
     volatile uint8_t      *fDmaCmdKva, *fDmaCmdKva2, *fDmaRingKva, *fDmaRingKva0;
     uint32_t               fDmaCmdBus, fDmaCmdBus2, fDmaRingBus, fDmaNDesc, fDmaSaveBus, fDmaEnd, fDmaCur;   /* fDmaEnd = table end the walk of the stream in flight must reach; fDmaCur = buffer the next stream is built in */
-    bool                 fDmaOk, fDmaUse, fDmaPending;
+    bool                 fDmaOk, fDmaUse, fDmaPending, fGuiPending;   /* fDmaPending: ANYTHING in flight (GUI stream or system transfer); fGuiPending: the GUI stream only */
+    /* texture/pixel upload by system transfer (design: docs/re-notes/texture-dma-upload-standalone.md) */
+    class IOBufferMemoryDescriptor *fXferStage, *fXferTab;
+    volatile uint8_t      *fXferStageKva, *fXferTabKva;
+    uint32_t               fXferStageBus, fXferTabBus, fXferStageBytes, fXferSaveBus, fXferEnd, fXferDst, fXferLen;
+    bool                 fXferOk, fXferUse, fXferPending;
+    IOLock              *fStageLock;     /* serialises the stage fill + kick; taken before fLock, never after */
     uint32_t               fScratch;     /* a word the engine never writes: rewriting it with its own value (CPU) flushes the engine pixel cache before a CPU read of VRAM */
     struct rage_log     *fLog;         /* event ring (RAGE_FEAT_PANIC_LOG), allocated at start */
     IOSimpleLock        *fLogLock;     /* short spin lock: logging must be safe from any context, including an interrupt filter */
@@ -125,6 +131,12 @@ public:
     uint32_t       dmaMinimalTest(uint32_t variant);   /* DEBUG ONLY */
     void         dmaConfig(uint32_t key, uint32_t value);
     bool         dmaActive(void) const { return fDmaOk && fDmaUse; }
+    void         xferInit(void);
+    bool         xferActive(void) const { return fXferOk && fXferUse; }
+    IOReturn     xferReserve(uint8_t **stage, uint32_t *maxBytes);                 /* takes the stage lock; kIOReturnUnsupported = use the CPU path */
+    void         xferAbort(void);                                                    /* releases the stage lock without a kick */
+    IOReturn     xferKick(uint32_t owner, uint32_t off, uint32_t len, uint32_t flags);   /* consumes the stage lock; returns after the kick */
+    IOReturn     xferWait(void);                     /* caller holds fLock: finish the transfer in flight (bounded) */
     /* pairs[2*i] = register byte offset, pairs[2*i+1] = value.  Validated as a whole by rage_batch_ok(); refused batches change nothing. */
     IOReturn     submitBatch(uint32_t owner, const uint32_t *pairs, uint32_t npairs);
 
@@ -141,5 +153,8 @@ public:
     bool         engineLive(void) const { return fEngineLive; }
     bool         scanout555(void) const { return fDisp.depth == 3; }
 };
+
+/* byte-swap a buffer in place the way vramCopyIn would (RageLTMode.cpp) */
+void rage_xfer_inplace(uint8_t *p, uint32_t len, uint32_t flags);
 
 #endif

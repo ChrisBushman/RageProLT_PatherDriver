@@ -10,6 +10,7 @@ extern "C" { task_t current_task(void); int copyin(const char *udaddr, void *kad
 OSDefineMetaClassAndStructors(RageLTGLClient, IOUserClient)
 
 #define XFER_CHUNK 16384u
+#define XFER_DMA_MIN 8192u         /* below this the CPU path costs less than the DMA set-up */
 
 bool RageLTGLClient::initWithTask(task_t owningTask, void *securityID, UInt32 type)
 {
@@ -158,7 +159,21 @@ IOReturn RageLTGLClient::selVramWrite(uint32_t off, uint32_t addr, uint32_t len,
     uint8_t *buf; IOReturn rc = kIOReturnSuccess; uint32_t done = 0;
     if (!fDev) return kIOReturnNotAttached;
     if (fDev->modeGen() & 1u) return kIOReturnNotReady;
-    if (!len || (len & 3u) || len > 0x100000u) return kIOReturnBadArgument;
+    if (!len || (len & 3u) || len > 0x100000u || (flags & ~3u) || (off & 3u)) return kIOReturnBadArgument;
+    /* Large uploads: user data -> kernel staging -> system transfer (returns after the kick; the device fences it before any dependent use). */
+    while (len - done >= XFER_DMA_MIN && !((off + done) & 15u) && fDev->xferActive()) {   /* 16-byte aligned destinations only (the proven transfers); others use the CPU path */
+        uint8_t *stage; uint32_t max, n;
+        rc = fDev->xferReserve(&stage, &max);
+        if (rc == kIOReturnUnsupported || (rc == kIOReturnTimeout && !fDev->xferActive())) { rc = kIOReturnSuccess; break; }   /* not available (or just disabled by a timeout): the CPU path */
+        if (rc) return rc;
+        n = len - done > max ? max : len - done;
+        rc = userIn(addr + done, stage, n);
+        if (rc) { fDev->xferAbort(); return rc; }
+        rc = fDev->xferKick(fOwner, off + done, n, flags);
+        if (rc) return rc;
+        done += n;
+    }
+    if (done == len) return kIOReturnSuccess;
     buf = (uint8_t *)IOMalloc(XFER_CHUNK);
     if (!buf) return kIOReturnNoMemory;
     while (done < len && rc == kIOReturnSuccess) {
@@ -195,7 +210,7 @@ IOReturn RageLTGLClient::selSetTexture(uint32_t index, uint32_t off, uint32_t fm
 IOReturn RageLTGLClient::selConfig(uint32_t key, uint32_t value)
 {
     if (!fDev) return kIOReturnNotAttached;
-    if (key != 1) return kIOReturnBadArgument;
+    if (key != 1 && key != 2) return kIOReturnBadArgument;      /* 1 = DMA batch submission, 2 = DMA texture/pixel upload */
     fDev->dmaConfig(key, value);
     return kIOReturnSuccess;
 }

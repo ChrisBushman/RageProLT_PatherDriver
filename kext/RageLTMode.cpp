@@ -171,6 +171,12 @@ static inline void unxfer_word(uint8_t *p, uint32_t v, uint32_t flags)
     p[0] = (uint8_t)b0; p[1] = (uint8_t)b1; p[2] = (uint8_t)b2; p[3] = (uint8_t)b3;
 }
 
+void rage_xfer_inplace(uint8_t *p, uint32_t len, uint32_t flags)
+{
+    uint32_t i;
+    for (i = 0; i + 4 <= len; i += 4) OSWriteLittleInt32((void *)p, i, xfer_word(p + i, flags));
+}
+
 IOReturn RageLTDevice::vramCopyIn(uint32_t owner, uint32_t off, const uint8_t *src, uint32_t len, uint32_t flags)
 {
     volatile uint8_t *vram = (volatile uint8_t *)fMap->getVirtualAddress(); uint32_t i; IOReturn rc = kIOReturnBadArgument;

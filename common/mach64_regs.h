@@ -148,6 +148,8 @@ static inline int mach64_vram_span_ok(uint32_t off, uint64_t len)
 #define MACH64_BM_GUI_TABLE_CMD     0x064c  /* ring base | CIRCULAR_BUF_SIZE  */
 #define MACH64_CRTC_INT_CNTL        0x0418  /* bit 24 BUSMASTER_EOL_INT_EN, bit 25 BUSMASTER_EOL_INT (read) / _AK (write 1 clears); other INT bits: see docs/re-notes/dma-async-queue.md */
 #define MACH64_BM_GUI_TABLE         0x01b8  /* current descriptor ptr (RO)    */
+#define MACH64_BM_SYSTEM_TABLE      0x01bc  /* system transfer: write table_phys | 0 to start; reads back the descriptor pointer (table end when done) */
+#define MACH64_BM_COMMAND           0x0188  /* reads 0x80000000 (EOL) when the list has ended */
 #define MACH64_CIRCULAR_BUF_SIZE_16KB (0u << 0)  /* the "16KB" encoding is 0  */
 
 /* ---- Engine status (FIFO / idle gating) ----------------------------- */
