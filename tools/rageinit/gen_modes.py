@@ -6,16 +6,18 @@ checked against the Dell 828FI limits (30-70 kHz, 50-120 Hz, 110 MHz).  Pixel cl
 frequency columns below)."""
 import os, re, subprocess, sys
 biosrun, rom, out = sys.argv[1:4]
-MASKS = "80:05041570"          # 640x480 72/75/85, 800x600 60/75/85 (0x15), 1280x1024 60, 1024x768 60/75
-MODES = [  # (vbe, w, h, bpp, pix_width_field, pclk_kHz)
- (0x0110, 640, 480, 15, 3, 36000), (0x0111, 640, 480, 16, 4, 36000), (0x0112, 640, 480, 24, 5, 36000),
- (0x0113, 800, 600, 15, 3, 56250), (0x0114, 800, 600, 16, 4, 56250), (0x0115, 800, 600, 24, 5, 56250),
- (0x0116, 1024, 768, 15, 3, 78750), (0x0117, 1024, 768, 16, 4, 78750), (0x0118, 1024, 768, 24, 5, 78750),
- (0x0119, 1280, 1024, 15, 3, 108000), (0x011a, 1280, 1024, 16, 4, 108000), (0x011b, 1280, 1024, 24, 5, 108000),
-]
+MASKS85 = "80:05041570"       # 640x480 72/75/85, 800x600 60/75/85 (0x15), 1280x1024 60, 1024x768 60/75
+MASKS60 = "80:04040400"       # 800x600 60 Hz, 1024x768 60 Hz, 1280x1024 60 Hz; 640x480 mask 0 = the ROM default 60 Hz
+MODES = []
+for bpp, pw, vbe_off in ((15, 3, 0), (16, 4, 1), (24, 5, 2)):
+    # (vbe, w, h, bpp, pixwidth, pclk_kHz, scratch poke)  -- 60 Hz rows first (gentlest), then the ROM's highest-rate rows
+    MODES += [(0x0110 + vbe_off, 640, 480, bpp, pw, 25175, "80:00000000"), (0x0113 + vbe_off, 800, 600, bpp, pw, 40000, MASKS60),
+              (0x0116 + vbe_off, 1024, 768, bpp, pw, 65000, MASKS60), (0x0119 + vbe_off, 1280, 1024, bpp, pw, 108000, MASKS60),
+              (0x0110 + vbe_off, 640, 480, bpp, pw, 36000, MASKS85), (0x0113 + vbe_off, 800, 600, bpp, pw, 56250, MASKS85),
+              (0x0116 + vbe_off, 1024, 768, bpp, pw, 78750, MASKS85)]
 LIM = dict(hmin=30.0, hmax=70.0, vmin=50.0, vmax=120.0, pmax=110000)
-def run(vbe):
-    env = dict(os.environ, BIOS_POKE="8c:40000000", BIOS_PREMODE="a083", BIOS_PRECX="0000", BIOS_POKE2=MASKS)
+def run(vbe, mask):
+    env = dict(os.environ, BIOS_POKE="8c:40000000", BIOS_PREMODE="a083", BIOS_PRECX="0000", BIOS_POKE2=mask)
     o = subprocess.run([biosrun, "-S", "-V", "%04x" % vbe, rom], env=env, capture_output=True, text=True).stderr
     o = o[o.index("after the BIOS mode set"):]
     r = {}
@@ -23,8 +25,8 @@ def run(vbe):
     ax = re.search(r"VBE 4F02 mode [0-9a-f]+: rc=\d+ ax=([0-9a-f]+)", o)
     return r
 rows = []
-for vbe, w, h, bpp, pw, pclk in MODES:
-    r = run(vbe)
+for vbe, w, h, bpp, pw, pclk, mask in MODES:
+    r = run(vbe, mask)
     ht = r["CRTC_H_TOTAL_DISP"]; hs = r["CRTC_H_SYNC_STRT_WID"]; vt = r["CRTC_V_TOTAL_DISP"]; vs = r["CRTC_V_SYNC_STRT_WID"]
     htot = ((ht & 0x1ff) + 1) * 8; hdisp = (((ht >> 16) & 0xff) + 1) * 8
     hstart = (hs & 0xff) * 8 + ((hs >> 8) & 7); hwid = ((hs >> 16) & 0x1f) * 8; hneg = (hs >> 21) & 1
