@@ -35,8 +35,8 @@ static int reserve_offset0(void)
 
 int main(int argc, char **argv){
   io_service_t s = IOServiceGetMatchingService(kIOMasterPortDefault, IOServiceMatching("RageStubFB"));
-  int probe = (argc>1 && !strcmp(argv[1],"probe")), guard = !probe && !(argc>2 && !strcmp(argv[2],"noguard")), r;
-  const char *k = probe ? "rage-probe" : "rage-notify";
+  int probe = (argc>1 && !strcmp(argv[1],"probe")), edid = (argc>1 && !strcmp(argv[1],"edid")), guard = !probe && !edid && !(argc>2 && !strcmp(argv[2],"noguard")), r;
+  const char *k = probe ? "rage-probe" : edid ? "rage-edid" : "rage-notify";
   CFStringRef key = CFStringCreateWithCString(NULL,k,kCFStringEncodingASCII); int one=1; CFNumberRef v = CFNumberCreate(NULL,kCFNumberIntType,&one);
   CFDictionaryRef d = CFDictionaryCreate(NULL,(const void**)&key,(const void**)&v,1,&kCFTypeDictionaryKeyCallBacks,&kCFTypeDictionaryValueCallBacks);
   if(!s){printf("no stub\n");return 1;}

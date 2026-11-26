@@ -27,6 +27,17 @@ class RageStubFB : public IOFramebuffer
     void checkDisplay(bool unblank);
     void probeAccelerator(void);
     void notifyModeChange(void);
+    /* DDC2B (I2C) over GP_IO: reads the monitor's EDID */
+    void ddcSet(int clk, int dat);
+    int  ddcClk(void);
+    int  ddcDat(void);
+    bool ddcStart(void);
+    void ddcStop(void);
+    bool ddcPutByte(UInt8 b);
+    UInt8 ddcGetByte(bool ack);
+    bool readEdid(UInt8 *buf, int blockNo);
+    void probeEdid(void);
+    void ddcDiag(void);
 public:
     virtual IOReturn setProperties(OSObject *props);
     virtual bool start(IOService *provider);

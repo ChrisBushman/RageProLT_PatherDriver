@@ -130,6 +130,7 @@ bool RageStubFB::start(IOService *provider)
     IOLog("RageStubFB: started\n");
     replayInit();         /* no-op unless enabled and the chip has not been initialised by the ROM */
     checkDisplay(true);   /* nothing opens this framebuffer yet (no WindowServer), so do it here too */
+    probeEdid();
     probeAccelerator();
     return true;
 }
@@ -154,6 +155,114 @@ void RageStubFB::probeAccelerator(void)
 }
 
 /* the accelerator derives its VRAM layout from the framebuffer's mode when it sees the mode-change notifications */
+
+/* ---- DDC2B: read the monitor's EDID over I2C bit-banged on GP_IO (block offset 0x78) --------------------------------------------------------
+ * Spec (RAGE PRO GCS 4.4/6.13, RAGE LT PRO RRG GP_IO 0_1E): DDC serial data = GIO0, serial clock = GIO4; GP_IO bit n is the pin level, bit 16+n its
+ * direction (1 = output).  Open-drain emulation: a line is driven low by direction=1/value=0 and released (high, pulled up by the monitor
+ * cable) by direction=0.  Only bits 0, 4, 16 and 20 are touched; the original value is restored afterwards. */
+enum { kGpIo = 0x78, kDdcDat = 1u << 0, kDdcClk = 1u << 4, kDdcDatDir = 1u << 16, kDdcClkDir = 1u << 20 };
+#define DDC_US 10
+void RageStubFB::ddcSet(int clk, int dat)
+{
+    UInt32 v = rd(kGpIo) & ~(kDdcDat | kDdcClk | kDdcDatDir | kDdcClkDir);
+    v |= kDdcClk | kDdcDat;                       /* latches 1: a released line follows the pin (latches 0 made both lines read low) */
+    if (!clk) v = (v & ~kDdcClk) | kDdcClkDir;
+    if (!dat) v = (v & ~kDdcDat) | kDdcDatDir;
+    wr(kGpIo, v);
+    IODelay(DDC_US);
+    if (clk) for (int i = 0; i < 500 && !(rd(kGpIo) & kDdcClk); i++) IODelay(10);   /* clock stretching */
+}
+int RageStubFB::ddcClk(void) { return (rd(kGpIo) & kDdcClk) != 0; }
+int RageStubFB::ddcDat(void) { return (rd(kGpIo) & kDdcDat) != 0; }
+bool RageStubFB::ddcStart(void)
+{
+    ddcSet(1, 1); if (!ddcClk() || !ddcDat()) return false;      /* bus stuck low */
+    ddcSet(1, 0); ddcSet(0, 0);
+    return true;
+}
+void RageStubFB::ddcStop(void) { ddcSet(0, 0); ddcSet(1, 0); ddcSet(1, 1); }
+bool RageStubFB::ddcPutByte(UInt8 b)
+{
+    for (int i = 7; i >= 0; i--) { int bit = (b >> i) & 1; ddcSet(0, bit); ddcSet(1, bit); ddcSet(0, bit); }
+    ddcSet(0, 1); ddcSet(1, 1);
+    int ack = !ddcDat();                                           /* the monitor pulls data low to acknowledge */
+    ddcSet(0, 1);
+    return ack != 0;
+}
+UInt8 RageStubFB::ddcGetByte(bool ack)
+{
+    UInt8 v = 0;
+    ddcSet(0, 1);
+    for (int i = 0; i < 8; i++) { ddcSet(1, 1); v = (UInt8)((v << 1) | ddcDat()); ddcSet(0, 1); }
+    ddcSet(0, ack ? 0 : 1); ddcSet(1, ack ? 0 : 1); ddcSet(0, ack ? 0 : 1);
+    ddcSet(0, 1);
+    return v;
+}
+/* one 128-byte EDID block (blockNo 0 = base block) from I2C address 0x50; true when it read back with a valid header and checksum */
+bool RageStubFB::readEdid(UInt8 *buf, int blockNo)
+{
+    if (!mapRegisters()) return false;
+    UInt32 save = rd(kGpIo);
+    bool ok = false;
+    for (int i = 0; i < 9; i++) { ddcSet(0, 1); ddcSet(1, 1); }    /* bus recovery: nine clocks with data released, then a STOP */
+    ddcStop();
+    {
+        bool s1 = ddcStart(); UInt32 g1 = rd(kGpIo);
+        bool a1 = s1 && ddcPutByte(0xa0); UInt32 g2 = rd(kGpIo);
+        bool a2 = a1 && ddcPutByte((UInt8)(blockNo * 128)); UInt32 g3 = rd(kGpIo);
+        bool s2 = a2 && ddcStart(); UInt32 g4 = rd(kGpIo);
+        bool a3 = s2 && ddcPutByte(0xa1); UInt32 g5 = rd(kGpIo);
+        IOLog("RageStubFB: DDC trace: start %d (gp %08x) addrW ack %d (gp %08x) offset ack %d (gp %08x) restart %d (gp %08x) addrR ack %d (gp %08x)\n",
+              s1, (unsigned)g1, a1, (unsigned)g2, a2, (unsigned)g3, s2, (unsigned)g4, a3, (unsigned)g5);
+        if (a3) { for (int i = 0; i < 128; i++) buf[i] = ddcGetByte(i != 127); ok = true; }
+    }
+    ddcStop();
+    wr(kGpIo, (rd(kGpIo) & ~(kDdcDat | kDdcClk | kDdcDatDir | kDdcClkDir)) | (save & (kDdcDat | kDdcClk | kDdcDatDir | kDdcClkDir)));
+    if (!ok) return false;
+    static const UInt8 hdr[8] = { 0, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0 };
+    UInt8 sum = 0;
+    for (int i = 0; i < 128; i++) sum = (UInt8)(sum + buf[i]);
+    if (blockNo == 0) for (int i = 0; i < 8; i++) if (buf[i] != hdr[i]) return false;
+    return sum == 0;
+}
+
+/* diagnostic: how do the GP_IO pin bits behave?  (value/direction combinations on the DDC lines, readback after each) */
+void RageStubFB::ddcDiag(void)
+{
+    if (!mapRegisters()) return;
+    UInt32 save = rd(kGpIo);
+    static const UInt32 bits[] = { 0, 4, 12 };      /* GIO0 = DDC data, GIO4 = DDC clock, GIOC = MONID0 */
+    for (int k = 0; k < 3; k++) {
+        UInt32 b = 1u << bits[k], d = b << 16, base = save & ~(b | d);
+        UInt32 st[5];
+        wr(kGpIo, base | b);            IODelay(50); st[0] = rd(kGpIo);   /* input, latch 1 */
+        wr(kGpIo, base);                IODelay(50); st[1] = rd(kGpIo);   /* input, latch 0 */
+        wr(kGpIo, base | d | b);        IODelay(50); st[2] = rd(kGpIo);   /* output high */
+        wr(kGpIo, base | d);            IODelay(50); st[3] = rd(kGpIo);   /* output low */
+        wr(kGpIo, base | b);            IODelay(50); st[4] = rd(kGpIo);   /* input again */
+        IOLog("RageStubFB: GP_IO bit %d: in/1 %08x  in/0 %08x  out/1 %08x  out/0 %08x  in/1 %08x\n", (int)bits[k], (unsigned)st[0], (unsigned)st[1], (unsigned)st[2], (unsigned)st[3], (unsigned)st[4]);
+        wr(kGpIo, save);
+    }
+    IOLog("RageStubFB: GP_IO restored %08x (was %08x)\\n", (unsigned)rd(kGpIo), (unsigned)save);
+}
+
+void RageStubFB::probeEdid(void)
+{
+    if (!mapRegisters()) return;
+    IOLog("RageStubFB: GP_IO before DDC = 0x%08x\n", (unsigned)rd(kGpIo));
+    UInt8 e[128];
+    bool ok = false;
+    for (int t = 0; t < 3 && !ok; t++) ok = readEdid(e, 0);
+    IOLog("RageStubFB: GP_IO after DDC = 0x%08x, EDID %s\n", (unsigned)rd(kGpIo), ok ? "read, header and checksum valid" : "NOT read (no ack, bad header or bad checksum)");
+    if (!ok) return;
+    for (int r = 0; r < 8; r++)
+        IOLog("RageStubFB: EDID %02x: %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x\n", r * 16,
+              e[r*16+0], e[r*16+1], e[r*16+2], e[r*16+3], e[r*16+4], e[r*16+5], e[r*16+6], e[r*16+7],
+              e[r*16+8], e[r*16+9], e[r*16+10], e[r*16+11], e[r*16+12], e[r*16+13], e[r*16+14], e[r*16+15]);
+    OSData *d = OSData::withBytes(e, 128);
+    if (d) { setProperty("RageEDID", d); d->release(); }
+}
+
 void RageStubFB::notifyModeChange(void)
 {
     checkDisplay(true);
@@ -171,6 +280,7 @@ IOReturn RageStubFB::setProperties(OSObject *props)
     if (d && d->getObject("rage-probe"))  { probeAccelerator(); return kIOReturnSuccess; }
     if (d && d->getObject("rage-notify")) { notifyModeChange(); return kIOReturnSuccess; }
     if (d && d->getObject("rage-unblank")) { checkDisplay(true); return kIOReturnSuccess; }
+    if (d && d->getObject("rage-edid"))    { probeEdid(); return kIOReturnSuccess; }
     if (d && d->getObject("rage-check"))   { checkDisplay(false); return kIOReturnSuccess; }
     return super::setProperties(props);
 }
