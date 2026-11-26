@@ -1,5 +1,5 @@
 /* tools/ragegl/ovl_sweep.c - overlay filter test: a frequency-sweep ("multiburst") pattern with a numbered scale, shown through the overlay scaler.
- * usage: ovl_sweep [mode 1|2 (1 = 640x480 source = 1.6x, 2 = 320x240 source = 3.2x; default 1)] [src_bpp 2|4 (default 2)] [hold seconds; 0 = stay up until SIGTERM/SIGINT (default 0)] [mode flags: 1 = SCALE_HORZ_MODE, 2 = SCALE_VERT_MODE; debug kext only (default 0)]
+ * usage: ovl_sweep [mode 1|2 (1 = 640x480 source = 1.6x, 2 = 320x240 source = 3.2x; default 1)] [src_bpp 2|4 (default 2)] [hold seconds; 0 = stay up until SIGTERM/SIGINT (default 0)] [flags: 1 = SCALE_HORZ_MODE, 2 = SCALE_VERT_MODE, 4 = coefficient table identity, 8 = flat 50/50 blend table; debug kext only (default 0)]
  * Pattern (source pixels; every number is the bar PERIOD in source pixels per black+white cycle at that spot - 16 = wide bars, 2 = one pixel black / one pixel white):
  *   top band    : vertical bars, period 16 at the left narrowing to 2 at the right (tests the HORIZONTAL filter); the numbers sit above the band
  *   middle band : horizontal bars, period 16 at the top narrowing to 2 at the bottom (tests the VERTICAL filter); the numbers sit in the left margin

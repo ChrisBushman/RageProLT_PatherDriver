@@ -262,11 +262,16 @@ IOReturn RageLTDevice::ovlOff(uint32_t owner)
 }
 IOReturn RageLTDevice::ovlOn(uint32_t owner, uint32_t off, uint32_t pitch_px, uint32_t sw, uint32_t sh, uint32_t dx, uint32_t dy, uint32_t dw, uint32_t dh, uint32_t bpp, uint32_t flags)
 {
-    IOReturn rc = kIOReturnBadArgument; uint32_t hinc, vinc, fmt, scalerIn, scaleCntl = 0xc0000000u;
-    if (flags & ~3u) return kIOReturnBadArgument;
+    IOReturn rc = kIOReturnBadArgument; uint32_t hinc, vinc, fmt, scalerIn, scaleCntl = 0xc0000000u, coefSet, cf0, cf1, cf2, cf3, cf4;
+    if (flags & ~0xfu) return kIOReturnBadArgument;
 #if !RAGE_DEBUG_ENGTEST
     if (flags) return kIOReturnUnsupported;                       /* the interpolation-mode bits are an unproven hypothesis: debug builds only */
 #endif
+    coefSet = (flags >> 2) & 3u;                               /* debug: 0 = Win98/X defaults, 1 = identity 0x00002000 x5, 2 = flat 50/50 blend 0x00101000 x5 (3 rejected below) */
+    if (coefSet == 3u) return kIOReturnBadArgument;
+    cf0 = 0x00002000u; cf1 = 0x0d06200du; cf2 = 0x0d0a1c0du; cf3 = 0x0c0e1a0cu; cf4 = 0x0c14140cu;
+    if (coefSet == 1u) cf0 = cf1 = cf2 = cf3 = cf4 = 0x00002000u;
+    else if (coefSet == 2u) cf0 = cf1 = cf2 = cf3 = cf4 = 0x00101000u;
     scaleCntl |= ((flags & 1u) << 2) | ((flags & 2u) << 2);     /* SCALE_HORZ_MODE (bit 2) / SCALE_VERT_MODE (bit 3) */
     if (!owner || !sw || !sh || !dw || !dh || sw > 720u || (pitch_px & 3u) || pitch_px < sw || (off & 7u) || (bpp != 2u && bpp != 4u) || ((pitch_px * bpp) & 7u)) return kIOReturnBadArgument;   /* quadword-aligned offset and pitch, width limit of this family */
     IOLockLock(fLock);
@@ -290,7 +295,7 @@ IOReturn RageLTDevice::ovlOn(uint32_t owner, uint32_t off, uint32_t pitch_px, ui
             fmt = OSReadLittleInt32((volatile void *)fRegs, 0x048);
             ovlw(fRegs, 0x048, (fmt & ~0x000f0000u) | (scalerIn << 16));         /* VIDEO_FORMAT.SCALER_IN, other bits preserved */
             ovlw(fRegs, 0x150, 0x00101000u);                                     /* SCALER_COLOUR_CNTL neutral */
-            ovlw(fRegs, 0x154, 0x00002000u); ovlw(fRegs, 0x158, 0x0d06200du); ovlw(fRegs, 0x15c, 0x0d0a1c0du); ovlw(fRegs, 0x160, 0x0c0e1a0cu); ovlw(fRegs, 0x164, 0x0c14140cu);   /* SCALER_H_COEFF0-4 */
+            ovlw(fRegs, 0x154, cf0); ovlw(fRegs, 0x158, cf1); ovlw(fRegs, 0x15c, cf2); ovlw(fRegs, 0x160, cf3); ovlw(fRegs, 0x164, cf4);   /* SCALER_H_COEFF0-4 */
             ovlw(fRegs, 0x018, 0x011u);                                          /* OVERLAY_KEY_CNTL: VIDEO_FN true | GRAPHICS_FN true, OR: always show video */
             ovlw(fRegs, 0x024, scaleCntl);                                      /* OVERLAY_SCALE_CNTL: SCALE_EN | OVERLAY_EN (+ the debug mode bits), last */
             fOvlOwner = owner; fOvlPitch = pitch_px; fOvlH = sh; fOvlBpp = bpp; rc = kIOReturnSuccess;
