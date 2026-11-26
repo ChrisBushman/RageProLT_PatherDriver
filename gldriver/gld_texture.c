@@ -1249,21 +1249,23 @@ static int bind_texture_full(gld_context *ctx)
  * texture units/LOD bias; 0x1573c..0x15780: the bound texobj words), the texture epoch (slots, uploads, pending queue), the batch generation (slots are stamped per batch), the
  * target and the context.  When all of those are unchanged the previous result stands: what is skipped is exactly what would be rewritten with the same values.
  * RAGE_NO_MEMO=1 disables it; RAGE_VERIFY_MEMO=1 runs the full decode on every hit too and reports any difference (other than the per-triangle LOD registers, which select_lod owns). */
-/* only the gli words the bind actually reads (alpha/blend, fog, logic op, stipple, shade, per-unit texture state): ranges [lo,hi) in bytes */
-static const uint16_t memo_rng[][2] = { {0x62e0, 0x6310}, {0x6358, 0x63c0}, {0x665c, 0x6680}, {0x66e8, 0x6710}, {0x6738, 0x6800} };
+/* only the gli words the bind actually reads (alpha/blend, fog, logic op, stipple, shade, per-unit texture state): ranges [lo,hi) in bytes, each a multiple of 16 (the compare is unrolled by 4 words) */
+static const uint16_t memo_rng[][2] = { {0x62e0, 0x6310}, {0x6358, 0x63c8}, {0x665c, 0x668c}, {0x66e8, 0x6718}, {0x6738, 0x6808} };
 #define MEMO_NR ((int)(sizeof memo_rng / sizeof memo_rng[0]))
 #define MEMO_B_LO 0x1573cu
 #define MEMO_B_HI 0x15780u
 static struct {
     gld_context *ctx; void *rb; uint32_t epoch, bgen; int ret, valid;
-    uint32_t a[(0x30 + 0x68 + 0x24 + 0x28 + 0xc8) / 4], b[(MEMO_B_HI - MEMO_B_LO) / 4];
+    uint32_t a[(0x30 + 0x70 + 0x30 + 0x30 + 0xd0) / 4], b[(MEMO_B_HI - MEMO_B_LO) / 4];
 } g_memo;
 static inline int memo_a_same(uint32_t g)
 {
+    /* every range is a multiple of 4 words: OR together the XORs (no branch per word) and test once per range */
     const uint32_t *c = g_memo.a; int r;
     for (r = 0; r < MEMO_NR; r++) {
-        const uint32_t *q = (const uint32_t *)(uintptr_t)(g + memo_rng[r][0]); unsigned n = (memo_rng[r][1] - memo_rng[r][0]) / 4u, k;
-        for (k = 0; k < n; k++) if (q[k] != c[k]) return 0;
+        const uint32_t *q = (const uint32_t *)(uintptr_t)(g + memo_rng[r][0]); unsigned n = (memo_rng[r][1] - memo_rng[r][0]) / 4u, k; uint32_t d0 = 0, d1 = 0;
+        for (k = 0; k < n; k += 4) { d0 |= (q[k] ^ c[k]) | (q[k + 1] ^ c[k + 1]); d1 |= (q[k + 2] ^ c[k + 2]) | (q[k + 3] ^ c[k + 3]); }
+        if (d0 | d1) return 0;
         c += n;
     }
     return 1;
