@@ -1,0 +1,5 @@
+#!/bin/bash
+# usage: redeploy.sh <run#>  - sync, rebuild debug kext on the G4, reload, restart ragelt daemon
+cd "$(dirname "$0")/../.."          # repo root
+tar --exclude=docs --exclude=win2k --exclude=.git --exclude=build -cf - . | ssh MDD 'tar xf - -C ~/rage-p1 2>/dev/null'
+ssh MDD "P=\$(ps auxww | grep '[r]agelt daemon' | awk '{print \$2}' | tail -1); sudo kill \$P 2>/dev/null; sleep 1; sudo kextunload -b com.local.ATIRageProLT 2>&1 | tail -1; cd ~/rage-p1/kext && sudo rm -rf ATIRageProLT.kext && make clean >/dev/null 2>&1; make kext EXTRA=-DRAGE_DEBUG_ENGTEST=1 2>&1 | grep -E 'error|built'; make checkfp | tail -1; sudo chown -R root:wheel ATIRageProLT.kext; sudo kextload ATIRageProLT.kext 2>&1 | tail -1; cd ../tools/ragegl && make 2>&1 | grep error; cd ../ragelt; rm -f ~/ragelt-engtest/run$1.log; (sudo nohup ./ragelt daemon ~/ragelt-engtest/run$1.log ${RAGELT_LOG_HOST:?set RAGELT_LOG_HOST=ip:port of the machine that collects the UDP log} >/dev/null 2>&1 &); sleep 2" 2>&1 | grep -v '^g++\|^cc '
