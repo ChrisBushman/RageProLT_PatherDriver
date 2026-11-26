@@ -179,6 +179,14 @@ static void eng_prologue(volatile uint8_t *regs, const struct rage_ctx *c)
     for (i = 0; i < n; i++) eng_wq(regs, p[2 * i], p[2 * i + 1]);
 }
 
+/* Fills, Z clears and presents return once the engine has been programmed: every later engine use (the next submit's kick, a CPU read or upload, a mode change, FENCE) drains first, so the
+ * CPU builds the next batches while the engine runs the operation.  -DRAGE_SYNC_OPS restores the wait for completion. */
+#ifdef RAGE_SYNC_OPS
+#define RAGE_OP_DONE(seq) waitFence(seq)
+#else
+#define RAGE_OP_DONE(seq) ((void)(seq), kIOReturnSuccess)
+#endif
+
 IOReturn RageLTDevice::fenceWait(uint32_t seq)
 {
     IOReturn rc;
@@ -245,7 +253,7 @@ IOReturn RageLTDevice::clearZ(uint32_t owner, uint32_t value)
                               ((c.tgt_w - 1u) << 16), ((c.tgt_h - 1u) << 16), 3u);
     if (rc) { IOLockUnlock(fLock); return kIOReturnTimeout; }
     seq = ++fFenceSubmitted;
-    rc = waitFence(seq);
+    rc = RAGE_OP_DONE(seq);
     IOLockUnlock(fLock);
     return rc;
 }
@@ -269,7 +277,7 @@ IOReturn RageLTDevice::fillRect(uint32_t owner, int32_t x, int32_t y, int32_t w,
                               (c.sc_r << 16) | c.sc_l, (c.sc_b << 16) | c.sc_t, 3u);
     if (rc) { IOLockUnlock(fLock); return kIOReturnTimeout; }
     seq = ++fFenceSubmitted;
-    rc = waitFence(seq);
+    rc = RAGE_OP_DONE(seq);
     IOLockUnlock(fLock);
     return rc;
 }

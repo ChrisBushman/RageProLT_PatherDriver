@@ -122,6 +122,13 @@ IOReturn RageLTDevice::displayInfo(struct rage_display *out, uint32_t *gen)
 
 /* Target -> scanout, clipped on both sides.  Raw copy: the target must have the scanout's pixel size (16 bpp now; 32 bpp / scaled present are
  * RAGE_FEAT_FS_SCALE work). */
+#ifndef RAGE_OP_DONE
+#ifdef RAGE_SYNC_OPS
+#define RAGE_OP_DONE(seq) waitFence(seq)
+#else
+#define RAGE_OP_DONE(seq) ((void)(seq), kIOReturnSuccess)
+#endif
+#endif
 IOReturn RageLTDevice::present(uint32_t owner, uint32_t sx, uint32_t sy, uint32_t w, uint32_t h, uint32_t dx, uint32_t dy)
 {
     struct rage_ctx c; struct rage_display d; IOReturn rc; uint32_t seq, pixw;
@@ -143,7 +150,7 @@ IOReturn RageLTDevice::present(uint32_t owner, uint32_t sx, uint32_t sy, uint32_
     rc = (IOReturn)eng_blit(fRegs, pixw, c.tgt_off, c.tgt_pitch, d.base, d.pitch_px, sx, sy, dx, dy, w, h, ((d.w - 1u) << 16), ((d.h - 1u) << 16));
     if (rc) { IOLockUnlock(fLock); return kIOReturnTimeout; }
     seq = ++fFenceSubmitted;
-    rc = waitFence(seq);
+    rc = RAGE_OP_DONE(seq);
     IOLockUnlock(fLock);
     return rc;
 }
