@@ -73,3 +73,11 @@ Mistake that cost an hour: running `/Library/RageProLT/bringup.sh` (Apple's ATIR
 * Offered at 640x480, 800x600, 1024x768 (60 Hz). 1280x1024 stays 15 bpp (VRAM budget).
 * Supervised live results on the Dell 828FI via WindowServer (depth index 1, 25 s hold): all three modes stable, correct colours, correct picture position (user: "good colors, good image, position looks correct", "800x600 looks good", "looks good"). Accelerator at 32 bpp not yet exercised (step 2).
 * Not verified: DSP_ON_OFF vs ROM (still unexplained), long-duration FIFO underrun behaviour under load.
+
+### 32 bpp render targets (step 2, Nov 25)
+
+* Kernel: ARGB8888 fills (colour = 0xAARRGGBB), Z clear unchanged (16 bit Z), same-format 32->32 present; present of a target whose depth differs from the scanout returns Unsupported (textured-quad present, step 3). `tools/ragegl/depth32_test.c`: 18/18 on the G4 at 800x600 32 bpp (fill, scissor, Z clear, 3D triangle 27355 px, present read back 6000/6000, 16->32 refused).
+* Bundle: `mach64_build_surface` picks target bpp = scanout bpp (falls back to 16 if the 32 bpp allocation fails); pixel ops (read/draw/copy/bitmap/accum), CPU blend/stencil path, copy-to-texture, colour mask (bytes R,G,B,A from the top; 32 bpp mask is ARGB bits), clear colour, drawable descriptor pitch all handle 2 or 4 byte pixels. Z readback stays 16 bit.
+* `gl_suite` is depth-aware (px / clear_rt). Results: 15 bpp 290/290; 800x600 32 bpp 290/290 (after fixing my own colour-mask byte order: 3 failures first run); `gl_probe` 128 pass / 1 fail (ARB fragment program) at both depths.
+* Alpha: the target's destination alpha is reported as 1.0 by read/copy pixels; the engine's alpha writes into the 32 bpp target are not characterised yet.
+* Not done: 1024x768 at 32 bpp needs a 16 bpp target (budget) -> not presentable until step 3.

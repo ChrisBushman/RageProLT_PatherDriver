@@ -43,6 +43,11 @@ static void gf(unsigned off, float f) { memcpy(gli + off, &f, 4); }
 /* RGB565 target: one pixel read back through the kernel and expanded to 0xffRRGGBB with bit replication */
 static unsigned px(int x, int y)
 {
+    if (P->rb.bpp == 4u) {                                      /* ARGB8888 target (scanout 32 bpp): one logical word; black = untouched, as for 16 bpp */
+        uint32_t w = 0, o = TOFF + (uint32_t)y * TPITCH * 4 + (uint32_t)x * 4;
+        rgb_readback2(&P->rb, o, &w, 4, 2u);
+        return (w & 0xffffffu) ? (0xff000000u | (w & 0xffffffu)) : 0;
+    }
     uint32_t o = TOFF + (uint32_t)y * TPITCH * 2 + (uint32_t)x * 2, w = 0, v, r, g, b;
     rgb_readback2(&P->rb, o & ~3u, &w, 4, 1u);                  /* SWAP16: logical little-endian halfwords, first pixel in the high half */
     v = (o & 2) ? (w & 0xffffu) : (w >> 16);
@@ -59,7 +64,7 @@ static int isclr(unsigned c, int r, int g, int b) { return near_(ch(c, 16), r) &
 static int near20(int a, int b) { return a - b <= 20 && b - a <= 20; }
 static int isclr_mt(unsigned c, int r, int g, int b) { return near20(ch(c, 16), r) && near20(ch(c, 8), g) && near20(ch(c, 0), b); }
 
-static void clear_rt(unsigned argb) { mach64_flush_batch(ctx); rgb_fill(&P->rb, 0, 0, (int)P->fb_w, (int)P->fb_h, to565(argb)); P->frame_new = 0; P->z_clear_pending = 1; P->dirty |= MACH64_DIRTY_STATE; }   /* the test owns the colour contents; a new frame still owes its Z clear */
+static void clear_rt(unsigned argb) { mach64_flush_batch(ctx); rgb_fill(&P->rb, 0, 0, (int)P->fb_w, (int)P->fb_h, P->rb.bpp == 4u ? (argb | 0xff000000u) : to565(argb)); P->frame_new = 0; P->z_clear_pending = 1; P->dirty |= MACH64_DIRTY_STATE; }   /* the test owns the colour contents; a new frame still owes its Z clear */
 
 static int g_clear_pending;
 static void default_state(void)

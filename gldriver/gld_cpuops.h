@@ -7,7 +7,7 @@
 /* COMBINE source/operand selection resolved once per draw: sel = source index * 4 + operand kind (0 colour, 1 one-minus colour, 2 alpha, 3 one-minus alpha); source 0 texture, 1 primary / previous, 2 constant. */
 typedef struct { int rsel[3], asel[3]; } env_prep;
 /* Blend state: sf/df/eq as GL enums, plus the per-draw resolved forms (factor codes 0 zero, 1 one, 2 cs, 3 1-cs, 4 as, 5 1-as, 6 cd, 7 1-cd, 8.. constant-colour terms). */
-typedef struct { uint32_t sf, df, eq; int cc[4]; int blend_on, tex; m64_cpuenv env; env_prep ep; int fmt555, sfk, dfk, fastk, ccv[3][4]; int fog, fogc[3]; } cb_state;
+typedef struct { uint32_t sf, df, eq; int cc[4]; int blend_on, tex; m64_cpuenv env; env_prep ep; int fmt555, fmt32, sfk, dfk, fastk, ccv[3][4]; int fog, fogc[3]; } cb_state;
 static inline int mul255(int a, int b) { int t = a * b + 128; return (t + (t >> 8)) >> 8; }
 static int bfac(uint32_t f, int ch, const int *cs, int as, const int *cd, const int *cc)
 {
@@ -228,12 +228,14 @@ static void cb_prepare(cb_state *c, int fmt555)
     c->fastk = c->eq != 0x8006u ? 0 : (c->sf == 0x0302u && c->df == 0x0303u) ? 1 : (c->sf == 0x0302u && c->df == 0x0001u) ? 2 : (c->sf == 0x0001u && c->df == 0x0001u) ? 3 : 0;
     if (c->tex) env_prepare(&c->env, &c->ep);
 }
-static inline uint16_t cb_pack(const cb_state *c, unsigned R, unsigned G, unsigned B)
-{ return c->fmt555 ? (uint16_t)(((R >> 3) << 10) | ((G >> 3) << 5) | (B >> 3)) : (uint16_t)(((R >> 3) << 11) | ((G >> 2) << 5) | (B >> 3)); }
-static uint16_t cb_blend(const cb_state *c, uint32_t srcargb, uint16_t dst)
+static inline uint32_t cb_pack(const cb_state *c, unsigned R, unsigned G, unsigned B)
+{ if (c->fmt32) return 0xff000000u | (R << 16) | (G << 8) | B;
+  return c->fmt555 ? (uint16_t)(((R >> 3) << 10) | ((G >> 3) << 5) | (B >> 3)) : (uint16_t)(((R >> 3) << 11) | ((G >> 2) << 5) | (B >> 3)); }
+static uint32_t cb_blend(const cb_state *c, uint32_t srcargb, uint32_t dst)
 {
     int cs[3], cd[3], as = (int)(srcargb >> 24), r[3], ch; unsigned v = dst;
-    if (c->fmt555) { unsigned r5 = (v >> 10) & 31, g5 = (v >> 5) & 31, b5 = v & 31; cd[0] = (r5 << 3) | (r5 >> 2); cd[1] = (g5 << 3) | (g5 >> 2); cd[2] = (b5 << 3) | (b5 >> 2); }
+    if (c->fmt32) { cd[0] = (int)((v >> 16) & 255u); cd[1] = (int)((v >> 8) & 255u); cd[2] = (int)(v & 255u); }
+    else if (c->fmt555) { unsigned r5 = (v >> 10) & 31, g5 = (v >> 5) & 31, b5 = v & 31; cd[0] = (r5 << 3) | (r5 >> 2); cd[1] = (g5 << 3) | (g5 >> 2); cd[2] = (b5 << 3) | (b5 >> 2); }
     else { unsigned r5 = (v >> 11) & 31, g6 = (v >> 5) & 63, b5 = v & 31; cd[0] = (r5 << 3) | (r5 >> 2); cd[1] = (g6 << 2) | (g6 >> 4); cd[2] = (b5 << 3) | (b5 >> 2); }
     cs[0] = (int)((srcargb >> 16) & 255u); cs[1] = (int)((srcargb >> 8) & 255u); cs[2] = (int)(srcargb & 255u);
     switch (c->fastk) {
@@ -257,6 +259,7 @@ static uint16_t cb_blend(const cb_state *c, uint32_t srcargb, uint16_t dst)
         break;
     }
     for (ch = 0; ch < 3; ch++) if (r[ch] > 255) r[ch] = 255;
+    if (c->fmt32) return 0xff000000u | ((unsigned)r[0] << 16) | ((unsigned)r[1] << 8) | (unsigned)r[2];
     return c->fmt555 ? (uint16_t)(((r[0] >> 3) << 10) | ((r[1] >> 3) << 5) | (r[2] >> 3)) : (uint16_t)(((r[0] >> 3) << 11) | ((r[1] >> 2) << 5) | (r[2] >> 3));
 }
 

@@ -379,7 +379,7 @@ int mach64_zs_cpu_draw(gld_context *ctx, const m64_vertex *va, const m64_vertex 
     if (!area) return 0;
     front = p->nonpoly ? 1 : (((area < 0) != 0) == (z->front_ccw != 0));      /* y is flipped: a y-up CCW triangle has negative area here */
     fi = (z->two && !front) ? 1 : 0; f = &z->face[fi]; sten_on = z->fen[fi];
-    colour_on = (p->hw.dp_write_mask & (p->rb.fmt555 ? 0x7fffu : 0xffffu)) != 0;      /* any colour channel writable (1555: the alpha bit does not count) */
+    colour_on = (p->hw.dp_write_mask & (p->rb.bpp == 4u ? 0x00ffffffu : p->rb.fmt555 ? 0x7fffu : 0xffffu)) != 0;      /* any colour channel writable (1555: the alpha bit does not count) */
     depth_en = z->depth_en; sb = (uint8_t *)z->pl[PL_S].buf; db = depth_en ? (uint16_t *)z->pl[PL_D].buf : 0;
     if (depth_en && !db) return 0;
     if (area < 0) {                                                            /* orient so the area is positive */
@@ -402,7 +402,7 @@ int mach64_zs_cpu_draw(gld_context *ctx, const m64_vertex *va, const m64_vertex 
     fx_rcp_init();
     for (i = 0; i < 3; i++) { int64_t a4 = A[i] < 0 ? -4 * A[i] : 4 * A[i]; if (a4) fx_inv_setup(&einv[i], a4); }      /* covered range of each row from the edge equations: reciprocal per edge, no divide */
     if ((z->cb || z->envcpu) && maxy >= miny && ((!p->hw.textured && !mach64_tex_cube) ? z->cb != 0 : (mach64_cpu_env(ctx, &cbs.env) != 0 && (cbs.tex = 1)))) {
-        mach64_flush_batch(ctx); cbw = mach64_cb_open(ctx, miny, maxy - miny + 1); cb_load(ctx, &cbs); { uint32_t af = mach64_gli_u32(ctx, 0x62e4u), ru = mach64_gli_u32(ctx, 0x62e0u); float rf; __builtin_memcpy(&rf, &ru, 4); at_on = (af & 0x100u) != 0; afunc = af >> 16; aref = rf <= 0.0f ? 0u : rf >= 1.0f ? 255u : (uint32_t)(rf * 255.0f + 0.5f); if (afunc < 0x200 || afunc > 0x207) at_on = 0; } cb_prepare(&cbs, mach64_cb_is555(ctx));        /* blend factors and COMBINE selectors resolved once per draw */
+        mach64_flush_batch(ctx); cbw = mach64_cb_open(ctx, miny, maxy - miny + 1); cb_load(ctx, &cbs); { uint32_t af = mach64_gli_u32(ctx, 0x62e4u), ru = mach64_gli_u32(ctx, 0x62e0u); float rf; __builtin_memcpy(&rf, &ru, 4); at_on = (af & 0x100u) != 0; afunc = af >> 16; aref = rf <= 0.0f ? 0u : rf >= 1.0f ? 255u : (uint32_t)(rf * 255.0f + 0.5f); if (afunc < 0x200 || afunc > 0x207) at_on = 0; } cb_prepare(&cbs, mach64_cb_is555(ctx)); cbs.fmt32 = mach64_cb_is32(ctx);        /* blend factors and COMBINE selectors resolved once per draw */
         { const m64_vertex *t = vb; vq[0] = va; vq[1] = (swapped ? vc : vb); vq[2] = (swapped ? t : vc); }
         if (cbs.tex && !cbs.env.cube && !cbs.env.vol && cbs.env.nlev > 1) {                          /* mipmapped texture: pick this triangle's level */
             float s0[3], t0[3]; int q; float pix2 = (float)area / 16.0f;
@@ -476,10 +476,10 @@ int mach64_zs_cpu_draw(gld_context *ctx, const m64_vertex *va, const m64_vertex 
                     if (depth_en && z->dmask) db[idx] = (uint16_t)zi;
                     pass++;
                     if (cbw && colour_on) {                                        /* composite this pixel */
-                        uint16_t *dp = mach64_cb_px(cbw, py, px);
-                        if (dp) {
+                        uint32_t dv;
+                        if (mach64_cb_get(cbw, py, px, &dv)) {
                             if (!shaded) { SHADE_PIXEL }
-                            *dp = cbs.blend_on ? cb_blend(&cbs, out, *dp) : cb_pack(&cbs, (out >> 16) & 255u, (out >> 8) & 255u, out & 255u); cb_any = 1;
+                            mach64_cb_put(cbw, py, px, cbs.blend_on ? cb_blend(&cbs, out, dv) : cb_pack(&cbs, (out >> 16) & 255u, (out >> 8) & 255u, out & 255u)); cb_any = 1;
                         }
                     } else if (colour_on && run < 0) run = px;
                 } else if (run >= 0) { rect_run(ctx, z, py, run, px - 1, va, vb, vc, &flushed); run = -1; }

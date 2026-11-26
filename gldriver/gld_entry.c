@@ -110,9 +110,9 @@ int gldAttachDrawable(gld_context *ctx, int type, void *drawable, uint32_t flags
         *(uint32_t *)(c + 0x24)  = (flags >> 8) & 0xff;
         *(uint32_t *)(c + 0x28)  = flags & 0xff;
         *(uint32_t *)(c + 0x64)  = 1;
-        *(uint32_t *)(c + 0x68)  = pv->rb.pitch * 2u * height;
+        *(uint32_t *)(c + 0x68)  = pv->rb.pitch * pv->rb.bpp * height;
         *(uint32_t *)(c + 0x94)  = pv->rb.col_off;
-        *(uint32_t *)(c + 0x98)  = pv->rb.pitch * 2u;
+        *(uint32_t *)(c + 0x98)  = pv->rb.pitch * pv->rb.bpp;
         *(uint32_t *)(c + 0x9c)  = 0;
         *(uint32_t *)(c + 0xa0)  = 0;
         *(uint32_t *)(c + 0xa4)  = 0x32;

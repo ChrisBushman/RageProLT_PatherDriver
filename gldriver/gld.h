@@ -104,7 +104,7 @@ typedef struct {
     uint32_t   batchbuf[GLD_BATCH_DWORDS];
     unsigned char *gc;             /* GLEngine's gc for this context (pixel-store state) */
     uint32_t   dbuf;               /* double-buffered pixel format          */
-    uint32_t   cbpp;               /* colour bytes per pixel: always 2 on this driver for now (RGB565) */
+    uint32_t   cbpp;               /* colour bytes per pixel of the render target: 2 (RGB565/1555) or 4 (ARGB8888, scanout 32 bpp); set when the surface is built */
     uint32_t   fb_w, fb_h;         /* drawable size */
     uint32_t   win_x, win_y;       /* window content origin on the Rage's display (present destination) */
     uint32_t   win_mode;           /* 1 = a window (present at win_x,win_y), 0 = full screen */
@@ -202,9 +202,11 @@ int mach64_cpu_env(gld_context *, m64_cpuenv *);
 int mach64_env_needs_cpu(uint32_t gli);
 int mach64_copy_tex_sub(gld_context *, void *texobj, int face, uint32_t level, uint32_t xoff, uint32_t yoff, int zoff, uint32_t srcx, uint32_t srcy, int w, int h);
 void *mach64_cb_open(gld_context *, int fr0, int nr);
-uint16_t *mach64_cb_px(void *h, int fbrow, int x);
+int mach64_cb_get(void *h, int fbrow, int x, uint32_t *v);
+void mach64_cb_put(void *h, int fbrow, int x, uint32_t v);
+int mach64_cb_is32(gld_context *);
 void mach64_cb_close(gld_context *, void *h, int write_back);
-uint16_t mach64_cb_pack(gld_context *, unsigned R, unsigned G, unsigned B);
+uint32_t mach64_cb_pack(gld_context *, unsigned R, unsigned G, unsigned B);
 int mach64_cb_is555(gld_context *);
 void mach64_cb_unpack(gld_context *, unsigned v, unsigned *R, unsigned *G, unsigned *B);
 void mach64_accum_free(mach64_priv *);

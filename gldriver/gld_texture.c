@@ -908,9 +908,10 @@ static int bind_texture_full(gld_context *ctx)
      * pipe leaves them untouched in the framebuffer. */
     {   uint32_t cm = mach64_gli_u32(ctx, 0x63b4);
         /* 16 bpp target: RGB565 R[15:11] G[10:5] B[4:0], or 1555 R[14:10] G[9:5] B[4:0] (rb.fmt555); no usable alpha channel in the buffer */
-        uint32_t wm = p->rb.fmt555 ? (0x8000u | ((cm >> 24) & 0xffu ? 0x7c00u : 0u) | ((cm >> 16) & 0xffu ? 0x03e0u : 0u) | ((cm >> 8) & 0xffu ? 0x001fu : 0u))
+        uint32_t wm = p->rb.bpp == 4u ? ((((cm >> 24) & 0xffu) ? 0x00ff0000u : 0u) | (((cm >> 16) & 0xffu) ? 0x0000ff00u : 0u) | (((cm >> 8) & 0xffu) ? 0x000000ffu : 0u) | ((cm & 0xffu) ? 0xff000000u : 0u)) :   /* bytes of the word: R,G,B,A from the top (as the 16 bpp branches use them) */
+                      p->rb.fmt555 ? (0x8000u | ((cm >> 24) & 0xffu ? 0x7c00u : 0u) | ((cm >> 16) & 0xffu ? 0x03e0u : 0u) | ((cm >> 8) & 0xffu ? 0x001fu : 0u))
                                    : (((cm >> 24) & 0xffu ? 0xf800u : 0u) | ((cm >> 16) & 0xffu ? 0x07e0u : 0u) | ((cm >> 8) & 0xffu ? 0x001fu : 0u));
-        wm |= 0xffff0000u;
+        if (p->rb.bpp != 4u) wm |= 0xffff0000u;
         if (st->dp_write_mask != wm) { st->dp_write_mask = wm; p->dirty |= MACH64_DIRTY_STATE; }
     }
 
@@ -1594,9 +1595,9 @@ int mach64_copy_tex_sub(gld_context *ctx, void *texobj, int face, uint32_t level
     if (fr0 + nr > H) nr = H - fr0;
     if (nr <= 0 || !(cbw = mach64_cb_open(ctx, fr0, nr))) return 0;
     for (j = 0; j < h; j++) for (i = 0; i < w; i++) {
-        int fbrow = H - 1 - (int)(srcy + (uint32_t)j); uint16_t *px = mach64_cb_px(cbw, fbrow, (int)(srcx + (uint32_t)i)); unsigned R, G, B; unsigned char *o;
-        if (!px) continue;
-        mach64_cb_unpack(ctx, *px, &R, &G, &B);
+        int fbrow = H - 1 - (int)(srcy + (uint32_t)j); uint32_t pv; unsigned R, G, B; unsigned char *o;
+        if (!mach64_cb_get(cbw, fbrow, (int)(srcx + (uint32_t)i), &pv)) continue;
+        mach64_cb_unpack(ctx, pv, &R, &G, &B);
         o = (unsigned char *)(uintptr_t)dst + ((size_t)(yoff + (uint32_t)j) * lw + xoff + (uint32_t)i) * bpp;
         if (bpp == 1u) o[0] = (unsigned char)R; else { o[0] = (unsigned char)R; o[1] = (unsigned char)G; o[2] = (unsigned char)B; if (bpp == 4u) o[3] = 255; }
     }

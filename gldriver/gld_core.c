@@ -113,7 +113,14 @@ int mach64_build_surface(gld_context *ctx)
     mach64_priv *p = MACH64_PRIV(ctx);
     int rc;
     if (!p->fb_w || !p->fb_h) return -1;
-    rc = rgb_surface(&p->rb, p->fb_w, p->fb_h, 2, 1);
+    {   /* the colour target has the scanout's pixel size (the kernel's present is a raw copy): 32 bpp when the scanout is 32 bpp and the VRAM budget allows, else 16 bpp
+         * (which cannot be presented to a 32 bpp scanout until the textured-quad present, design 5 / L4) */
+        uint32_t dw, dh, dbpp = 2u, want = 2u;
+        if (!rgb_display(&p->rb, &dw, &dh, &dbpp) && dbpp == 4u) want = 4u;
+        rc = rgb_surface(&p->rb, p->fb_w, p->fb_h, want, 1);
+        if (rc && want == 4u) rc = rgb_surface(&p->rb, p->fb_w, p->fb_h, 2, 1);
+        p->cbpp = p->rb.bpp ? p->rb.bpp : 2u;
+    }
     if (rc) { p->attached = 0; return rc; }
     p->rb.gen = rgb_gen(&p->rb);
     p->mode_gen = p->rb.gen;
@@ -157,7 +164,12 @@ static void colour_clear(gld_context *ctx)
 {
     mach64_priv *p = MACH64_PRIV(ctx);
     uint32_t gli = gli_find(ctx), c565 = 0;
-    if (gli) {
+    if (gli && p->rb.bpp == 4u) {                  /* ARGB8888 target: the kernel fill takes 0xAARRGGBB */
+        uint32_t r = rage_f2byte(mach64_gli_u32(ctx, GLI_CLEAR_COLOR + 0)), g = rage_f2byte(mach64_gli_u32(ctx, GLI_CLEAR_COLOR + 4));
+        uint32_t b = rage_f2byte(mach64_gli_u32(ctx, GLI_CLEAR_COLOR + 8)), a = rage_f2byte(mach64_gli_u32(ctx, GLI_CLEAR_COLOR + 12));
+        c565 = (a << 24) | (r << 16) | (g << 8) | b;
+    } else if (p->rb.bpp == 4u) c565 = 0;
+    else if (gli) {
         uint32_t r = rage_f2byte(mach64_gli_u32(ctx, GLI_CLEAR_COLOR + 0));
         uint32_t g = rage_f2byte(mach64_gli_u32(ctx, GLI_CLEAR_COLOR + 4));
         uint32_t b = rage_f2byte(mach64_gli_u32(ctx, GLI_CLEAR_COLOR + 8));
