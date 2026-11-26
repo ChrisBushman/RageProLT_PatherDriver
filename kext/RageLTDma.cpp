@@ -73,6 +73,11 @@ void RageLTDevice::dmaFree(void)
     if (fDmaRing) { fDmaRing->complete(kIODirectionOutIn); fDmaRing->release(); fDmaRing = 0; }
 }
 
+/* PROFILE (always compiled, a few mftb reads per submit): ticks spent building the stream, waiting for the previous stream, waiting for engine idle before the kick, and in idleWait() from
+ * every other path (clear/fill/present/readback...: dma part and engine-idle part).  Logged as marks 0xd0060000 / 0xd0061000 every 256 submits (raw mftb ticks). */
+uint32_t pf_user, pf_valid, pf_tex;                       /* GL client: userIn of the pairs, rage_batch_ok, tex-record handling (ticks) */
+static uint32_t pf_starved, pf_have, pf_build, pf_prev, pf_idle, pf_oth_dma, pf_oth_idle, pf_n, pf_oth_n;
+
 /* Waits (bounded) for the pending stream.  Caller holds fLock.  On timeout the engine is reset and the work abandoned. */
 IOReturn RageLTDevice::dmaWait(void)
 {
@@ -102,7 +107,7 @@ IOReturn RageLTDevice::dmaWait(void)
  * Order (the established double-buffer engine): build into the buffer the engine is NOT reading -> wait for the stream in flight -> engine idle -> kick. */
 IOReturn RageLTDevice::dmaSubmit(const struct rage_ctx *c, const uint32_t *pairs, uint32_t npairs)
 {
-    uint32_t n = 0, i, bytes, off, nd = 0, b = fDmaCmd2 ? fDmaCur : 0u, cmdBus, ringBus; IOReturn rc;
+    uint32_t n = 0, i, bytes, off, nd = 0, b = fDmaCmd2 ? fDmaCur : 0u, cmdBus, ringBus, t_a = tbl32(), t_b, t_c; IOReturn rc;
     volatile uint32_t *w = (volatile uint32_t *)(b ? fDmaCmdKva2 : fDmaCmdKva); volatile uint8_t *tab = fDmaRingKva + b * DMA_TABLE_STRIDE;
     cmdBus = b ? fDmaCmdBus2 : fDmaCmdBus; ringBus = fDmaRingBus + b * DMA_TABLE_STRIDE;
     if (!fDmaCmd2) { rc = dmaWait(); if (rc) return rc; }              /* single buffer: the previous stream must be finished before its memory is rewritten */
@@ -134,9 +139,14 @@ IOReturn RageLTDevice::dmaSubmit(const struct rage_ctx *c, const uint32_t *pairs
     }
     dmaFlush((volatile uint8_t *)w, bytes);
     dmaFlush(tab, 16u * nd);
+    t_b = tbl32();
+    if (fDmaPending) { pf_have++; if ((eng_rd(fRegs, MACH64_BM_GUI_TABLE) & ~0xfu) == fDmaEnd && !(eng_rd(fRegs, MACH64_GUI_STAT) & MACH64_GUI_ACTIVE)) pf_starved++; }   /* PROFILE: was the previous stream already finished (chip starved by the CPU)? */
     rc = dmaWait();                                                    /* the stream on the other buffer (if any) must be finished before the engine is reprogrammed */
     if (rc) return rc;
+    t_c = tbl32();
     if (eng_wait_idle(fRegs)) return kIOReturnTimeout;
+    pf_build += (t_b - t_a); pf_prev += (t_c - t_b); pf_idle += (tbl32() - t_c);
+    if (++pf_n >= 256u) { logEvent(RAGE_EV_MARK, 0, 0xd0060000u, pf_build, pf_prev, pf_idle, pf_n); logEvent(RAGE_EV_MARK, 0, 0xd0061000u, pf_oth_dma, pf_oth_idle, pf_oth_n, 0); logEvent(RAGE_EV_MARK, 0, 0xd0062000u, pf_user, pf_valid, pf_tex, 0); logEvent(RAGE_EV_MARK, 0, 0xd0063000u, pf_starved, pf_have, 0, 0); pf_starved = pf_have = pf_user = pf_valid = pf_tex = 0; pf_build = pf_prev = pf_idle = pf_oth_dma = pf_oth_idle = pf_oth_n = pf_n = 0; }
     fDmaNDesc = nd; fDmaEnd = ringBus + 16u * nd;
     fDmaSaveBus = eng_rd(fRegs, MACH64_BUS_CNTL);
     eng_wr(fRegs, MACH64_BUS_CNTL, (fDmaSaveBus & ~MACH64_BUS_MASTER_DIS) | MACH64_BUS_EXT_REG_EN);
@@ -196,9 +206,12 @@ IOReturn RageLTDevice::dmaSubmit(const struct rage_ctx *, const uint32_t *, uint
 /* Everything that touches the engine or the aperture from the CPU first calls this (caller holds fLock). */
 IOReturn RageLTDevice::idleWait(void)
 {
-    IOReturn rc = dmaWait();
+    uint32_t t0 = tbl32(), t1; IOReturn rc = dmaWait();
+    t1 = tbl32(); pf_oth_dma += (t1 - t0); pf_oth_n++;
     if (rc) return rc;
-    return eng_wait_idle(fRegs) ? kIOReturnTimeout : kIOReturnSuccess;
+    rc = eng_wait_idle(fRegs) ? kIOReturnTimeout : kIOReturnSuccess;
+    pf_oth_idle += (tbl32() - t1);
+    return rc;
 }
 
 void RageLTDevice::dmaConfig(uint32_t key, uint32_t value)

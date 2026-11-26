@@ -20,6 +20,29 @@ static void t_span(void)
     CHECK("span: past 8MB refused", !rage_vram_span_ok(0x900000, 64));
 }
 
+/* the table fast path in rage_reg_ok must agree with the plain rule scan for every register and a spread of values */
+static int ref_reg_ok(uint32_t reg, uint32_t val)
+{
+    uint32_t i;
+    if (reg & 3u || reg > MACH64_DRI_REG_MAX) return 0;
+    for (i = 0; i < RAGE_NREG_RULES; i++) {
+        const struct rage_reg_rule *r = &rage_reg_rules[i];
+        if (reg < r->lo || reg > r->hi) continue;
+        if (val & r->forbid) return 0;
+        if (r->addr == RAGE_ADDR_OFF_PITCH) return rage_vram_span_ok((val & 0x3fffffu) << 3, 8u);
+        if (r->addr == RAGE_ADDR_BYTES)     return rage_vram_span_ok(val, 8u);
+        return 1;
+    }
+    return 0;
+}
+static void t_fast_equiv(void)
+{
+    static const uint32_t vals[] = { 0, 1, 0x80000000u, 0xffffffffu, 0x00400000u, 0x007ff800u, 0x1fff0000u, 0xdeadbeefu, 0x60040464u, 0x12345678u };
+    uint32_t reg, k; int bad = 0;
+    for (reg = 0; reg < 0x1000u; reg++) for (k = 0; k < sizeof vals / sizeof vals[0]; k++) if (rage_reg_ok(reg, vals[k]) != ref_reg_ok(reg, vals[k])) bad++;
+    CHECK("reg: table fast path == rule scan (all regs 0..0xfff x 10 values)", bad == 0);
+}
+
 static void t_regs(void)
 {
     uint32_t good_pitch = (80u << 22) | (0x97000u >> 3);          /* 640 px pitch, offset 0x97000 */
@@ -104,7 +127,7 @@ static void t_vram(void)
 
 int main(void)
 {
-    t_span(); t_regs(); t_batch(); t_vram();
+    t_span(); t_regs(); t_fast_equiv(); t_batch(); t_vram();
     printf("guard_test: %d checks, %d failed\n", checks, fails);
     return fails ? 1 : 0;
 }

@@ -39,3 +39,12 @@ Evidence: Sonic R demo run in verify mode: ~1.87M hits, 217K misses, 0 mismatche
 - Bind memo compares only the gli ranges the bind reads (107 words instead of 328); verify mode on Sonic R: 1.89M hits, 0 mismatches.
 - Measured (demo race, one sample): main thread kernel wait 58%, our driver CPU 22.6% (was 23.9%), game+system 19%; 12.5 presents/s. Remaining driver CPU: emit_tri_rv 3.2%, read_vertex 1.8%, rgb_flush 1.6%, m64_emit_triangle 1.4%, pack_vertex 1.4%, tex_select_lod 1.2%.
 - Plugin driver baseline: it draws wrong textures on the G4 in both title and race, so it is not a usable performance baseline.
+
+## Kernel wait profile and kernel-side CPU cuts (Nov 25)
+Kext counters (raw mftb ticks, logged as marks 0xd0060000 build/wait-prev/idle-before-kick, 0xd0061000 idleWait from other calls, 0xd0062000 userIn/batch_ok/tex-records, 0xd0063000 starved/total) over the Sonic R title + demo race (~118K submits, ~125 s):
+- wait for the previous stream (in dmaSubmit): 24.1 s = 203 us/submit; wait for engine idle in clear-Z/fill/present (idleWait, 25.7K calls): 21.9 s (0.85 ms each; clearZ ~1.7 ms, fill ~1.7 ms, present ~2 ms per call); build 1.8 s (15 us); idle before the kick 1.9 s (16 us).
+- **72% of submits found the previous stream already finished** (the chip was starved by the CPU); the 24 s of waiting is concentrated in the minority of big batches. So reducing CPU work does help, and the remaining wait is chip work, not a protocol stall.
+- Kernel CPU per submit before: userIn 29 us (IOMemoryDescriptor + page wiring every call), rage_batch_ok 27 us (linear rule scan per pair), tex-records 21 us (one lock + ctxFor per record).
+- Fixes: `copyin()` on the caller's own thread when `fTask == current_task()` (falls back to the descriptor path otherwise); a per-register table in `rage_reg_ok` (first-matching-rule-is-plain; exact scan for everything else; `tests/guard_test.c` compares both for all registers and 10 values); `setTextures()` applies all records and both formats under one lock.
+- Result: userIn 7.5 us, tex-records 1 us, batch_ok 14 us per submit; presents/s 14.5 -> 15.8 in the same race segment (same 125 s window, RAGE_STATS=1). gl_suite 290/290, gl_probe 128/1, guard_test 63/0.
+- Open: the 21.9 s of engine-idle waiting in clear-Z/fill/present. The CPU could build the next frame's batches during that drain if those operations were queued as stream ops instead of idle-wait + PIO. Hazard to check first: DST_OFF_PITCH/scissor changes while earlier triangles still draw.

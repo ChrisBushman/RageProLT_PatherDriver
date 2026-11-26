@@ -133,6 +133,27 @@ IOReturn RageLTDevice::setTexture(uint32_t owner, uint32_t index, uint32_t off, 
     return rc;
 }
 
+IOReturn RageLTDevice::setTextures(uint32_t owner, const uint32_t *rec, uint32_t n, uint32_t tfmt, uint32_t tfmt2)
+{
+    struct rage_ctx *c; uint32_t k;
+    if (!n && !(tfmt && tfmt != 6u) && !tfmt2) return kIOReturnSuccess;
+    IOLockLock(fLock);
+    c = ctxFor(owner, false);
+    if (c) {
+        for (k = 0; k < n; k++) {                                                      /* as setTexture(owner, index, off, 0) */
+            uint32_t index = rec[2 * k], off = rec[2 * k + 1];
+            if (index > 11u) continue;
+            if (off == 0xfffffffeu) continue;
+            if (off == 0xffffffffu) c->tex_set &= ~(1u << index);
+            else if (!(off & 7u) && rage_vram_owns(&fVram, off, 8u, owner)) { c->tex_off[index] = off; c->tex_set |= 1u << index; }
+        }
+        if (tfmt && tfmt != 6u && (tfmt == 3 || tfmt == 4 || tfmt == 8 || tfmt == 11 || tfmt == 12 || tfmt == 15)) c->tex_fmt = tfmt;
+        if (tfmt2 && (tfmt2 == 3 || tfmt2 == 4 || tfmt2 == 6 || tfmt2 == 8 || tfmt2 == 11 || tfmt2 == 12 || tfmt2 == 15)) c->tex2_fmt = tfmt2;
+    }
+    IOLockUnlock(fLock);
+    return kIOReturnSuccess;
+}
+
 /* The kernel's own prologue: everything that decides WHERE the engine writes or reads. */
 uint32_t RageLTDevice::prologuePairs(const struct rage_ctx *c, uint32_t *o)
 {
@@ -184,7 +205,8 @@ IOReturn RageLTDevice::waitFence(uint32_t seq)
 IOReturn RageLTDevice::submitBatch(uint32_t owner, const uint32_t *pairs, uint32_t npairs)
 {
     uint32_t i, seq; IOReturn rc; struct rage_ctx c;
-    if (!rage_batch_ok(pairs, npairs)) {                                               /* whole batch dropped */
+    uint32_t t_v = tbl32(), t_v2; int ok_ = rage_batch_ok(pairs, npairs); t_v2 = tbl32(); pf_valid += t_v2 - t_v;
+    if (!ok_) {                                               /* whole batch dropped */
         fRefused++;
         logEvent(RAGE_EV_BATCH_REFUSED, owner, npairs, pairs ? pairs[0] : 0, pairs ? pairs[1] : 0, fRefused, 0);
         return kIOReturnBadArgument;

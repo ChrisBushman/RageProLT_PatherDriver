@@ -52,9 +52,32 @@ static const struct rage_reg_rule rage_reg_rules[] = {
 };
 #define RAGE_NREG_RULES ((uint32_t)(sizeof rage_reg_rules / sizeof rage_reg_rules[0]))
 
+/* Fast path: one byte per register, 1 when the FIRST matching rule is a plain one (no address, no forbidden bits) so any value passes.  Built once, from the rules above;
+ * everything else (forbidden bits, addresses, unlisted registers) takes the exact scan.  The result is identical to the scan (tests/guard_test.c compares them). */
+#define RAGE_PLAIN_N 0x200u
+static unsigned char rage_plain[RAGE_PLAIN_N]; static int rage_plain_ready;
+static inline void rage_plain_build(void)
+{
+    uint32_t reg, i;
+    for (reg = 0; reg < RAGE_PLAIN_N * 4u; reg += 4u) {
+        unsigned char ok = 0;
+        for (i = 0; i < RAGE_NREG_RULES; i++) {
+            const struct rage_reg_rule *r = &rage_reg_rules[i];
+            if (reg < r->lo || reg > r->hi) continue;
+            ok = (r->addr == RAGE_ADDR_NONE && r->forbid == 0) ? 1 : 0;
+            break;
+        }
+        if (reg > MACH64_DRI_REG_MAX) ok = 0;
+        rage_plain[reg >> 2] = ok;
+    }
+    rage_plain_ready = 1;
+}
+
 static inline int rage_reg_ok(uint32_t reg, uint32_t val)
 {
     uint32_t i;
+    if (!rage_plain_ready) rage_plain_build();
+    if (!(reg & 3u) && (reg >> 2) < RAGE_PLAIN_N && rage_plain[reg >> 2]) return 1;
     if (reg & 3u || reg > MACH64_DRI_REG_MAX) return 0;
     for (i = 0; i < RAGE_NREG_RULES; i++) {
         const struct rage_reg_rule *r = &rage_reg_rules[i];

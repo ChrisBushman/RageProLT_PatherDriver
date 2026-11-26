@@ -1,8 +1,10 @@
 #include "RageLTGLClient.h"
 #include "RageLTDevice.h"
 #include "rage_guard.h"
+#include "RageLTEngine.h"
 #include <IOKit/IOLib.h>
 #include <IOKit/IOMemoryDescriptor.h>
+extern "C" { task_t current_task(void); int copyin(const char *udaddr, void *kaddr, unsigned int nbytes); }
 
 #define super IOUserClient
 OSDefineMetaClassAndStructors(RageLTGLClient, IOUserClient)
@@ -68,6 +70,8 @@ IOReturn RageLTGLClient::clientDied(void) { return clientClose(); }
 
 IOReturn RageLTGLClient::userIn(uint32_t addr, uint8_t *dst, uint32_t len)
 {
+    /* External methods run on the caller's own thread: when that task is the client's, a plain copyin() does the job (no memory descriptor to build, no page wiring per submit). */
+    if (fTask == current_task()) return copyin((const char *)addr, (void *)dst, len) ? kIOReturnVMError : kIOReturnSuccess;
     IOMemoryDescriptor *d = IOMemoryDescriptor::withAddress((vm_address_t)addr, len, kIODirectionOut, fTask);
     IOReturn rc;
     if (!d) return kIOReturnBadArgument;
@@ -120,7 +124,7 @@ IOReturn RageLTGLClient::selSubmit(uint32_t addr, uint32_t npairs)
     bytes = npairs * 8u;
     buf = (uint32_t *)IOMalloc(bytes);
     if (!buf) return kIOReturnNoMemory;
-    rc = userIn(addr, (uint8_t *)buf, bytes);
+    { uint32_t t0 = tbl32(); rc = userIn(addr, (uint8_t *)buf, bytes); pf_user += tbl32() - t0; }
     if (rc == kIOReturnSuccess) rc = fDev->submitBatch(fOwner, buf, npairs);
     IOFree(buf, bytes);
     return rc;
@@ -128,13 +132,12 @@ IOReturn RageLTGLClient::selSubmit(uint32_t addr, uint32_t npairs)
 
 IOReturn RageLTGLClient::selSubmitEx(uint32_t addr, uint32_t npairs, uint32_t texAddr, uint32_t ntex, uint32_t tfmt, uint32_t tfmt2)
 {
-    uint32_t tex[24], i; IOReturn rc = kIOReturnSuccess;
+    uint32_t tex[24], t_t = tbl32(); IOReturn rc = kIOReturnSuccess;
     if (!fDev) return kIOReturnNotAttached;
     if (ntex > 12u || npairs > RAGE_BATCH_MAX_PAIRS) return kIOReturnBadArgument;
     if (ntex) { rc = userIn(texAddr, (uint8_t *)tex, ntex * 8u); if (rc != kIOReturnSuccess) return rc; }
-    for (i = 0; i < ntex; i++) (void)fDev->setTexture(fOwner, tex[2 * i], tex[2 * i + 1], 0);          /* same checks as SET_TEXTURE; a refused offset stays unbound */
-    if (tfmt && tfmt != 6u) (void)fDev->setTexture(fOwner, 0u, 0xfffffffeu, tfmt);
-    if (tfmt2) (void)fDev->setTexture(fOwner, 11u, 0xfffffffeu, tfmt2);
+    (void)fDev->setTextures(fOwner, tex, ntex, tfmt, tfmt2);                                       /* same checks as SET_TEXTURE, one lock; a refused offset stays unbound */
+    pf_tex += tbl32() - t_t;
     return npairs ? selSubmit(addr, npairs) : kIOReturnSuccess;
 }
 

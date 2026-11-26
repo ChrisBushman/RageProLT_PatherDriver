@@ -120,6 +120,7 @@ public:
     void         dmaFree(void);
     IOReturn     dmaWait(void);                      /* caller holds fLock */
     IOReturn     dmaSubmit(const struct rage_ctx *c, const uint32_t *pairs, uint32_t npairs);
+    IOReturn     setTextures(uint32_t owner, const uint32_t *rec, uint32_t n, uint32_t tfmt, uint32_t tfmt2);   /* n {index,offset} records + the two texel formats under one lock (SUBMIT_EX) */
     IOReturn     idleWait(void);                     /* drain DMA, then engine idle: before any CPU/PIO use of the engine or the aperture */
     uint32_t       dmaMinimalTest(uint32_t variant);   /* DEBUG ONLY */
     void         dmaConfig(uint32_t key, uint32_t value);

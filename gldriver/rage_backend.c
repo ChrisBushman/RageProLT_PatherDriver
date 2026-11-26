@@ -7,15 +7,16 @@
 
 #include <mach/mach_time.h>
 /* RAGE_STATS=1: once a second on stderr: flushes, register pairs, time inside the submit calls, other kernel calls (fill/clear-Z/present) */
+static uint64_t g_st_kn[3], g_st_kc[3];     /* per kind (0 fill, 1 clear-Z, 2 present): ns and calls */
 static int g_stats = -1; static uint64_t g_st_t0, g_st_flush_ns, g_st_other_ns, g_st_nfl, g_st_pairs, g_st_nother, g_st_frames, g_st_fence_ns;
 static uint64_t st_now(void) { static mach_timebase_info_data_t tb; if (!tb.denom) mach_timebase_info(&tb); return mach_absolute_time() * tb.numer / tb.denom; }
 static void st_report(uint64_t now)
 {
     if (!g_st_t0) { g_st_t0 = now; return; }
     if (now - g_st_t0 < 1000000000ull) return;
-    fprintf(stderr, "RAGE_STATS: %llu frames, %llu flushes (%llu pairs, avg %llu), %llu ms in submit; %llu other calls, %llu ms, %llu ms waiting for the chip after submit (RAGE_STATS=2)\n", (unsigned long long)g_st_frames, (unsigned long long)g_st_nfl, (unsigned long long)g_st_pairs,
-            (unsigned long long)(g_st_nfl ? g_st_pairs / g_st_nfl : 0), (unsigned long long)(g_st_flush_ns / 1000000ull), (unsigned long long)g_st_nother, (unsigned long long)(g_st_other_ns / 1000000ull), (unsigned long long)(g_st_fence_ns / 1000000ull));
-    g_st_t0 = now; g_st_flush_ns = g_st_other_ns = g_st_fence_ns = g_st_nfl = g_st_pairs = g_st_nother = g_st_frames = 0;
+    fprintf(stderr, "RAGE_STATS: %llu frames, %llu flushes (%llu pairs, avg %llu), %llu ms in submit; %llu other calls, %llu ms, %llu ms waiting for the chip after submit (RAGE_STATS=2); fill %llu/%llu ms, clearZ %llu/%llu ms, present %llu/%llu ms\n", (unsigned long long)g_st_frames, (unsigned long long)g_st_nfl, (unsigned long long)g_st_pairs,
+            (unsigned long long)(g_st_nfl ? g_st_pairs / g_st_nfl : 0), (unsigned long long)(g_st_flush_ns / 1000000ull), (unsigned long long)g_st_nother, (unsigned long long)(g_st_other_ns / 1000000ull), (unsigned long long)(g_st_fence_ns / 1000000ull), (unsigned long long)g_st_kc[0], (unsigned long long)(g_st_kn[0]/1000000ull), (unsigned long long)g_st_kc[1], (unsigned long long)(g_st_kn[1]/1000000ull), (unsigned long long)g_st_kc[2], (unsigned long long)(g_st_kn[2]/1000000ull));
+    g_st_t0 = now; g_st_flush_ns = g_st_other_ns = g_st_fence_ns = g_st_nfl = g_st_pairs = g_st_nother = g_st_frames = 0; g_st_kn[0] = g_st_kn[1] = g_st_kn[2] = g_st_kc[0] = g_st_kc[1] = g_st_kc[2] = 0;
 }
 #define STAT_ON() (g_stats < 0 ? (g_stats = getenv("RAGE_STATS") ? (getenv("RAGE_STATS")[0] == '2' ? 2 : 1) : 0) : g_stats)
 #define CALL(sel, nin, nout, ...) IOConnectMethodScalarIScalarO(b->conn, sel, nin, nout, __VA_ARGS__)
@@ -127,11 +128,11 @@ int rgb_flush(rgb_t *b, const m64_cmdbuf *cb)
 }
 
 
-static int st_other(int rc, uint64_t t0) { if (t0) { uint64_t n = st_now(); g_st_other_ns += n - t0; g_st_nother++; st_report(n); } return rc; }
-int rgb_fill(rgb_t *b, int x, int y, int w, int h, uint32_t c) { uint64_t t0 = STAT_ON() ? st_now() : 0; return st_other((int)CALL(RAGE_GL_FILL, 5, 0, (uint32_t)x, (uint32_t)y, (uint32_t)w, (uint32_t)h, c), t0); }
-int rgb_clear_z(rgb_t *b, uint32_t v) { uint64_t t0 = STAT_ON() ? st_now() : 0; return st_other((int)CALL(RAGE_GL_CLEAR_Z, 1, 0, v), t0); }
+static int st_other(int rc, uint64_t t0, int kind) { if (t0) { uint64_t n = st_now(); g_st_other_ns += n - t0; g_st_nother++; g_st_kn[kind] += n - t0; g_st_kc[kind]++; st_report(n); } return rc; }
+int rgb_fill(rgb_t *b, int x, int y, int w, int h, uint32_t c) { uint64_t t0 = STAT_ON() ? st_now() : 0; return st_other((int)CALL(RAGE_GL_FILL, 5, 0, (uint32_t)x, (uint32_t)y, (uint32_t)w, (uint32_t)h, c), t0, 0); }
+int rgb_clear_z(rgb_t *b, uint32_t v) { uint64_t t0 = STAT_ON() ? st_now() : 0; return st_other((int)CALL(RAGE_GL_CLEAR_Z, 1, 0, v), t0, 1); }
 int rgb_fence(rgb_t *b) { uint32_t done; return (int)CALL(RAGE_GL_FENCE, 1, 1, b->fence, &done); }
-int rgb_present(rgb_t *b, int sx, int sy, int w, int h, int dx, int dy) { uint64_t t0 = STAT_ON() ? st_now() : 0; g_st_frames++; return st_other((int)CALL(RAGE_GL_PRESENT, 6, 0, (uint32_t)sx, (uint32_t)sy, (uint32_t)w, (uint32_t)h, (uint32_t)dx, (uint32_t)dy), t0); }
+int rgb_present(rgb_t *b, int sx, int sy, int w, int h, int dx, int dy) { uint64_t t0 = STAT_ON() ? st_now() : 0; g_st_frames++; return st_other((int)CALL(RAGE_GL_PRESENT, 6, 0, (uint32_t)sx, (uint32_t)sy, (uint32_t)w, (uint32_t)h, (uint32_t)dx, (uint32_t)dy), t0, 2); }
 int rgb_tex_alloc(rgb_t *b, uint32_t bytes, uint32_t *off) { return (int)CALL(RAGE_GL_ALLOC, 2, 1, (bytes + 4095u) & ~4095u, 4096u, off); }
 int rgb_tex_free(rgb_t *b, uint32_t off) { return (int)CALL(RAGE_GL_FREE, 1, 0, off); }
 int rgb_upload(rgb_t *b, uint32_t off, const void *d, uint32_t len, int swap16) { return (int)CALL(RAGE_GL_VRAM_WRITE, 4, 0, off, (uint32_t)(uintptr_t)d, len, swap16 ? RAGE_XFER_SWAP16 : 0u); }
