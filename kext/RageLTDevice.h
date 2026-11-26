@@ -113,10 +113,11 @@ public:
     IOReturn     vramCopyOut(uint32_t owner, uint32_t off, uint8_t *dst, uint32_t len, uint32_t flags);
     IOReturn     scanoutCopyOut(uint32_t byteOff, uint8_t *dst, uint32_t len);                                    /* debug */
     IOReturn     regDump(uint32_t *pairs, uint32_t maxPairs, uint32_t *n);
-    IOReturn     ovlOn(uint32_t owner, uint32_t off, uint32_t pitch_px, uint32_t sw, uint32_t sh, uint32_t dx, uint32_t dy, uint32_t dw, uint32_t dh);   /* debug: overlay step B */
+    IOReturn     ovlOn(uint32_t owner, uint32_t off, uint32_t pitch_px, uint32_t sw, uint32_t sh, uint32_t dx, uint32_t dy, uint32_t dw, uint32_t dh, uint32_t bpp);   /* RAGE_FEAT_OVERLAY */
     IOReturn     ovlOff(uint32_t owner);
-    IOReturn     ovlDisableLocked(void);                                                                          /* debug: KEY_CNTL hidden, then SCALE_CNTL 0 (fLock held) */
-    uint32_t     fOvlOwner;                                                                                       /* debug: owner of the enabled overlay, 0 = none */
+    IOReturn     ovlFlip(uint32_t owner, uint32_t off);
+    IOReturn     ovlDisableLocked(void);                                                                          /* KEY_CNTL hidden, then SCALE_CNTL 0 (fLock held) */
+    uint32_t     fOvlOwner, fOvlPitch, fOvlH, fOvlBpp;                                                            /* owner of the enabled overlay (0 = none) and its source geometry */
     IOReturn     ovlB0(uint32_t *before, uint32_t *readback, uint32_t *after);                                     /* debug: overlay plan step B0 (the only write) */                                        /* debug, READ-ONLY fixed register list */
     IOReturn     displayInfo(struct rage_display *out, uint32_t *gen);
     uint32_t       modeGen(void) const { return fModeGen; }

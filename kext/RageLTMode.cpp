@@ -73,6 +73,7 @@ void RageLTDevice::modeWillChange(void)
     uint32_t k;
     OSIncrementAtomic((SInt32 *)&fModeGen);                     /* odd: changing */
     IOLockLock(fLock);
+    if (fOvlOwner) { (void)ovlDisableLocked(); fOvlOwner = 0; }     /* the scaler reads VRAM the framebuffer is about to re-lay out */
     if (fEngineLive) (void)idleWait();                /* drain; a stuck engine is reset at the next engineEnable */
     for (k = 0; k < RAGE_MAX_CTX; k++) if (fCtx[k].owner) { fCtx[k].tgt_bpp = 0; fCtx[k].z_set = 0; }   /* every cached offset is stale after the framebuffer re-lays VRAM */
     if (fDispReserved) {
@@ -241,25 +242,8 @@ IOReturn RageLTDevice::vramCopyOut(uint32_t owner, uint32_t off, uint8_t *dst, u
     return rc;
 }
 
-#if RAGE_DEBUG_ENGTEST
-/* READ-ONLY, debug builds: a FIXED list (the caller cannot choose addresses).  Block-1 overlay/scaler registers sit at window offsets idx*4 (below the block-0 base 0x400);
- * block-0 entries give the mode context.  Nothing here writes, and no engine wait is needed (plain register reads). */
-IOReturn RageLTDevice::regDump(uint32_t *pairs, uint32_t maxPairs, uint32_t *n)
-{
-    static const uint16_t b1[] = { 0x00,0x01,0x02,0x03,0x04,0x05,0x06,0x07,0x08,0x09,0x0a,0x0b,0x0c,0x0d,0x0e,0x0f,0x10,0x11,0x12,0x13,0x14,0x15, 0x54,0x55,0x56,0x57,0x58,0x59 };
-    static const uint16_t b0[] = { 0x00, 0x08, 0x14, 0x1c, 0xb0, 0xe0 };   /* CRTC_H_TOTAL_DISP, CRTC_V_TOTAL_DISP, CRTC_OFF_PITCH, CRTC_GEN_CNTL, MEM_CNTL, CONFIG_CHIP_ID */
-    uint32_t i, k = 0;
-    if (maxPairs < sizeof b1 / 2 + sizeof b0 / 2 + 1) return kIOReturnNoSpace;
-    IOLockLock(fLock);
-    for (i = 0; i < sizeof b1 / 2; i++) { pairs[2 * k] = 0x100u | b1[i]; pairs[2 * k + 1] = OSReadLittleInt32((volatile void *)fRegs, b1[i] * 4u); k++; }
-    for (i = 0; i < sizeof b0 / 2; i++) { pairs[2 * k] = b0[i]; pairs[2 * k + 1] = OSReadLittleInt32((volatile void *)fRegs, 0x400u + b0[i]); k++; }
-    pairs[2 * k] = 0xf00u; pairs[2 * k + 1] = fPCI->configRead32(0x08); k++;
-    IOLockUnlock(fLock);
-    *n = k;
-    return kIOReturnSuccess;
-}
-
-/* Overlay plan step B (debug builds): static overlay of one client-owned 15 bpp buffer.  Block 1 registers at window offset idx*4.  Write order and values: docs/re-notes/overlay-scaler-plan.md section 2
+#if RAGE_FEAT_OVERLAY
+/* Hardware overlay scaler (RAGE_FEAT_OVERLAY): one client-owned buffer shown stretched over the scanout.  Block 1 registers at window offset idx*4.  Write order and values: docs/re-notes/overlay-scaler-plan.md section 2
  * (approved list).  NOT written: bit 7 of SCALE_CNTL, the CAPTURE_CONFIG buffer bits, any block-0/CRTC/PLL/engine register, Win98's 0x8000211 key value. */
 static inline void ovlw(volatile uint8_t *regs, uint32_t off, uint32_t v) { OSWriteLittleInt32((volatile void *)regs, off, v); eieio(); }
 IOReturn RageLTDevice::ovlDisableLocked(void)
@@ -276,17 +260,18 @@ IOReturn RageLTDevice::ovlOff(uint32_t owner)
     IOLockUnlock(fLock);
     return rc;
 }
-IOReturn RageLTDevice::ovlOn(uint32_t owner, uint32_t off, uint32_t pitch_px, uint32_t sw, uint32_t sh, uint32_t dx, uint32_t dy, uint32_t dw, uint32_t dh)
+IOReturn RageLTDevice::ovlOn(uint32_t owner, uint32_t off, uint32_t pitch_px, uint32_t sw, uint32_t sh, uint32_t dx, uint32_t dy, uint32_t dw, uint32_t dh, uint32_t bpp)
 {
-    IOReturn rc = kIOReturnBadArgument; uint32_t hinc, vinc, fmt;
-    if (!owner || !sw || !sh || !dw || !dh || sw > 720u || (pitch_px & 3u) || pitch_px < sw || (off & 7u)) return kIOReturnBadArgument;   /* quadword-aligned offset and pitch, width limit of this family */
+    IOReturn rc = kIOReturnBadArgument; uint32_t hinc, vinc, fmt, scalerIn;
+    if (!owner || !sw || !sh || !dw || !dh || sw > 720u || (pitch_px & 3u) || pitch_px < sw || (off & 7u) || (bpp != 2u && bpp != 4u) || ((pitch_px * bpp) & 7u)) return kIOReturnBadArgument;   /* quadword-aligned offset and pitch, width limit of this family */
     IOLockLock(fLock);
     if (fOvlOwner) rc = kIOReturnBusy;
     else if (OSReadLittleInt32((volatile void *)fRegs, 0x024) != 0 ||
              (OSReadLittleInt32((volatile void *)fRegs, 0x018) != 0 && OSReadLittleInt32((volatile void *)fRegs, 0x018) != 0x110u)) rc = kIOReturnNotPermitted;   /* the overlay must be idle: scaler off, key control power-on (0) or our hidden state (0x110) */
     else if (!fDispReserved || dx + dw > fDisp.w || dy + dh > fDisp.h) rc = kIOReturnBadArgument;
-    else if (!rage_vram_owns(&fVram, off, (uint64_t)pitch_px * 2u * sh, owner)) rc = kIOReturnNotPermitted;                                    /* the source block belongs to this client */
+    else if (!rage_vram_owns(&fVram, off, (uint64_t)pitch_px * bpp * sh, owner)) rc = kIOReturnNotPermitted;                                    /* the source block belongs to this client */
     else {
+        scalerIn = bpp == 4u ? 6u : (fDisp.depth == 3 ? 3u : 4u);               /* SCALER_IN: 32 bpp / 15 bpp 1555 target (15 bit scanout) / 16 bpp 565 target */
         hinc = (sw << 12) / dw; vinc = (sh << 12) / dh;                          /* 12 fractional bits, truncated (PRG 8.8.1) */
         if (hinc == 0 || vinc == 0 || hinc > 0xffffu || vinc > 0xffffu) rc = kIOReturnBadArgument;
         else {
@@ -298,16 +283,53 @@ IOReturn RageLTDevice::ovlOn(uint32_t owner, uint32_t off, uint32_t pitch_px, ui
             ovlw(fRegs, 0x028, (sw << 16) | sh);                                 /* SCALER_HEIGHT_WIDTH */
             ovlw(fRegs, 0x034, off); ovlw(fRegs, 0x038, off); ovlw(fRegs, 0x03c, pitch_px);   /* SCALER_BUF0/BUF1_OFFSET, SCALER_BUF_PITCH (pixels) */
             fmt = OSReadLittleInt32((volatile void *)fRegs, 0x048);
-            ovlw(fRegs, 0x048, (fmt & ~0x000f0000u) | 0x00030000u);              /* VIDEO_FORMAT.SCALER_IN = 15 bpp, other bits preserved */
+            ovlw(fRegs, 0x048, (fmt & ~0x000f0000u) | (scalerIn << 16));         /* VIDEO_FORMAT.SCALER_IN, other bits preserved */
             ovlw(fRegs, 0x150, 0x00101000u);                                     /* SCALER_COLOUR_CNTL neutral */
             ovlw(fRegs, 0x154, 0x00002000u); ovlw(fRegs, 0x158, 0x0d06200du); ovlw(fRegs, 0x15c, 0x0d0a1c0du); ovlw(fRegs, 0x160, 0x0c0e1a0cu); ovlw(fRegs, 0x164, 0x0c14140cu);   /* SCALER_H_COEFF0-4 */
             ovlw(fRegs, 0x018, 0x011u);                                          /* OVERLAY_KEY_CNTL: VIDEO_FN true | GRAPHICS_FN true, OR: always show video */
             ovlw(fRegs, 0x024, 0xc0000000u);                                     /* OVERLAY_SCALE_CNTL: SCALE_EN | OVERLAY_EN, last */
-            fOvlOwner = owner; rc = kIOReturnSuccess;
+            fOvlOwner = owner; fOvlPitch = pitch_px; fOvlH = sh; fOvlBpp = bpp; rc = kIOReturnSuccess;
         }
     }
     IOLockUnlock(fLock);
     return rc;
+}
+
+IOReturn RageLTDevice::ovlFlip(uint32_t owner, uint32_t off)
+{
+    IOReturn rc = kIOReturnNotPermitted;
+    if (off & 7u) return kIOReturnBadArgument;
+    IOLockLock(fLock);
+    if (fOvlOwner && fOvlOwner == owner) {
+        if (!rage_vram_owns(&fVram, off, (uint64_t)fOvlPitch * fOvlBpp * fOvlH, owner)) rc = kIOReturnBadArgument;
+        else { ovlw(fRegs, 0x034, off); ovlw(fRegs, 0x038, off); rc = kIOReturnSuccess; }          /* SCALER_BUF0/BUF1_OFFSET */
+    }
+    IOLockUnlock(fLock);
+    return rc;
+}
+#else
+IOReturn RageLTDevice::ovlDisableLocked(void) { return kIOReturnUnsupported; }
+IOReturn RageLTDevice::ovlOff(uint32_t) { return kIOReturnUnsupported; }
+IOReturn RageLTDevice::ovlOn(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t) { return kIOReturnUnsupported; }
+IOReturn RageLTDevice::ovlFlip(uint32_t, uint32_t) { return kIOReturnUnsupported; }
+#endif
+
+#if RAGE_DEBUG_ENGTEST
+/* READ-ONLY, debug builds: a FIXED list (the caller cannot choose addresses).  Block-1 overlay/scaler registers sit at window offsets idx*4 (below the block-0 base 0x400);
+ * block-0 entries give the mode context.  Nothing here writes, and no engine wait is needed (plain register reads). */
+IOReturn RageLTDevice::regDump(uint32_t *pairs, uint32_t maxPairs, uint32_t *n)
+{
+    static const uint16_t b1[] = { 0x00,0x01,0x02,0x03,0x04,0x05,0x06,0x07,0x08,0x09,0x0a,0x0b,0x0c,0x0d,0x0e,0x0f,0x10,0x11,0x12,0x13,0x14,0x15, 0x54,0x55,0x56,0x57,0x58,0x59 };
+    static const uint16_t b0[] = { 0x00, 0x08, 0x14, 0x1c, 0xb0, 0xe0 };   /* CRTC_H_TOTAL_DISP, CRTC_V_TOTAL_DISP, CRTC_OFF_PITCH, CRTC_GEN_CNTL, MEM_CNTL, CONFIG_CHIP_ID */
+    uint32_t i, k = 0;
+    if (maxPairs < sizeof b1 / 2 + sizeof b0 / 2 + 1) return kIOReturnNoSpace;
+    IOLockLock(fLock);
+    for (i = 0; i < sizeof b1 / 2; i++) { pairs[2 * k] = 0x100u | b1[i]; pairs[2 * k + 1] = OSReadLittleInt32((volatile void *)fRegs, b1[i] * 4u); k++; }
+    for (i = 0; i < sizeof b0 / 2; i++) { pairs[2 * k] = b0[i]; pairs[2 * k + 1] = OSReadLittleInt32((volatile void *)fRegs, 0x400u + b0[i]); k++; }
+    pairs[2 * k] = 0xf00u; pairs[2 * k + 1] = fPCI->configRead32(0x08); k++;
+    IOLockUnlock(fLock);
+    *n = k;
+    return kIOReturnSuccess;
 }
 
 /* Overlay plan step B0, the ONLY register write of the step: OVERLAY_VIDEO_KEY_CLR (block 1, window offset 0x008) is a colour-key compare value with no visible effect while the overlay is

@@ -51,5 +51,9 @@ static inline kern_return_t ragegl_display(ragegl_t c, uint32_t *gen, uint32_t *
 static inline kern_return_t ragegl_scanout_read(ragegl_t c, uint32_t boff, void *p, uint32_t len)
 { return RGL_CALL(RAGE_GL_SCANOUT_READ, 3, 0, boff, (uint32_t)(uintptr_t)p, len); }
 #endif
+static inline kern_return_t ragegl_overlay_on(ragegl_t c, uint32_t off, uint32_t pitch, uint32_t sw, uint32_t sh, uint32_t dx, uint32_t dy, uint32_t dw, uint32_t dh, uint32_t bpp)
+{ return RGL_CALL(RAGE_GL_OVL_ON, 6, 0, off, pitch, sw | (sh << 16), dx | (dy << 16), dw | (dh << 16), bpp); }
+static inline kern_return_t ragegl_overlay_off(ragegl_t c) { return IOConnectMethodScalarIScalarO(c, RAGE_GL_OVL_OFF, 0, 0); }
+static inline kern_return_t ragegl_overlay_flip(ragegl_t c, uint32_t off) { return RGL_CALL(RAGE_GL_OVL_FLIP, 1, 0, off); }
 static inline kern_return_t ragegl_config(ragegl_t c, uint32_t key, uint32_t v) { return RGL_CALL(RAGE_GL_CONFIG, 2, 0, key, v); }
 static inline kern_return_t ragegl_texture(ragegl_t c, uint32_t index, uint32_t off, uint32_t fmt) { return RGL_CALL(RAGE_GL_SET_TEXTURE, 3, 0, index, off, fmt); }

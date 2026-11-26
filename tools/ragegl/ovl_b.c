@@ -23,7 +23,7 @@ int main(int argc, char **argv)
     { uint32_t d; ragegl_fence(c, 1, &d); }
     printf("pattern drawn at VRAM 0x%x (640x480, pitch 1024 px)\n", o);
     signal(SIGINT, off); signal(SIGTERM, off);
-    kr = RGL_CALL(RAGE_GL_OVL_ON, 5, 0, o, 1024u, 640u | (480u << 16), 0u, 1024u | (768u << 16));
+    kr = ragegl_overlay_on(c, o, 1024u, 640u, 480u, 0u, 0u, 1024u, 768u, 2u);
     if (kr) { printf("OVL_ON failed 0x%x\n", (unsigned)kr); return 2; }
     printf("overlay ENABLED: 640x480 -> 1024x768, holding %u s\n", hold);
     sleep(hold);
