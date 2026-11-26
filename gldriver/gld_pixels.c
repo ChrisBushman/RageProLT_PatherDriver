@@ -210,7 +210,7 @@ int mach64_ctl08(void *rb_ctx, int x, int y, int w, int h, unsigned format, unsi
             for (col = 0; col < w; col++) {
                 unsigned char *s = win_px(&win, H, x + col, y + row, W);
                 unsigned R = 0, G = 0, B = 0, A = 0xffu;
-                if (s) unpack16(p, px_ld(&win, s), &R, &G, &B);
+                if (s) { unsigned pv = px_ld(&win, s); unpack16(p, pv, &R, &G, &B); if (p->rb.bpp == 4u) A = pv >> 24; }   /* ARGB8888 stores the destination alpha (measured, alpha_test); 15/16 bpp targets report 1.0 */
                 if (s && pxt.active) { unsigned char r8 = (unsigned char)R, g8 = (unsigned char)G, b8 = (unsigned char)B; pxt_apply(&pxt, &r8, &g8, &b8, 255); R = r8; G = g8; B = b8; }
                 if (pk == 0) {
                     if (is_bgr) { o[0] = (unsigned char)B; o[1] = (unsigned char)G; o[2] = (unsigned char)R; }

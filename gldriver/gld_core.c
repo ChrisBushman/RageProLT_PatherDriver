@@ -115,9 +115,11 @@ int mach64_build_surface(gld_context *ctx)
     if (!p->fb_w || !p->fb_h) return -1;
     {   /* the colour target has the scanout's pixel size (the kernel's present is a raw copy): 32 bpp when the scanout is 32 bpp and the VRAM budget allows, else 16 bpp
          * (which cannot be presented to a 32 bpp scanout until the textured-quad present, design 5 / L4) */
-        uint32_t dw, dh, dbpp = 2u, want = 2u;
+        uint32_t dw = 0, dh = 0, dbpp = 2u, want = 2u;
         if (!rgb_display(&p->rb, &dw, &dh, &dbpp) && dbpp == 4u) want = 4u;
-        p->rb.pot_pitch = 0;
+        p->scr_w = dw; p->scr_h = dh;
+        p->fs_scale = (!p->win_mode && dw && dh && (p->fb_w < dw || p->fb_h < dh)) ? 1u : 0u;      /* FS_SCALE: a smaller full-screen drawable is stretched to the scanout */
+        p->rb.pot_pitch = p->fs_scale ? 1u : 0u;                                                      /* the quad samples the target as a power-of-two texture */
         rc = rgb_surface(&p->rb, p->fb_w, p->fb_h, want, 1);
         if (rc && want == 4u) { p->rb.pot_pitch = 1; rc = rgb_surface(&p->rb, p->fb_w, p->fb_h, 2, 1); }   /* 16 bpp target on a 32 bpp scanout: presented through the 3D engine, so power-of-two pitch */
         p->cbpp = p->rb.bpp ? p->rb.bpp : 2u;
@@ -294,6 +296,9 @@ static int present_rects(mach64_priv *p)
                 rgb_present(&p->rb, vr[i][0] - (int)p->win_x, vr[i][1] - (int)p->win_y, vr[i][2], vr[i][3], vr[i][0], vr[i][1]);
             return 1;
         }
+    }
+    if (p->fs_scale && !p->win_mode) {                                  /* FS_SCALE: stretch the whole target over the scanout (bilinear); fall back to a 1:1 copy if the kernel refuses */
+        if (!rgb_present_scaled(&p->rb, 0, 0, (int)p->fb_w, (int)p->fb_h, 0, 0, (int)p->scr_w, (int)p->scr_h, 1)) return 1;
     }
     rgb_present(&p->rb, 0, 0, (int)p->fb_w, (int)p->fb_h, (int)p->win_x, (int)p->win_y);
     return 1;

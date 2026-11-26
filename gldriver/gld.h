@@ -112,6 +112,8 @@ typedef struct {
     uint32_t   frame_new;          /* 1 => the colour/Z clear of this frame is still owed */
     uint32_t   init_clear;         /* 1 => the colour buffer has never been defined (new surface): clear it once even if the app does not glClear */
     uint32_t   z_clear_pending;
+    uint32_t   scr_w, scr_h;       /* scanout size at surface build; fs_scale = full-screen drawable smaller than it -> presented stretched (bilinear quad) */
+    uint32_t   fs_scale;
     uint32_t   mode_gen;           /* display generation the surface was built for */
     uint32_t   attached;           /* a surface exists */
     uint32_t   tex_off;            /* bound texture VRAM offset */

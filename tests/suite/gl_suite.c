@@ -643,6 +643,12 @@ static void t_dstalpha(void)
     default_state(); g32(0x6304, 0x01000000u); g32(0x62e8, (0x0304u << 16) | 0x0305u); gf(0x6320, 0.0f); gf(0x6324, 0.0f); gf(0x6328, 1.0f); gf(0x632c, 0.5f); sync();
     tri(20, 16, 0xff00ff00u, 140, 16, 0xff00ff00u, 80, 130, 0xff00ff00u, 0.0f);
     printf("    (background after glClear A=0.5: 0x%08x)\n", px(5, 5));
+    if (P->rb.bpp == 4u) {                      /* 32 bpp: glReadPixels returns the stored destination alpha (not a constant 1.0) */
+        unsigned char ra[4]; unsigned bg = px(5, 5); memset(ra, 0, sizeof ra);
+        mach64_ctl08(ctx, 5, (int)P->rb.h - 1 - 5, 1, 1, 0x1908u, 0x1401u, ra);
+        printf("    (glReadPixels RGBA alpha at (5,5): %02x, stored alpha %02x)\n", ra[3], ch(bg, 24));
+        CHECK("glReadPixels alpha = stored destination alpha at 32 bpp (clear A=0.5)", ch(bg, 24) != 255 && ra[3] == ch(bg, 24));
+    }
     c = px(80, 50); printf("    (DST_ALPHA blend, Ad=0.5: 0x%08x)\n", c);
     /* NOT APPLICABLE on the RGB565 target: it stores no destination alpha (measured above: the background reads back with no A=0.5), so DST_ALPHA
      * blending has no Ad to use.  The Ad=0 case below still verifies the dst-kept behaviour. */
@@ -658,6 +664,27 @@ static void t_dstalpha(void)
     CHECK("alpha-only colour mask: alpha channel written, colour untouched", ch(c, 24) > 200 && isclr(c, 32, 48, 64));
 }
 
+/* MEASUREMENT ONLY (no pass/fail on time): a bilinear-magnified quad from a 1024-texel-wide texture vs a 256-wide one, drawn through the bundle's own state emission.
+ * The quad present found TEX_CNTL bit 30 (set by the bundle) makes bilinear reads from pitch-1024 textures ~40x slower; this shows whether game textures hit it too. */
+static double cliff_run(int tw, float s1, const char *label)
+{
+    unsigned char *d = calloc(1, (size_t)tw * 128 * 3); void *t; int k, n = 6; double t0, ms; int i;
+    for (i = 0; i < tw * 128; i++) { d[i * 3] = (unsigned char)(i * 7); d[i * 3 + 1] = (unsigned char)(i * 3); d[i * 3 + 2] = (unsigned char)(i >> 3); }
+    t = mktex(tw, 128, 0x1907, d, (GL_CLAMP_E << 16) | GL_CLAMP_E, 0x2601, 0x2601);
+    default_state(); bindtex(t, GL_REPLACE_ENV); sync(); clear_rt(0);
+    tquad(0, 0, 256, 192, 0.0f, 0.0f, s1, 0.75f, 0xffffffffu); (void)px(10, 10);                    /* warm up: upload at first bind */
+    t0 = now_s(); for (k = 0; k < n; k++) tquad(0, 0, 256, 192, 0.0f, 0.0f, s1, 0.75f, 0xffffffffu); (void)px(10, 10);
+    ms = (now_s() - t0) * 1000.0 / n;
+    printf("    (cliff %s: bilinear 256x192 quad, %d-wide RGB texture: %.2f ms each)\n", label, tw, ms);
+    texreset(); mach64_texture_deleted(0, t); free(d);
+    return ms;
+}
+static void t_cliff(void)
+{
+    double a = cliff_run(256, 0.5f, "narrow"), b = cliff_run(1024, 0.125f, "wide");
+    printf("    (cliff: wide/narrow = %.1fx)\n", b / (a > 0.01 ? a : 0.01));
+    CHECK("cliff measurement completed", a > 0 && b > 0);
+}
 /* Textured fill rate by texel format / filter (gap 8 evidence): N frames of one 200x200 textured quad each */
 static double texperf_run(void *t, unsigned minmag, int frames)
 {
@@ -1400,7 +1427,7 @@ static const struct { const char *name; void (*fn)(void); } TESTS[] = {
     {"stencil_agree", t_stencil_agree}, {"stencil_random", t_stencil_random}, {"stencil_persist", t_stencil_persist}, {"stencil_clear", t_stencil_clear}, {"stencil_scissor", t_stencil_scissor},
     {"polymode", t_polymode}, {"polyoffset", t_polyoffset}, {"linestipple", t_linestipple}, {"smooth", t_smooth}, {"envadd", t_envadd}, {"query", t_query}, {"mirror", t_mirror}, {"wrapmodes", t_wrapmodes}, {"accum", t_accum}, {"cblend", t_cblend}, {"cputex", t_cputex}, {"s3tc", t_s3tc}, {"paletted", t_paletted}, {"copytexsub", t_copytexsub}, {"pointsprite", t_pointsprite}, {"npot", t_npot}, {"rect", t_rect}, {"cube", t_cube},
     {"gouraud", t_gouraud}, {"flat", t_flat}, {"colormask", t_colormask}, {"depth", t_depth}, {"blend", t_blend},
-    {"alphatest", t_alphatest}, {"prims", t_prims}, {"pixelops", t_pixelops}, {"gourbig", t_gourbig}, {"clear", t_clear}, {"prims2", t_prims2}, {"fog", t_fog}, {"stipple", t_stipple}, {"logicop", t_logicop}, {"tex_replace", t_tex_replace}, {"multitex", t_multitex}, {"dstalpha", t_dstalpha}, {"texfmt8", t_texfmt8}, {"texfmt", t_texfmt}, {"texfmt_fallback", t_texfmt_fallback}, {"texfmt_mt", t_texfmt_mt}, {"specular", t_specular}, {"multitex_min", t_multitex_min}, {"tex_alpha", t_tex_alpha}, {"tex_wrap", t_tex_wrap}, {"tex_filter", t_tex_filter}, {"tex_alpha_edge", t_tex_alpha_edge}, {"tex_alpha_decal_probe", t_tex_alpha_decal_probe}, {"tex_alpha_bilinear", t_tex_alpha_bilinear}, {"tex_churn", t_tex_churn}, {"tex_highptr", t_tex_highptr}, {"tex_mip", t_tex_mip}, {"tex_mip_nonsq", t_tex_mip_nonsq}, {"tex_bit8", t_tex_bit8}, {"tex_lodbias", t_tex_lodbias}, {"tex_mip_prims", t_tex_mip_prims}, {"tex_mip_fog", t_tex_mip_fog}, {"tex_mip_gouraud", t_tex_mip_gouraud}, {"tex_hwmip", t_tex_hwmip}, {"tex_minlin", t_tex_minlin}, {"multictx", t_multictx}, 
+    {"alphatest", t_alphatest}, {"cliff", t_cliff}, {"prims", t_prims}, {"pixelops", t_pixelops}, {"gourbig", t_gourbig}, {"clear", t_clear}, {"prims2", t_prims2}, {"fog", t_fog}, {"stipple", t_stipple}, {"logicop", t_logicop}, {"tex_replace", t_tex_replace}, {"multitex", t_multitex}, {"dstalpha", t_dstalpha}, {"texfmt8", t_texfmt8}, {"texfmt", t_texfmt}, {"texfmt_fallback", t_texfmt_fallback}, {"texfmt_mt", t_texfmt_mt}, {"specular", t_specular}, {"multitex_min", t_multitex_min}, {"tex_alpha", t_tex_alpha}, {"tex_wrap", t_tex_wrap}, {"tex_filter", t_tex_filter}, {"tex_alpha_edge", t_tex_alpha_edge}, {"tex_alpha_decal_probe", t_tex_alpha_decal_probe}, {"tex_alpha_bilinear", t_tex_alpha_bilinear}, {"tex_churn", t_tex_churn}, {"tex_highptr", t_tex_highptr}, {"tex_mip", t_tex_mip}, {"tex_mip_nonsq", t_tex_mip_nonsq}, {"tex_bit8", t_tex_bit8}, {"tex_lodbias", t_tex_lodbias}, {"tex_mip_prims", t_tex_mip_prims}, {"tex_mip_fog", t_tex_mip_fog}, {"tex_mip_gouraud", t_tex_mip_gouraud}, {"tex_hwmip", t_tex_hwmip}, {"tex_minlin", t_tex_minlin}, {"multictx", t_multictx}, 
 };
 
 int main(int argc, char **argv)
