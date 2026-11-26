@@ -19,6 +19,22 @@ int main(void)
     printf("DSP calibration: config 0x%08x (ROM 0x004807f7)  on_off 0x%08x (ROM 0x009c07b0)\n", cfg, onoff);
     if (cfg != 0x004807f7) { printf("FAIL: DSP_CONFIG differs\n"); bad++; }
     if ((onoff & 0x7ff) < 1960 || (onoff & 0x7ff) > 1975) { printf("FAIL: DSP_OFF %u too far from the ROM's 1968\n", onoff & 0x7ff); bad++; }
+    /* Apple's formula (not used by the stub): the calibration point, then every rig clock at 16 and 32 bpp against ours (memtype 4 = what the stub assumes, 8 MB) */
+    {   struct rage_dsp_apple a; unsigned oc, oo; int b;
+        in.xclk_fb = 217; in.xclk_post = 1; in.xclk_ref_div = 1; in.vclk_fb = 218; in.vclk_post = 8; in.bpp = 16;
+        rage_dsp_apple_calc(&in, 0x10751a7b, 3, 8, 0x004807f7, &a);
+        printf("Apple formula, calibration point, memtype 3 (SDRAM): prec %u depth %u xclks %u lat %u on %u off %u max_ras %u -> config 0x%08x on_off 0x%08x (ROM 0x004807f7 / 0x009c07b0)\n",
+               a.prec, a.depth, a.xclks, a.latency, a.on, a.off, a.max_ras, a.config, a.on_off);
+        if (a.prec != 4 || a.off != 1968 || a.latency != 8) { printf("FAIL: Apple replica does not reproduce the ROM's precision/OFF/latency\n"); bad++; }
+        printf("%7s %3s | ours (X.Org): %-10s %-10s | Apple: %-10s %-10s (prec depth xclks lat on off)\n", "kHz", "bpp", "config", "on_off", "config", "on_off");
+        for (b = 16; b <= 32; b += 16) for (i = 0; i < 7; i++) {
+            rage_pll_calc(clocks[i], 64, &p);
+            in.vclk_fb = (int)p.fb; in.vclk_post = (int)p.post; in.bpp = b; in.fifo_depth = 32;
+            rage_dsp_mem(0x10751a7b, 4, 8192, 0, &in); rage_dsp_calc(&in, &oc, &oo);
+            rage_dsp_apple_calc(&in, 0x10751a7b, 4, 8, 0, &a);
+            printf("%7u %3d | 0x%08x 0x%08x | 0x%08x 0x%08x  p%u d%2u x%u l%u on %u off %u\n", clocks[i], b, oc, oo, a.config, a.on_off, a.prec, a.depth, a.xclks, a.latency, a.on, a.off);
+        }
+    }
     printf(bad ? "FAILED (%d)\n" : "OK\n", bad);
     return bad != 0;
 }

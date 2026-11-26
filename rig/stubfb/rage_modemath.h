@@ -99,4 +99,44 @@ static void rage_dsp_calc(const struct rage_dsp_in *in, unsigned *dsp_config, un
     *dsp_on_off = ((unsigned)on << 16) | ((unsigned)off & 0x7ff);
     *dsp_config = ((unsigned)prec << 20) | ((unsigned)xclks & 0x3fff) | ((unsigned)in->latency << 16);
 }
+
+/*
+ * Apple's display-FIFO formula (NDRV ATY,264LTPro 1.3.42, function at 0x10017ae0; docs/re-notes/apple-ndrv-framebuffer.md section 10), integer only.
+ * NOT used by the stub yet: it is here so the two formulas can be compared (hosttest/modemath_test.c) before anything is programmed.
+ *   x      = xclks per quadword = 64 * XCLK / (VCLK * bits per pixel)         (the same ratio as the X.Org code's mult/div)
+ *   prec   = clamp(max(bitlen(int x) - 3, bitlen(int 32x) - 5), 0, 7)           (bitlen: position of the top set bit + 1, 1 for 0)
+ *   depth  = min(32, int(2^(prec+5) / x))                                       (X.Org: always 32)
+ *   OFF    = int(int(x*(depth-1) - 0.99999) * 2^(6-prec))
+ *   ON     = int(3 * max(pf, ras) * 2^(6-prec))                                 (X.Org: max(on, ras*..) + 2*ras*.. + pf*..)
+ *   XCLKS  = int(x * 2^(11-prec))
+ *   CONFIG = XCLKS | ((latency) & 15) << 16 | prec << 20 | (old & 0x8000)       latency = {8,6,9,8}[(memgroup>=2)*2 + (vram_mb>=2)] + 2, memgroup = memtype>>1
+ *   pf = trp + trcd + tcrd + 2 + {3,2,2,1}[same index]; ras = trp + tras + 2 (MEM_CNTL 0xb1/0xb2 fields as in rage_dsp_mem).
+ * Not modelled (Apple's flagged paths): the second head, the 4096/n scale factor (display property 0x10), and the cap of 24 for display mode id 0x50.
+ * vram_mb comes from a driver field at +0x524 shifted right by 20 (inferred to be the VRAM size).
+ */
+struct rage_dsp_apple { unsigned prec, depth, xclks, latency, on, off, max_ras, config, on_off; };
+static unsigned rage_bitlen(unsigned v) { unsigned n = 0; while (v) { n++; v >>= 1; } return n ? n : 1; }
+static void rage_dsp_apple_calc(const struct rage_dsp_in *in, unsigned mem_cntl, unsigned memtype, unsigned vram_mb, unsigned dsp_config_now, struct rage_dsp_apple *o)
+{
+    static const unsigned char lat_tbl[4] = { 8, 6, 9, 8 }, pf_tbl[4] = { 3, 2, 2, 1 };
+    unsigned mult = (unsigned)in->xclk_fb * (unsigned)in->vclk_post, div = (unsigned)in->vclk_fb * (unsigned)in->xclk_ref_div * ((unsigned)in->bpp / 4u);
+    int sh = 4 - in->xclk_post;                       /* x = mult * 2^sh / div */
+    unsigned num, idx = ((memtype >> 1) >= 2 ? 2u : 0u) + (vram_mb >= 2 ? 1u : 0u);
+    unsigned trp = (mem_cntl >> 8) & 3, trcd = (mem_cntl >> 10) & 3, tcrd = (mem_cntl >> 12) & 1, tras = (mem_cntl >> 16) & 7, pf, ras, q, r;
+    int prec, b8, b9;
+    if (sh >= 0) num = mult << sh; else { num = mult; div <<= -sh; }
+    b8 = (int)rage_bitlen(num / div); b9 = (int)rage_bitlen((num << 5) / div);
+    prec = (b8 - 3 < b9 - 5) ? b9 - 5 : b8 - 3; if (prec < 0) prec = 0; if (prec > 7) prec = 7;
+    q = (div << (prec + 5)) / num; o->depth = q < 33u ? q : 32u;                     /* int(2^(prec+5) / x) capped at 32 */
+    q = (num * (o->depth - 1u)) / div; r = (num * (o->depth - 1u)) % div;
+    q = q - 1u + ((r * 100000u >= 99999u * div) ? 1u : 0u);                           /* int(x*(depth-1) - 0.99999) */
+    pf = trp + trcd + tcrd + 2u + pf_tbl[idx]; ras = trp + tras + 2u; o->max_ras = pf > ras ? pf : ras;
+    o->prec = (unsigned)prec;
+    o->off = prec <= 6 ? q << (6 - prec) : q >> 1;
+    o->on  = prec <= 6 ? (3u * o->max_ras) << (6 - prec) : (3u * o->max_ras) >> 1;
+    o->xclks = (num << (11 - prec)) / div;
+    o->latency = lat_tbl[idx] + 2u;
+    o->config = o->xclks | ((o->latency & 15u) << 16) | ((unsigned)prec << 20) | (dsp_config_now & 0x8000u);
+    o->on_off = (o->on << 16) | o->off;
+}
 #endif
