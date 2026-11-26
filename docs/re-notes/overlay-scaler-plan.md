@@ -128,3 +128,10 @@ Reading: at 32 bpp the other channels are touched too, with unequal strength: bl
 
 ### P2 result (Nov 25 23:55, 15 bpp, COEFF0-3 identity, COEFF4 flat; readback confirmed)
 Black cell pure black everywhere, white white everywhere, blue uniformly blue, no fringing anywhere. **COEFF4 has no effect in this mode: the hardware reads only the first coefficient set (COEFF0) when the interpolation mode bits are off (or COEFF1-4 are never indexed by position).** The "phase-indexed" hypothesis is rejected for this configuration; the 50/50 effect seen earlier came from COEFF0 = 0x00101000 alone.
+
+## 19. Single-weight tests on COEFF0 (planned Nov 25 ~00:00; predictions BEFORE the runs; 15 bpp, `ovl_probe 2 <flags>`, flags 16 / 20 / 24 = COEFF0 = 0x00200000 / 0x20000000 / 0x00000020, COEFF1-4 identity)
+Working model (from 0x00101000 -> blue = average of this pixel and the next): COEFF0 bytes b0..b3 = taps at source offsets -1, 0, +1, +2 (at least for the blue channel); b1 = this pixel, b2 = next pixel. Predictions for bands (R,R,K / G,G,K / B,B,K / W,W,K / K,W,W on grey 64):
+* T4 b2 only (+1 tap, flags 16): blue takes the NEXT pixel: 2nd blue cell BLACK (yes), 2nd white cell YELLOW (not white), black cell left of white BLUE (yes); red and green rows unchanged (at 15 bpp).
+* T5 b3 only (+2 tap, flags 20): blue takes the pixel two to the right: 1st blue cell BLACK, 2nd blue cell GREY-BLUE-less (blue 64 from the grey background... i.e. nearly black), 1st white cell YELLOW? (its +2 pixel is black), black cell in band 5 BLUE.
+* T6 b0 only (-1 tap, flags 24): blue takes the pixel to the LEFT: 1st blue cell dark (neighbour is the grey background, blue 64), 2nd blue stays blue, the black cell right of the blue pair becomes BLUE, band 5: the 2nd white cell next to ... black left neighbour -> white cell loses blue (yellow).
+If a different channel is affected or a cell shows something not predicted, that falsifies the tap-position model.
