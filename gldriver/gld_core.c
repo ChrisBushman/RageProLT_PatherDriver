@@ -117,8 +117,9 @@ int mach64_build_surface(gld_context *ctx)
          * (which cannot be presented to a 32 bpp scanout until the textured-quad present, design 5 / L4) */
         uint32_t dw, dh, dbpp = 2u, want = 2u;
         if (!rgb_display(&p->rb, &dw, &dh, &dbpp) && dbpp == 4u) want = 4u;
+        p->rb.pot_pitch = 0;
         rc = rgb_surface(&p->rb, p->fb_w, p->fb_h, want, 1);
-        if (rc && want == 4u) rc = rgb_surface(&p->rb, p->fb_w, p->fb_h, 2, 1);
+        if (rc && want == 4u) { p->rb.pot_pitch = 1; rc = rgb_surface(&p->rb, p->fb_w, p->fb_h, 2, 1); }   /* 16 bpp target on a 32 bpp scanout: presented through the 3D engine, so power-of-two pitch */
         p->cbpp = p->rb.bpp ? p->rb.bpp : 2u;
     }
     if (rc) { p->attached = 0; return rc; }

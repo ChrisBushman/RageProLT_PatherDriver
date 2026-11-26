@@ -19,6 +19,7 @@ typedef struct {
     uint32_t features, flags;
     uint32_t dropped;             /* register writes of a stream the kernel owns and the bundle therefore did not forward (statistics) */
     uint32_t fence;               /* last submitted sequence */
+    int      pot_pitch;           /* set before rgb_surface: allocate the target with a power-of-two pitch (needed to present it through the 3D engine: conversion / scaling) */
     int      fmt555;              /* colour target is ARGB1555 (the scanout is 15 bit), else RGB565; set by rgb_surface from the kernel */
     int      last_err;            /* last non-zero return of a submit (diagnostic) */
 } rgb_t;
@@ -32,6 +33,7 @@ int  rgb_scissor(rgb_t *b, int l, int r, int t, int bt);
 int  rgb_flush(rgb_t *b, const m64_cmdbuf *cb);
 int  rgb_fill(rgb_t *b, int x, int y, int w, int h, uint32_t rgb565);
 uint32_t rgb_gen(rgb_t *b);                                         /* current display generation (odd = mode change in progress) */
+int  rgb_present_scaled(rgb_t *b, int sx, int sy, int sw, int sh, int dx, int dy, int dw, int dh, int bilinear);   /* target rect -> scanout rect through the 3D engine */
 int  rgb_display(rgb_t *b, uint32_t *w, uint32_t *h, uint32_t *bpp);   /* live scanout size and depth */
 void rgb_release(rgb_t *b);                                         /* free the colour and Z blocks */
 int  rgb_clear_z(rgb_t *b, uint32_t value);                        /* fill the bound Z buffer */

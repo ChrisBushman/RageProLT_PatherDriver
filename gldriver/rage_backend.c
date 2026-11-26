@@ -41,6 +41,8 @@ void rgb_close(rgb_t *b) { if (b->conn) IOServiceClose(b->conn); b->conn = 0; }
 int rgb_surface(rgb_t *b, uint32_t w, uint32_t h, uint32_t bpp, int with_z)
 {
     uint32_t pitch = (w + 7u) & ~7u, bytes = pitch * h * bpp, zbytes = pitch * h * 2u, off, zoff = 0; kern_return_t kr;
+    if (b->pot_pitch && pitch <= 1024u) { uint32_t pp = 8u; while (pp < pitch) pp <<= 1; pitch = pp; }   /* square power-of-two texture alias of the target (kernel textured-quad present) */
+    bytes = pitch * h * bpp; zbytes = pitch * h * 2u;
     (void)rgb_gen(b);                                  /* refresh b->flags: the target format follows the scanout depth */
     if (b->col_off) { CALL(RAGE_GL_FREE, 1, 0, b->col_off); b->col_off = 0; }
     if (b->z_off) { CALL(RAGE_GL_FREE, 1, 0, b->z_off); b->z_off = 0; }
@@ -132,6 +134,8 @@ static int st_other(int rc, uint64_t t0, int kind) { if (t0) { uint64_t n = st_n
 int rgb_fill(rgb_t *b, int x, int y, int w, int h, uint32_t c) { uint64_t t0 = STAT_ON() ? st_now() : 0; return st_other((int)CALL(RAGE_GL_FILL, 5, 0, (uint32_t)x, (uint32_t)y, (uint32_t)w, (uint32_t)h, c), t0, 0); }
 int rgb_clear_z(rgb_t *b, uint32_t v) { uint64_t t0 = STAT_ON() ? st_now() : 0; return st_other((int)CALL(RAGE_GL_CLEAR_Z, 1, 0, v), t0, 1); }
 int rgb_fence(rgb_t *b) { uint32_t done; return (int)CALL(RAGE_GL_FENCE, 1, 1, b->fence, &done); }
+int rgb_present_scaled(rgb_t *b, int sx, int sy, int sw, int sh, int dx, int dy, int dw, int dh, int bilinear)
+{ return (int)CALL(RAGE_GL_PRESENT_SCALED, 5, 0, (uint32_t)sx | ((uint32_t)sy << 16), (uint32_t)sw | ((uint32_t)sh << 16), (uint32_t)dx | ((uint32_t)dy << 16), (uint32_t)dw | ((uint32_t)dh << 16), (uint32_t)bilinear); }
 int rgb_present(rgb_t *b, int sx, int sy, int w, int h, int dx, int dy) { uint64_t t0 = STAT_ON() ? st_now() : 0; g_st_frames++; return st_other((int)CALL(RAGE_GL_PRESENT, 6, 0, (uint32_t)sx, (uint32_t)sy, (uint32_t)w, (uint32_t)h, (uint32_t)dx, (uint32_t)dy), t0, 2); }
 int rgb_tex_alloc(rgb_t *b, uint32_t bytes, uint32_t *off) { return (int)CALL(RAGE_GL_ALLOC, 2, 1, (bytes + 4095u) & ~4095u, 4096u, off); }
 int rgb_tex_free(rgb_t *b, uint32_t off) { return (int)CALL(RAGE_GL_FREE, 1, 0, off); }

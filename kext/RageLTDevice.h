@@ -59,6 +59,7 @@ class RageLTDevice : public IOAccelerator
     IOFramebuffer       *fFBs[RAGE_MAX_FB];
     IONotifier          *fFBNotify[RAGE_MAX_FB];
     uint32_t               fNumFB;
+    int32_t                fQuadU, fQuadV, fQuadX;   /* textured-quad present biases (S/T texel Q8, vertex Q2); experiment knobs, default 0 */
     uint32_t               fFenceSubmitted, fFenceCompleted;   /* PIO phase: completes before submit returns; DMA keeps the same counters */
     /* RAGE_FEAT_DMA (RageLTDma.cpp) */
     class IOBufferMemoryDescriptor *fDmaCmd, *fDmaCmd2, *fDmaRing;       /* two command buffers (the stream being drawn and the one being built), one ring block holding a 16 KB table for each */
@@ -104,6 +105,8 @@ public:
     IOReturn     clearZ(uint32_t owner, uint32_t value);
     IOReturn     fillRect(uint32_t owner, int32_t x, int32_t y, int32_t w, int32_t h, uint32_t color565);
     IOReturn     present(uint32_t owner, uint32_t sx, uint32_t sy, uint32_t w, uint32_t h, uint32_t dx, uint32_t dy);
+    IOReturn     presentEx(uint32_t owner, uint32_t sx, uint32_t sy, uint32_t w, uint32_t h, uint32_t dx, uint32_t dy, uint32_t dw, uint32_t dh, uint32_t filter);
+    void         quadConfig(uint32_t key, uint32_t value);
     IOReturn     vramCopyIn(uint32_t owner, uint32_t off, const uint8_t *src, uint32_t len, uint32_t flags);     /* src = kernel buffer */
     IOReturn     vramCopyOut(uint32_t owner, uint32_t off, uint8_t *dst, uint32_t len, uint32_t flags);
     IOReturn     scanoutCopyOut(uint32_t byteOff, uint8_t *dst, uint32_t len);                                    /* debug */

@@ -47,6 +47,7 @@ bool RageLTGLClient::start(IOService *provider)
     M(RAGE_GL_SET_TEXTURE, selSetTexture, kIOUCScalarIScalarO, 3, 0);
     M(RAGE_GL_CLEAR_Z,     selClearZ,     kIOUCScalarIScalarO, 1, 0);
     M(RAGE_GL_CONFIG,      selConfig,     kIOUCScalarIScalarO, 2, 0);
+    M(RAGE_GL_PRESENT_SCALED, selPresentScaled, kIOUCScalarIScalarO, 5, 0);
     M(RAGE_GL_SCANOUT_READ, selScanoutRead, kIOUCScalarIScalarO, 3, 0);
 #undef M
     fDev->logEvent(RAGE_EV_CLIENT_OPEN, fOwner, RAGE_CLIENT_GL, 0, 0, 0, 0);
@@ -207,9 +208,13 @@ IOReturn RageLTGLClient::selVramRead(uint32_t off, uint32_t addr, uint32_t len, 
 IOReturn RageLTGLClient::selSetTexture(uint32_t index, uint32_t off, uint32_t fmt)
 { return fDev ? fDev->setTexture(fOwner, index, off, fmt) : kIOReturnNotAttached; }
 
+IOReturn RageLTGLClient::selPresentScaled(uint32_t s, uint32_t sz, uint32_t d, uint32_t dsz, uint32_t filter)
+{ return fDev ? fDev->presentEx(fOwner, s & 0xffffu, s >> 16, sz & 0xffffu, sz >> 16, d & 0xffffu, d >> 16, dsz & 0xffffu, dsz >> 16, filter) : kIOReturnNotAttached; }
+
 IOReturn RageLTGLClient::selConfig(uint32_t key, uint32_t value)
 {
     if (!fDev) return kIOReturnNotAttached;
+    if (key >= 3 && key <= 5) { fDev->quadConfig(key, value); return kIOReturnSuccess; }   /* textured-quad present biases (experiment) */
     if (key != 1 && key != 2) return kIOReturnBadArgument;      /* 1 = DMA batch submission, 2 = DMA texture/pixel upload */
     fDev->dmaConfig(key, value);
     return kIOReturnSuccess;

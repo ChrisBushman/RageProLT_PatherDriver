@@ -3,6 +3,7 @@
 #ifndef RAGELTENGINE_H
 #define RAGELTENGINE_H
 
+#include "../common/rage_f32.h"
 #include <libkern/OSByteOrder.h>
 #include <ppc/proc_reg.h>      /* eieio */
 #include "rage_types.h"
@@ -176,4 +177,50 @@ static inline int eng_tri16(volatile uint8_t *regs, uint32_t off, uint32_t pitch
     return 0;
 }
 
+
+/* Textured quad: the 3D engine draws dst rect (x0,y0)-(x1,y1) (Q2 = quarter pixels, vertex coordinates) from a SQUARE power-of-two texture (2^wl texels per side, row pitch 2^wl)
+ * with texel coordinates (u0,v0)-(u1,v1) in Q8 texels.  The destination and the texture format are independent (the engine converts), so this is the 16 -> 32 bpp
+ * present and the scaled present (bilinear when scale3d carries the bilinear bits).  Register order = m64_emit_state (textured) + m64_emit_triangle, as proven by
+ * tools/ragegl/gldcore_test (textured quad) and gl_suite.  Float encodings are integer-built (rage_f32.h). */
+#define RAGE_SCALE3D_TEX_NEAREST 0x0141009bu
+#define RAGE_SCALE3D_TEX_BILINEAR (0x0141009bu | 0x02000000u | 0x08000000u)
+static inline uint32_t eng_f32_signed(int32_t num, int shift) { return num < 0 ? (0x80000000u | rage_f32_pow2((uint32_t)-num, shift)) : rage_f32_pow2((uint32_t)num, shift); }
+static inline void eng_vertex(volatile uint8_t *regs, int slot, int32_t x, int32_t y, uint32_t s, uint32_t t)
+{
+    uint32_t b = 0x0240u + (uint32_t)slot * 0x20u;
+    eng_wq(regs, b + 0x00, s); eng_wq(regs, b + 0x04, t); eng_wq(regs, b + 0x08, 0x3f800000u);   /* W = 1.0 */
+    eng_wq(regs, b + 0x0c, 0); eng_wq(regs, b + 0x10, 0); eng_wq(regs, b + 0x14, 0xffffffffu);   /* SPEC, Z, ARGB white (modulate = identity) */
+    eng_wq(regs, b + 0x18, (((uint32_t)x & 0xffffu) << 16) | ((uint32_t)y & 0xffffu));          /* X_Y last: latches the slot */
+}
+static inline int eng_texquad(volatile uint8_t *regs, uint32_t dst_pixw, uint32_t dst_off, uint32_t dst_pitch, uint32_t tex_fmt, uint32_t tex_off, uint32_t wl,
+                              int32_t x0, int32_t y0, int32_t x1, int32_t y1, int32_t u0, int32_t v0, int32_t u1, int32_t v1,
+                              uint32_t sc_lr, uint32_t sc_tb, uint32_t scale3d)
+{
+    uint32_t sh = wl + 8u, s0 = eng_f32_signed(u0, (int)sh), s1 = eng_f32_signed(u1, (int)sh), t0 = eng_f32_signed(v0, (int)sh), t1 = eng_f32_signed(v1, (int)sh);
+    uint32_t n = (uint32_t)((x1 - x0) / 4) * (uint32_t)((y1 - y0) / 4), oob = rage_f32_recip(n);       /* 16 / cross = 1 / (w * h) */
+    uint32_t tc = (1u << 9) | (1u << 23) | (1u << 30) | (1u << 17) | (1u << 18);                       /* as the bundle: cache flush, 4K cache, + clamp S and T */
+    if (eng_wait_idle(regs)) return -1;
+    eng_wq(regs, RAGE_R_DST_CNTL, 3u);
+    eng_wq(regs, 0x0304, 0);                                                                           /* SETUP_CNTL */
+    eng_wq(regs, MACH64_Z_CNTL, 0);
+    eng_wq(regs, MACH64_TEX_0_OFF + (wl << 2), tex_off);                                               /* the offset register of the largest level (= wl: square) */
+    eng_wq(regs, MACH64_TEX_SIZE_PITCH, wl | (wl << 4) | (wl << 8));
+    eng_wq(regs, MACH64_TEX_CNTL, tc & ~(1u << 23));
+    eng_wq(regs, MACH64_TEX_CNTL, tc);                                                                 /* 0 -> 1 edge flushes the texture cache */
+    eng_wq(regs, MACH64_SCALE_3D_CNTL, scale3d);
+    eng_wq(regs, MACH64_ALPHA_TST_CNTL, (7u << 4) | (4u << 8));
+    eng_wq(regs, MACH64_DP_PIX_WIDTH, (dst_pixw & ~0xf0000000u) | (tex_fmt << 28));
+    eng_wq(regs, MACH64_DST_OFF_PITCH, ((dst_pitch / 8u) << 22) | (dst_off >> 3));
+    eng_wq(regs, MACH64_SC_LEFT_RIGHT, sc_lr);
+    eng_wq(regs, MACH64_SC_TOP_BOTTOM, sc_tb);
+    eng_wq(regs, MACH64_DP_WRITE_MASK, 0xffffffffu);
+    eng_wq(regs, MACH64_CLR_CMP_CNTL, 0);
+    eng_wq(regs, MACH64_DP_MIX, MACH64_DP_MIX_SS);
+    eng_wq(regs, MACH64_DP_SRC, MACH64_DP_SRC_3D);
+    eng_vertex(regs, 0, x0, y0, s0, t0); eng_vertex(regs, 1, x1, y0, s1, t0); eng_vertex(regs, 2, x0, y1, s0, t1);
+    eng_wq(regs, MACH64_ONE_OVER_AREA_UC, oob);
+    eng_vertex(regs, 0, x1, y0, s1, t0); eng_vertex(regs, 1, x1, y1, s1, t1); eng_vertex(regs, 2, x0, y1, s0, t1);
+    eng_wq(regs, MACH64_ONE_OVER_AREA_UC, oob);
+    return 0;
+}
 #endif

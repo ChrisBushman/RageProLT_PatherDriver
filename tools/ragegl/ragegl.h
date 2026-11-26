@@ -40,6 +40,8 @@ static inline kern_return_t ragegl_submit(ragegl_t c, const uint32_t *pairs, uin
 static inline kern_return_t ragegl_fence(ragegl_t c, uint32_t seq, uint32_t *done) { return RGL_CALL(RAGE_GL_FENCE, 1, 1, seq, done); }
 static inline kern_return_t ragegl_present(ragegl_t c, uint32_t sx, uint32_t sy, uint32_t w, uint32_t h, uint32_t dx, uint32_t dy)
 { return RGL_CALL(RAGE_GL_PRESENT, 6, 0, sx, sy, w, h, dx, dy); }
+static inline kern_return_t ragegl_present_scaled(ragegl_t c, uint32_t sx, uint32_t sy, uint32_t sw, uint32_t sh, uint32_t dx, uint32_t dy, uint32_t dw, uint32_t dh, uint32_t filter)
+{ return RGL_CALL(RAGE_GL_PRESENT_SCALED, 5, 0, sx | (sy << 16), sw | (sh << 16), dx | (dy << 16), dw | (dh << 16), filter); }
 static inline kern_return_t ragegl_vwrite(ragegl_t c, uint32_t off, const void *p, uint32_t len, uint32_t fl)
 { return RGL_CALL(RAGE_GL_VRAM_WRITE, 4, 0, off, (uint32_t)(uintptr_t)p, len, fl); }
 static inline kern_return_t ragegl_vread(ragegl_t c, uint32_t off, void *p, uint32_t len, uint32_t fl)

@@ -22,7 +22,7 @@ enum {
     RAGE_GL_FILL = 6,        /* in 5 {x, y, w, h, colour}; colour = rgb565 (16 bpp target) or 0xAARRGGBB (32 bpp target) */
     RAGE_GL_SUBMIT = 7,      /* in 2 {user address of {reg,val} pairs, number of pairs} */
     RAGE_GL_FENCE = 8,       /* in 1 {sequence}, out 1 {completed}; waits (bounded) */
-    RAGE_GL_PRESENT = 9,     /* in 6 {sx, sy, w, h, dx, dy}: target -> scanout, clipped on both sides */
+    RAGE_GL_PRESENT = 9,     /* in 6 {sx, sy, w, h, dx, dy}: target -> scanout, clipped on both sides; a different pixel size (16 bpp target, 32 bpp scanout) goes through the textured-quad path (power-of-two target pitch) */
     RAGE_GL_VRAM_WRITE = 10, /* in 4 {offset, user address, length, flags}; offset/length multiples of 4, <= 1 MB */
     RAGE_GL_VRAM_READ = 11,  /* in 4 {offset, user address, length, flags} */
     RAGE_GL_DISPLAY = 12,    /* in 0, out 6: mode_gen, width, height, pitch_px, bpp, scanout base */
@@ -33,7 +33,8 @@ enum {
     RAGE_GL_SUBMIT_EX = 17,    /* in 6 {user address of {reg,val} pairs, number of pairs (0 = textures only), user address of {index,offset} texture pairs, number of texture pairs (<= 12),
                                 * texel format 0/3/4/6/8/11/12/15 for the primary unit (0 or 6 = unchanged), format for the secondary unit (0 = unchanged)}: every SET_TEXTURE of a flush plus
                                 * the submit in ONE kernel call (a flush used to cost 13+ round trips); the texture records apply exactly as SET_TEXTURE would, failures ignored */
-    RAGE_GL_SEL_COUNT = 18
+    RAGE_GL_PRESENT_SCALED = 18, /* in 5 {sx | sy << 16, sw | sh << 16, dx | dy << 16, dw | dh << 16, filter (0 nearest, 1 bilinear)}: target rectangle -> scanout rectangle through the 3D engine (any pixel formats; needs a power-of-two target pitch) */
+    RAGE_GL_SEL_COUNT = 19
 };
 #define RAGE_XFER_SWAP16 1u      /* VRAM_WRITE/READ flag: swap bytes inside every 16-bit unit */
 #define RAGE_XFER_SWAP32 2u      /* ... inside every 32-bit unit */

@@ -129,31 +129,55 @@ IOReturn RageLTDevice::displayInfo(struct rage_display *out, uint32_t *gen)
 #define RAGE_OP_DONE(seq) ((void)(seq), kIOReturnSuccess)
 #endif
 #endif
-IOReturn RageLTDevice::present(uint32_t owner, uint32_t sx, uint32_t sy, uint32_t w, uint32_t h, uint32_t dx, uint32_t dy)
+/* Present, general form.  Same-format 1:1 = the 2D engine's raw blit.  Anything else (the target and the scanout differ in pixel size, or the destination rectangle is a different size
+ * = scaled present) = a textured quad of the 3D engine reading the target as a SQUARE power-of-two texture (the bundle allocates the target with a power-of-two pitch when it needs this).
+ * The engine converts between pixel formats itself.  scale3d: nearest for the 1:1 conversion, bilinear when scaling and filter != 0.  Both write the scanout only inside the
+ * clipped destination rectangle. */
+IOReturn RageLTDevice::presentEx(uint32_t owner, uint32_t sx, uint32_t sy, uint32_t w, uint32_t h, uint32_t dx, uint32_t dy, uint32_t dw, uint32_t dh, uint32_t filter)
 {
-    struct rage_ctx c; struct rage_display d; IOReturn rc; uint32_t seq, pixw;
+    struct rage_ctx c; struct rage_display d; IOReturn rc; uint32_t seq, pixw; int scaled = (w != dw || h != dh);
     if (!fEngineLive || (fModeGen & 1u)) return kIOReturnNotReady;
     IOLockLock(fLock);
     { struct rage_ctx *p = ctxFor(owner, false); if (!p || !p->tgt_bpp) { IOLockUnlock(fLock); return kIOReturnNotReady; } c = *p; }
     d = fDisp;
     if (!fDispReserved || (d.depth != 3 && d.depth != 4 && d.depth != 6)) { IOLockUnlock(fLock); return kIOReturnUnsupported; }
-    if (c.tgt_bpp != d.bpp) { IOLockUnlock(fLock); return kIOReturnUnsupported; }     /* depth conversion / scaling: textured-quad present (step 3) */
-    /* clip the source to the target and the destination to the scanout (both shift the other side to match) */
+    pixw = d.depth == 6 ? RAGE_PIXW_8888 : d.depth == 3 ? RAGE_PIXW_555 : RAGE_PIXW_565;
+    if (d.bpp == 2 && c.tgt_bpp == 2 && (c.tgt_555 != 0) != (d.depth == 3)) { IOLockUnlock(fLock); return kIOReturnNotReady; }   /* the mode changed depth under this target: the client must rebuild it */
+    if (!w || !h || !dw || !dh) { IOLockUnlock(fLock); return kIOReturnSuccess; }
     if (sx >= c.tgt_w || sy >= c.tgt_h || dx >= d.w || dy >= d.h) { IOLockUnlock(fLock); return kIOReturnSuccess; }
-    if (w > c.tgt_w - sx) w = c.tgt_w - sx;
-    if (h > c.tgt_h - sy) h = c.tgt_h - sy;
-    if (w > d.w - dx) w = d.w - dx;
-    if (h > d.h - dy) h = d.h - dy;
-    if (!w || !h) { IOLockUnlock(fLock); return kIOReturnSuccess; }
-    if (d.bpp == 2 && (c.tgt_555 != 0) != (d.depth == 3)) { IOLockUnlock(fLock); return kIOReturnNotReady; }   /* the mode changed depth under this target: the client must rebuild it */
-    pixw = d.depth == 6 ? RAGE_PIXW_8888 : d.depth == 3 ? RAGE_PIXW_555 : RAGE_PIXW_565;       /* same-format raw copy: the target was created in the scanout's format */
-    if (idleWait()) { IOLockUnlock(fLock); return kIOReturnTimeout; }
-    rc = (IOReturn)eng_blit(fRegs, pixw, c.tgt_off, c.tgt_pitch, d.base, d.pitch_px, sx, sy, dx, dy, w, h, ((d.w - 1u) << 16), ((d.h - 1u) << 16));
+    if (w > c.tgt_w - sx || h > c.tgt_h - sy) { IOLockUnlock(fLock); return kIOReturnBadArgument; }    /* the source rectangle must lie inside the target */
+    if (!scaled && c.tgt_bpp == d.bpp) {
+        /* same-format raw copy: clip the source to the target and the destination to the scanout (both shift the other side to match) */
+        if (w > d.w - dx) w = d.w - dx;
+        if (h > d.h - dy) h = d.h - dy;
+        if (idleWait()) { IOLockUnlock(fLock); return kIOReturnTimeout; }
+        rc = (IOReturn)eng_blit(fRegs, pixw, c.tgt_off, c.tgt_pitch, d.base, d.pitch_px, sx, sy, dx, dy, w, h, ((d.w - 1u) << 16), ((d.h - 1u) << 16));
+    } else {
+        uint32_t wl = 0, texfmt = c.tgt_bpp == 4 ? 6u : (c.tgt_555 ? 3u : 4u), right, bottom;
+        int32_t ub = fQuadU, vb = fQuadV, xb = fQuadX;
+        while ((1u << wl) < c.tgt_pitch) wl++;
+        if ((1u << wl) != c.tgt_pitch || wl < 3 || wl > 10 || c.tgt_h > c.tgt_pitch || dw > 4000u || dh > 4000u || dx > 4000u || dy > 4000u) { IOLockUnlock(fLock); return kIOReturnUnsupported; }
+        right = dx + dw; if (right > d.w) right = d.w;
+        bottom = dy + dh; if (bottom > d.h) bottom = d.h;
+        if (idleWait()) { IOLockUnlock(fLock); return kIOReturnTimeout; }
+        rc = (IOReturn)eng_texquad(fRegs, pixw, d.base, d.pitch_px, texfmt, c.tgt_off, wl,
+                                   (int32_t)(dx * 4u) + xb, (int32_t)(dy * 4u) + xb, (int32_t)((dx + dw) * 4u) + xb, (int32_t)((dy + dh) * 4u) + xb,
+                                   (int32_t)(sx * 256u) + ub, (int32_t)(sy * 256u) + vb, (int32_t)((sx + w) * 256u) + ub, (int32_t)((sy + h) * 256u) + vb,
+                                   ((right - 1u) << 16) | dx, ((bottom - 1u) << 16) | dy, (scaled && filter) ? RAGE_SCALE3D_TEX_BILINEAR : RAGE_SCALE3D_TEX_NEAREST);
+    }
     if (rc) { IOLockUnlock(fLock); return kIOReturnTimeout; }
     seq = ++fFenceSubmitted;
     rc = RAGE_OP_DONE(seq);
     IOLockUnlock(fLock);
     return rc;
+}
+
+IOReturn RageLTDevice::present(uint32_t owner, uint32_t sx, uint32_t sy, uint32_t w, uint32_t h, uint32_t dx, uint32_t dy)
+{ return presentEx(owner, sx, sy, w, h, dx, dy, w, h, 0); }
+
+void RageLTDevice::quadConfig(uint32_t key, uint32_t value)     /* experiment knobs of the textured-quad present (signed values): 3 = texel bias Q8 (S), 4 = (T), 5 = vertex bias Q2 */
+{
+    if (key == 3) fQuadU = (int32_t)value; else if (key == 4) fQuadV = (int32_t)value; else if (key == 5) fQuadX = (int32_t)value;
 }
 
 /* ---- VRAM copies: byte image of the user buffer == byte image in VRAM (no hidden endian assumption); flags may swap 16/32-bit units ---- */

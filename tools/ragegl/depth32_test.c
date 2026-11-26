@@ -57,7 +57,8 @@ int main(void)
       CHECK("scan-out holds the presented rectangle", !rd_fail && bad == 0 && inside == 6000); free(line); }
     /* a 16 bpp target cannot be presented to a 32 bpp scanout (that is the textured-quad step) */
     CHECK("16 bpp target accepted", ragegl_target(c, off, 256, 2, 256, 256) == 0);
-    CHECK("16 -> 32 present refused (unsupported)", ragegl_present(c, 0, 0, 10, 10, 0, 0) == (kern_return_t)0xe00002c7);
+    CHECK("16 -> 32 present with a non-power-of-two pitch refused (unsupported)", ragegl_target(c, off, 200, 2, 200, 200) == 0 && ragegl_present(c, 0, 0, 10, 10, 0, 0) == (kern_return_t)0xe00002c7);
+    CHECK("16 bpp target, power-of-two pitch", ragegl_target(c, off, 256, 2, 256, 256) == 0);
     CHECK("present with a 32 bpp target and rect off-screen is a no-op", ragegl_target(c, off, 256, 4, 256, 256) == 0 && ragegl_present(c, 0, 0, 10, 10, 100000, 100000) == 0);
     free(img); ragegl_close(c);
     printf("depth32_test: %d checks, %d failed\n", checks, fails);
