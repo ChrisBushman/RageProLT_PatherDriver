@@ -36,7 +36,9 @@ enum {
     RAGE_GL_PRESENT_SCALED = 18, /* in 5 {sx | sy << 16, sw | sh << 16, dx | dy << 16, dw | dh << 16, filter (0 nearest, 1 bilinear)}: target rectangle -> scanout rectangle through the 3D engine (any pixel formats; needs a power-of-two target pitch) */
     RAGE_GL_REG_DUMP = 19,     /* debug builds only (RAGE_DEBUG_ENGTEST), READ-ONLY: in 2 {user address, byte length}; fills {tag, value} word pairs for a fixed register list: tag 0x100|i = block-1 index i (overlay/scaler), tag 0x00..0xfc = block-0 byte offset, tag 0xf00 = PCI revision/class word (docs/re-notes/overlay-scaler-plan.md step A) */
     RAGE_GL_OVL_B0 = 20,       /* debug builds only (RAGE_DEBUG_ENGTEST): overlay plan step B0, the ONLY write: OVERLAY_VIDEO_KEY_CLR (block 1 off 0x008) <- 0x005A5A5A, read back, restore 0; out 3 {value before, value read back, value after restore} */
-    RAGE_GL_SEL_COUNT = 21
+    RAGE_GL_OVL_ON = 21,       /* debug builds only: overlay plan step B (static overlay): in 5 {source VRAM offset, source pitch in pixels, srcW | srcH << 16, dstX | dstY << 16, dstW | dstH << 16}; 15 bpp source; the block must belong to the caller */
+    RAGE_GL_OVL_OFF = 22,      /* debug builds only: hide and disable the overlay (also done when the owning client closes) */
+    RAGE_GL_SEL_COUNT = 23
 };
 #define RAGE_XFER_SWAP16 1u      /* VRAM_WRITE/READ flag: swap bytes inside every 16-bit unit */
 #define RAGE_XFER_SWAP32 2u      /* ... inside every 32-bit unit */

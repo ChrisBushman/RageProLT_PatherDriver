@@ -259,6 +259,56 @@ IOReturn RageLTDevice::regDump(uint32_t *pairs, uint32_t maxPairs, uint32_t *n)
     return kIOReturnSuccess;
 }
 
+/* Overlay plan step B (debug builds): static overlay of one client-owned 15 bpp buffer.  Block 1 registers at window offset idx*4.  Write order and values: docs/re-notes/overlay-scaler-plan.md section 2
+ * (approved list).  NOT written: bit 7 of SCALE_CNTL, the CAPTURE_CONFIG buffer bits, any block-0/CRTC/PLL/engine register, Win98's 0x8000211 key value. */
+static inline void ovlw(volatile uint8_t *regs, uint32_t off, uint32_t v) { OSWriteLittleInt32((volatile void *)regs, off, v); eieio(); }
+IOReturn RageLTDevice::ovlDisableLocked(void)
+{
+    ovlw(fRegs, 0x018, 0x110u);          /* OVERLAY_KEY_CNTL: video never shown */
+    ovlw(fRegs, 0x024, 0u);              /* OVERLAY_SCALE_CNTL: scaler and overlay off */
+    return kIOReturnSuccess;
+}
+IOReturn RageLTDevice::ovlOff(uint32_t owner)
+{
+    IOReturn rc = kIOReturnNotPermitted;
+    IOLockLock(fLock);
+    if (fOvlOwner && fOvlOwner == owner) { rc = ovlDisableLocked(); fOvlOwner = 0; }
+    IOLockUnlock(fLock);
+    return rc;
+}
+IOReturn RageLTDevice::ovlOn(uint32_t owner, uint32_t off, uint32_t pitch_px, uint32_t sw, uint32_t sh, uint32_t dx, uint32_t dy, uint32_t dw, uint32_t dh)
+{
+    IOReturn rc = kIOReturnBadArgument; uint32_t hinc, vinc, fmt;
+    if (!owner || !sw || !sh || !dw || !dh || sw > 720u || (pitch_px & 3u) || pitch_px < sw || (off & 7u)) return kIOReturnBadArgument;   /* quadword-aligned offset and pitch, width limit of this family */
+    IOLockLock(fLock);
+    if (fOvlOwner) rc = kIOReturnBusy;
+    else if (OSReadLittleInt32((volatile void *)fRegs, 0x024) != 0 || OSReadLittleInt32((volatile void *)fRegs, 0x018) != 0) rc = kIOReturnNotPermitted;   /* the overlay must be idle */
+    else if (!fDispReserved || dx + dw > fDisp.w || dy + dh > fDisp.h) rc = kIOReturnBadArgument;
+    else if (!rage_vram_owns(&fVram, off, (uint64_t)pitch_px * 2u * sh, owner)) rc = kIOReturnNotPermitted;                                    /* the source block belongs to this client */
+    else {
+        hinc = (sw << 12) / dw; vinc = (sh << 12) / dh;                          /* 12 fractional bits, truncated (PRG 8.8.1) */
+        if (hinc == 0 || vinc == 0 || hinc > 0xffffu || vinc > 0xffffu) rc = kIOReturnBadArgument;
+        else {
+            ovlw(fRegs, 0x018, 0x110u);                                          /* hide while programming */
+            ovlw(fRegs, 0x000, (dx << 16) | dy);                                 /* OVERLAY_Y_X_START (lock bit clear) */
+            ovlw(fRegs, 0x004, ((dx + dw - 1u) << 16) | (dy + dh - 1u));         /* OVERLAY_Y_X_END */
+            ovlw(fRegs, 0x008, 0u); ovlw(fRegs, 0x00c, 0u); ovlw(fRegs, 0x010, 0u); ovlw(fRegs, 0x014, 0u);   /* colour keys unused */
+            ovlw(fRegs, 0x020, (hinc << 16) | vinc);                             /* OVERLAY_SCALE_INC */
+            ovlw(fRegs, 0x028, (sw << 16) | sh);                                 /* SCALER_HEIGHT_WIDTH */
+            ovlw(fRegs, 0x034, off); ovlw(fRegs, 0x038, off); ovlw(fRegs, 0x03c, pitch_px);   /* SCALER_BUF0/BUF1_OFFSET, SCALER_BUF_PITCH (pixels) */
+            fmt = OSReadLittleInt32((volatile void *)fRegs, 0x048);
+            ovlw(fRegs, 0x048, (fmt & ~0x000f0000u) | 0x00030000u);              /* VIDEO_FORMAT.SCALER_IN = 15 bpp, other bits preserved */
+            ovlw(fRegs, 0x150, 0x00101000u);                                     /* SCALER_COLOUR_CNTL neutral */
+            ovlw(fRegs, 0x154, 0x00002000u); ovlw(fRegs, 0x158, 0x0d06200du); ovlw(fRegs, 0x15c, 0x0d0a1c0du); ovlw(fRegs, 0x160, 0x0c0e1a0cu); ovlw(fRegs, 0x164, 0x0c14140cu);   /* SCALER_H_COEFF0-4 */
+            ovlw(fRegs, 0x018, 0x011u);                                          /* OVERLAY_KEY_CNTL: VIDEO_FN true | GRAPHICS_FN true, OR: always show video */
+            ovlw(fRegs, 0x024, 0xc0000000u);                                     /* OVERLAY_SCALE_CNTL: SCALE_EN | OVERLAY_EN, last */
+            fOvlOwner = owner; rc = kIOReturnSuccess;
+        }
+    }
+    IOLockUnlock(fLock);
+    return rc;
+}
+
 /* Overlay plan step B0, the ONLY register write of the step: OVERLAY_VIDEO_KEY_CLR (block 1, window offset 0x008) is a colour-key compare value with no visible effect while the overlay is
  * disabled (SCALE_CNTL = 0, KEY_CNTL = 0; checked below).  Write 0x005A5A5A, read it back, write the original value back, read again.  Proves block 1 latches writes. */
 IOReturn RageLTDevice::ovlB0(uint32_t *before, uint32_t *readback, uint32_t *after)

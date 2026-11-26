@@ -48,7 +48,7 @@ bool RageLTDevice::start(IOService *provider)
     fDispReserved = false;
     { uint32_t k; for (k = 0; k < RAGE_MAX_CTX; k++) fCtx[k].owner = 0; }
     fFenceSubmitted = fFenceCompleted = 0;
-    fQuadU = fQuadV = fQuadX = 0; fQuadBlend = false; fQuadTcXor = fQuadScXor = 0;
+    fQuadU = fQuadV = fQuadX = 0; fQuadBlend = false; fQuadTcXor = fQuadScXor = 0; fOvlOwner = 0;
     fDmaCmd = fDmaCmd2 = fDmaRing = 0; fDmaCur = 0; fDmaOk = fDmaUse = fDmaPending = false;
     (void)dmaInit();
     modeStart();
@@ -100,6 +100,9 @@ void RageLTDevice::releaseOwner(uint32_t owner)
     IOLockLock(fLock);
     if (fEngineLive && fDmaPending) (void)dmaWait();            /* the engine may still be drawing into memory that is about to be reused */
     { struct rage_ctx *c = ctxFor(owner, false); if (c) c->owner = 0; }
+#if RAGE_DEBUG_ENGTEST
+    if (fOvlOwner && fOvlOwner == owner) { (void)ovlDisableLocked(); fOvlOwner = 0; }          /* the scaler must stop reading this client's VRAM before it is freed */
+#endif
     n = rage_vram_free_owner(&fVram, owner);
     IOLockUnlock(fLock);
     logEvent(RAGE_EV_OWNER_FREE, owner, n, 0, 0, 0, 0);
