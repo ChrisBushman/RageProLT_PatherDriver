@@ -18,6 +18,8 @@ ovl_b: ovl_b.c ragegl.h
 	cc $(CFLAGS) -o $@ ovl_b.c -framework IOKit -framework CoreFoundation
 ovl_flip: ovl_flip.c ragegl.h
 	cc $(CFLAGS) -o $@ ovl_flip.c -framework IOKit -framework CoreFoundation
+ovl_sweep: ovl_sweep.c ragegl.h
+	cc $(CFLAGS) -o $@ ovl_sweep.c -framework IOKit -framework CoreFoundation
 ovl_off: ovl_off.c ragegl.h
 	cc $(CFLAGS) -o $@ ovl_off.c -framework IOKit -framework CoreFoundation
 quad_test: quad_test.c ragegl.h
