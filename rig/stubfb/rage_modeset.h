@@ -24,6 +24,8 @@ enum { RM_CRTC_HTD = 0x00, RM_CRTC_HSYNC = 0x04, RM_CRTC_VTD = 0x08, RM_CRTC_VSY
 static void rm_add(struct rm_plan *p, int kind, unsigned a, unsigned b) { p->op[p->n].kind = (unsigned char)kind; p->op[p->n].a = (unsigned short)a; p->op[p->n].b = b; p->n++; }
 
 /* returns 0, or -1 if the mode is outside the PLL's range / fails the monitor limits */
+/* trial switch (stub property rage-dsp-apple): program the display FIFO from Apple's formula (rage_dsp_apple_calc) instead of the X.Org-derived one; default off */
+static int rm_dsp_apple = 0;
 static int rm_plan_mode(const struct rage_mode *m, const struct rm_cur *cur, unsigned mem_kb, unsigned memtype, struct rm_plan *p)
 {
     struct rage_pll pll; struct rage_dsp_in in; unsigned dsp_cfg, dsp_onoff, post6, xb, gen;
@@ -42,6 +44,8 @@ static int rm_plan_mode(const struct rage_mode *m, const struct rm_cur *cur, uns
     rage_dsp_calc(&in, &dsp_cfg, &dsp_onoff);
     /* 640x480 15 bpp 25.175 MHz is the one mode with a hardware-verified FIFO setting (the ROM's own): use it exactly; the formula's DSP_ON differs (unexplained) */
     if (m->pclk_khz == 25175 && m->w == 640 && m->pixwidth == 3) { dsp_cfg = 0x004807f7; dsp_onoff = 0x009c07b0; }
+
+    if (rm_dsp_apple) { struct rage_dsp_apple a; rage_dsp_apple_calc(&in, cur->mem_cntl, memtype, mem_kb >> 10, cur->dsp_config, &a); dsp_cfg = a.config; dsp_onoff = a.on_off; }
 
     post6 = (cur->pll6 & ~(3u << (RM_VCLK * 2))) | ((pll.post_code & 3u) << (RM_VCLK * 2));
     xb = cur->pllb & ~(0x10u << RM_VCLK); if (pll.post_code & 4) xb |= 0x10u << RM_VCLK;

@@ -1,5 +1,6 @@
 /* cursor_walk: exercise the RageStubFB hardware cursor.  Run in the GUI session.  Warps the pointer to points on the Rage display (found by its 640-pixel-wide
  * or 'rage' id argument) and after each move asks the stub for a snapshot of the cursor registers (property rage-cursor-regs -> RageCursorRegs).
+ *   cursor_walk stay         only park the pointer in the middle of the Rage display
  *   cursor_walk              walk a fixed set of points: centre, corners, the left/top edges (negative hot-spot clip) and back to the main display
  * Prints "x y -> registers" lines.  Exit status 1 if the hardware cursor was never enabled. */
 #include <ApplicationServices/ApplicationServices.h>
@@ -20,11 +21,11 @@ static void regs(const char *tag)
     if (r) CFRelease(r);
     IOObjectRelease(s);
 }
-int main(void)
+int main(int argc, char **argv)
 {
     CGDirectDisplayID ids[8]; CGDisplayCount n = 0, i; CGDirectDisplayID rage = 0; CGRect rb;
     CGGetActiveDisplayList(8, ids, &n);
-    for (i = 0; i < n; i++) { CGRect b = CGDisplayBounds(ids[i]); if (CGDisplayPixelsWide(ids[i]) <= 1280 && CGDisplayIDToOpenGLDisplayMask(ids[i]) && (int)b.origin.x != 0) { rage = ids[i]; rb = b; } }
+    for (i = 0; i < n; i++) { CGRect b = CGDisplayBounds(ids[i]); if (CGDisplayPixelsWide(ids[i]) <= 1280 && CGDisplayIDToOpenGLDisplayMask(ids[i])) { rage = ids[i]; rb = b; } }
     if (!rage) { printf("no Rage display found (expect a second display not at the origin)\n"); return 2; }
     printf("Rage display %u at %.0f,%.0f %.0fx%.0f\n", (unsigned)rage, rb.origin.x, rb.origin.y, rb.size.width, rb.size.height);
     regs("before");
@@ -38,6 +39,8 @@ int main(void)
         usleep(500000);
         char tag[64]; snprintf(tag, sizeof tag, "%s (%.0f,%.0f)", pts[k].name, p.x, p.y); regs(tag);
     }
+    if (argc > 1 && !strcmp(argv[1], "stay")) {             /* leave the pointer in the middle of the Rage display */
+        CGPoint c = CGPointMake(rb.origin.x + rb.size.width / 2, rb.origin.y + rb.size.height / 2); CGWarpMouseCursorPosition(c); CGPostMouseEvent(c, 1, 1, 0); usleep(300000); regs("parked on the Rage"); return 0; }
     CGPoint home = CGPointMake(100, 100); CGWarpMouseCursorPosition(home); CGPostMouseEvent(home, 1, 1, 0); usleep(500000); regs("back on main display");
     (void)enabled; return 0;
 }

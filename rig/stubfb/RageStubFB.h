@@ -27,6 +27,11 @@ class RageStubFB : public IOFramebuffer
     /* hardware cursor (64x64, 2 bpp, image at VRAM 0x40 like Apple's NDRV): fCurOk = image loaded, fCurX/Y last position, fCurVis enabled; boot-arg rage_hwcur0=1 turns it off (software cursor) */
     bool fCurOk, fCurVis, fCurPos, fHwCursorOff; SInt32 fCurX, fCurY;
     void cursorApplyPos(void);
+    IOReturn setCursorImageLocked(void *cursorImage);
+    IOReturn setCursorStateLocked(SInt32 x, SInt32 y, bool visible);
+    IOLock *fCurLock;            /* serialises setCursorImage/setCursorState (HID thread and WindowServer's threads both call in) */
+    IOMemoryMap *fCurMap;        /* persistent mapping of the 1 KB cursor image at VRAM 0x40 (created on first use, released in stop) */
+    volatile UInt8 *fCurImg;
     bool replayInit(void);
     const struct rage_mode *fModes[8], *fModes32[8]; int fNModes, fMode, fDepth;   /* fModes32[i] = the 32 bpp row of mode i or 0; fDepth 0 = 15 bpp, 1 = 32 bpp */   /* modes offered (15 bpp, 60 Hz rows of rage_modes.h); fMode = the one the chip is running */
     void pickModes(void);

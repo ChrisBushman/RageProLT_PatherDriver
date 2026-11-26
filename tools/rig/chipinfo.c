@@ -10,6 +10,6 @@ int main(void)
     CFDictionaryRef d = CFDictionaryCreate(NULL, (const void **)&k, (const void **)&v, 1, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
     IORegistryEntrySetCFProperties(s, d);
     CFTypeRef r = IORegistryEntryCreateCFProperty(s, CFSTR("RageChipInfo"), NULL, 0);
-    char b[300] = "?"; if (r && CFGetTypeID(r) == CFStringGetTypeID()) CFStringGetCString((CFStringRef)r, b, sizeof b, kCFStringEncodingASCII);
+    char b[400] = "?"; if (r && CFGetTypeID(r) == CFStringGetTypeID()) CFStringGetCString((CFStringRef)r, b, sizeof b, kCFStringEncodingASCII);
     printf("%s\n", b); return 0;
 }
