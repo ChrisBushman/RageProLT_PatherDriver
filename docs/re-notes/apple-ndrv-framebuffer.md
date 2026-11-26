@@ -114,3 +114,9 @@ Constants read from the unpacked data section (data base 0x1001a930): 64.0, 4096
 | 1280x1024 16 | 108.0 | 002a076b / 01b00710 | 432 vs 688 (the tightest case) |
 
 Limits: judged by eye with a GL load only (no underrun status register exists); holds of a few minutes, no long soak; the memory type was read from CONFIG_STAT0 = 4 on this card only. The default is still the X.Org-derived formula (`rm_dsp_apple = 0`); switching is a one-line change plus a reboot.
+
+## 15. Both are now the stub defaults (Nov 26, user decision after sections 13-14)
+- **Apple's display-FIFO formula** (`rm_dsp_apple = 1` in `rage_modeset.h`). Opt out at runtime with `stubctl dsp 0` (applies at the next mode set). The FIFO registers are only re-programmed by a mode set: right after boot they still hold the PC BIOS's values (640x480 15 bpp: 0x004807f7 / 0x009c07b0) until the first `setDisplayMode`. Verified on the G4 with nothing set by hand: 1024x768x32 -> 002a0627 / 01b005e0, 1280x1024x16 -> 002a076b / 01b00710, 640x480x16 -> 004a07f6 / 006c07b0.
+- **Hardware cursor** (Info.plist `RageHwCursor` = true; opt out with boot-arg `rage_hwcur0=1`). Verified: `setCursorImage` runs from the plist value alone, GEN_TEST_CNTL bit 7 set with the pointer on the Rage, colours 0 / 0xffffff00. Still requires the NDRV layout (`RageNdrvLayout`).
+- `hosttest/modeset_test`: the comparison with the ROM's recorded register state runs with the X.Org formula + the ROM-exact 640x480 values (`rm_dsp_apple = 0` for that comparison), then asserts the default plan carries Apple's values. Pass: 0 problems.
+- Build lesson: `rig/stubfb/Makefile` did not list `rage_modeset.h` (and the other headers) as dependencies of `RageStubFB.o`, so a header-only change was NOT rebuilt and the device kept the old formula; fixed. Check `chipinfo` readback after a header-only change.

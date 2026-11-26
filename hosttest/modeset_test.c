@@ -31,6 +31,7 @@ int main(void)
     pll[6] = hwpll[6] & ~(3u << 6); pll[0xa] = 0; pll[5] = 0x03; regs[RM_CRTC_GEN / 4] = hw[RM_CRTC_GEN / 4] & ~(7u << 8);
     regs[RM_CRTC_OFFPITCH / 4] = 0;
     cur.fb_off = 0; cur.gen_cntl = regs[RM_CRTC_GEN / 4]; cur.pll5 = pll[5]; cur.pll6 = pll[6]; cur.pllb = pll[0xb]; cur.pll4 = pll[4]; cur.mem_cntl = 0x10751a7b; cur.dsp_config = hw[RM_DSP_CONFIG / 4];
+    rm_dsp_apple = 0;      /* the comparison with the ROM's recorded state uses the X.Org-derived formula plus the ROM-exact 640x480 values; Apple's formula (the stub default) is checked below */
     if (rm_plan_mode(m, &cur, 8192, 4, &p)) { printf("plan refused\n"); return 1; }
     for (i = 0; i < p.n; i++) {
         if (p.op[i].kind == RM_WR32) regs[p.op[i].a / 4] = p.op[i].b; else if (p.op[i].kind == RM_PLL) pll[p.op[i].a] = p.op[i].b;
@@ -40,6 +41,12 @@ int main(void)
     for (i = 4; i <= 0xb; i++) if (pll[i] != hwpll[i]) { printf("DIFF pll %02x: plan %02x hw %02x\n", i, pll[i], hwpll[i]); bad++; }
     for (i = 5; i <= 6; i++) if (pll[i] != hwpll[i]) {}
     printf("%d differing registers (DSP_ON_OFF is the known, unexplained one)\n", bad);
+    rm_dsp_apple = 1;      /* the stub default from here on */
+    {   struct rm_plan pa; unsigned cfg = 0, onoff = 0; int k;
+        if (rm_plan_mode(m, &cur, 8192, 4, &pa)) { printf("FAIL: Apple plan refused\n"); bad++; }
+        else { for (k = 0; k < pa.n; k++) if (pa.op[k].kind == RM_WR32) { if (pa.op[k].a == RM_DSP_CONFIG) cfg = pa.op[k].b; if (pa.op[k].a == RM_DSP_ON_OFF) onoff = pa.op[k].b; }
+               if (cfg != 0x004a07f6 || onoff != 0x006c07b0) { printf("FAIL: default plan 640x480 16 bpp DSP 0x%08x/0x%08x, expected Apple's 0x004a07f6/0x006c07b0\n", cfg, onoff); bad++; }
+               else printf("default plan carries Apple's FIFO values (0x004a07f6 / 0x006c07b0)\n"); } }
     /* every offered mode (15 and 32 bpp): the plan is accepted, depth and pitch are in GEN_CNTL / OFF_PITCH, the FIFO scales with the depth */
     for (i = 0; i < (int)(sizeof kRageModes / sizeof kRageModes[0]); i++) {
         const struct rage_mode *q = &kRageModes[i]; struct rm_plan pl; int k; unsigned gen = 0, pitch = 0, xc = 0;

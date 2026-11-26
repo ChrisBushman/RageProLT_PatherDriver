@@ -27,7 +27,7 @@
       <key>IOMatchCategory</key>     <string>RageStubFB</string>
       <key>RageReplayInit</key>      <true/>
       <key>RageNdrvLayout</key>      <true/>
-      <key>RageHwCursor</key>        <false/>
+      <key>RageHwCursor</key>        <true/>
     </dict>
   </dict>
 </dict>

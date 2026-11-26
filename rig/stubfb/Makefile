@@ -10,7 +10,7 @@ EXEC := RageStubFB
 BUNDLE := $(EXEC).kext
 .PHONY: syntax kext clean
 syntax: ; $(CXX) -fsyntax-only $(KCXX) $(KDEF) $(KINC) RageStubFB.cpp && echo syntax OK
-RageStubFB.o: RageStubFB.cpp RageStubFB.h ; $(CXX) -c $(KCXX) $(KDEF) $(KINC) $< -o $@
+RageStubFB.o: RageStubFB.cpp RageStubFB.h rage_modeset.h rage_modemath.h rage_modes.h rage_init_table.h ; $(CXX) -c $(KCXX) $(KDEF) $(KINC) $< -o $@
 kmod_glue.o: kmod_glue.c ; $(CC) -c $(KCC) $(KDEF) $(KINC) $< -o $@
 $(EXEC): RageStubFB.o kmod_glue.o ; ld -static -r -o $@ RageStubFB.o kmod_glue.o -lkmodc++ -lcc_kext
 kext: $(EXEC)
