@@ -107,6 +107,7 @@ public:
     IOReturn     clearZ(uint32_t owner, uint32_t value);
     IOReturn     fillRect(uint32_t owner, int32_t x, int32_t y, int32_t w, int32_t h, uint32_t color565);
     IOReturn     present(uint32_t owner, uint32_t sx, uint32_t sy, uint32_t w, uint32_t h, uint32_t dx, uint32_t dy);
+    IOReturn     swapTarget(uint32_t owner, uint32_t dstOff);
     IOReturn     presentEx(uint32_t owner, uint32_t sx, uint32_t sy, uint32_t w, uint32_t h, uint32_t dx, uint32_t dy, uint32_t dw, uint32_t dh, uint32_t filter);
     void         quadConfig(uint32_t key, uint32_t value);
     IOReturn     vramCopyIn(uint32_t owner, uint32_t off, const uint8_t *src, uint32_t len, uint32_t flags);     /* src = kernel buffer */
@@ -117,7 +118,8 @@ public:
     IOReturn     ovlOff(uint32_t owner);
     IOReturn     ovlFlip(uint32_t owner, uint32_t off);
     IOReturn     ovlDisableLocked(void);                                                                          /* KEY_CNTL hidden, then SCALE_CNTL 0 (fLock held) */
-    uint32_t     fOvlOwner, fOvlPitch, fOvlH, fOvlBpp;                                                            /* owner of the enabled overlay (0 = none) and its source geometry */
+    bool         ovlActive(void) const { return fOvlOwner != 0; }
+    uint32_t     fOvlOwner, fOvlPitch, fOvlH, fOvlBpp, fOvlOff;                                                            /* owner of the enabled overlay (0 = none) and its source geometry */
     IOReturn     ovlB0(uint32_t *before, uint32_t *readback, uint32_t *after);                                     /* debug: overlay plan step B0 (the only write) */                                        /* debug, READ-ONLY fixed register list */
     IOReturn     displayInfo(struct rage_display *out, uint32_t *gen);
     uint32_t       modeGen(void) const { return fModeGen; }

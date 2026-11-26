@@ -39,7 +39,8 @@ enum {
     RAGE_GL_OVL_ON = 21,       /* RAGE_FEAT_OVERLAY: show a client-owned VRAM buffer through the hardware scaler: in 6 {source VRAM offset, source pitch in pixels, srcW | srcH << 16, dstX | dstY << 16, dstW | dstH << 16, source bytes per pixel (2 = the target format of the 15/16 bpp scanout, 4 = ARGB8888)}; the block must belong to the caller; source width <= 720; one overlay, one owner. Disabled again on OVL_OFF, client close, mode change (docs/re-notes/overlay-scaler-plan.md) */
     RAGE_GL_OVL_OFF = 22,      /* in 0: hide and disable the overlay (owner only) */
     RAGE_GL_OVL_FLIP = 23,     /* in 1 {offset}: point the scaler at another buffer of the same size (owner only); applied by the chip at its next fetch (tearing possible) */
-    RAGE_GL_SEL_COUNT = 24
+    RAGE_GL_SWAP_TARGET = 24,  /* in 1 {dstOffset}: copy the whole render target into another block of the caller's of the same size/pitch/format (2D engine blit) and make that block the render target; scissor, Z binding and every other state are kept (the overlay present: the target still holds the frame after the flip) */
+    RAGE_GL_SEL_COUNT = 25
 };
 #define RAGE_XFER_SWAP16 1u      /* VRAM_WRITE/READ flag: swap bytes inside every 16-bit unit */
 #define RAGE_XFER_SWAP32 2u      /* ... inside every 32-bit unit */
@@ -47,6 +48,7 @@ enum {
 /* RAGE_GL_INFO flags (4th output) */
 #define RAGE_INFO_ENGINE  1u     /* engine live */
 #define RAGE_INFO_DMA     2u     /* DMA submission active */
+#define RAGE_INFO_OVL     8u     /* the hardware overlay scaler is currently enabled for some client (read-only status, e.g. for tests) */
 #define RAGE_INFO_TGT555  4u     /* the scanout is ARGB1555 (Thousands of colours): colour targets are created as 1555, not 565 (read at SET_TARGET time; re-read after a mode change) */
 enum { RAGE_LOG_SEL_INFO = 0, RAGE_LOG_SEL_READ = 1, RAGE_LOG_SEL_MARK = 2, RAGE_LOG_SEL_COUNT = 3, RAGE_LOG_SEL_PANIC = 3 /* only with RAGE_DEBUG_PANIC */, RAGE_LOG_SEL_ENGTEST = 4 /* only with RAGE_DEBUG_ENGTEST */ };
 

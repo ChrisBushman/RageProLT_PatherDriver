@@ -120,6 +120,8 @@ int mach64_build_surface(gld_context *ctx)
         p->scr_w = dw; p->scr_h = dh;
         p->fs_scale = (!p->win_mode && dw && dh && (p->fb_w < dw || p->fb_h < dh)) ? 1u : 0u;      /* FS_SCALE: a smaller full-screen drawable is stretched to the scanout */
         if (p->fs_scale) want = 2u;                                                                    /* a 4 KB-pitch 32 bpp texture is ~30x slower to sample (387 ms vs 13 ms per 1024x768, measured): stretch from a 16 bpp target */
+        p->use_ovl = (p->fs_scale && rgb_overlay_wanted(&p->rb, p->fb_w)) ? 1u : 0u;                  /* overlay present: no engine time per frame; falls back to the quad if the kernel refuses */
+        p->rb.dbl = (int)p->use_ovl; p->rb.ovl_fail = 0;
         p->rb.pot_pitch = p->fs_scale ? 1u : 0u;                                                      /* the quad samples the target as a power-of-two texture */
         rc = rgb_surface(&p->rb, p->fb_w, p->fb_h, want, 1);
         if (rc && want == 4u) { p->rb.pot_pitch = 1; rc = rgb_surface(&p->rb, p->fb_w, p->fb_h, 2, 1); }   /* 16 bpp target on a 32 bpp scanout: presented through the 3D engine, so power-of-two pitch */
@@ -146,7 +148,8 @@ int mach64_mode_check(gld_context *ctx)
     if (g & 1u) return 0;
     if (g != p->mode_gen) {
         p->batch.n = 0;                         /* anything queued targeted the old surface */
-        p->rb.col_off = p->rb.z_off = 0;        /* the kernel dropped them with the old mode */
+        p->rb.col_off = p->rb.z_off = p->rb.col_alt = 0;      /* the kernel dropped them with the old mode (the overlay was disabled by its will-change hook) */
+        p->rb.ovl_on = 0;
         mach64_tex_invalidate_all();
         if (mach64_build_surface(ctx)) return 0;
     }
@@ -298,6 +301,7 @@ static int present_rects(mach64_priv *p)
             return 1;
         }
     }
+    if (p->fs_scale && !p->win_mode && p->use_ovl && !rgb_overlay_present(&p->rb, p->scr_w, p->scr_h)) return 1;   /* overlay: one engine blit (the copy into the other block) reprogrammed the engine for 2D */
     if (p->fs_scale && !p->win_mode) {                                  /* FS_SCALE: stretch the whole target over the scanout (bilinear); fall back to a 1:1 copy if the kernel refuses */
         if (!rgb_present_scaled(&p->rb, 0, 0, (int)p->fb_w, (int)p->fb_h, 0, 0, (int)p->scr_w, (int)p->scr_h, 1)) return 1;
     }

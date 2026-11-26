@@ -44,7 +44,9 @@ int rgb_surface(rgb_t *b, uint32_t w, uint32_t h, uint32_t bpp, int with_z)
     if (b->pot_pitch && pitch <= 1024u) { uint32_t pp = 8u; while (pp < pitch) pp <<= 1; pitch = pp; }   /* square power-of-two texture alias of the target (kernel textured-quad present) */
     bytes = pitch * h * bpp; zbytes = pitch * h * 2u;
     (void)rgb_gen(b);                                  /* refresh b->flags: the target format follows the scanout depth */
+    rgb_overlay_off(b);                                 /* the scaler must stop reading before its blocks are freed */
     if (b->col_off) { CALL(RAGE_GL_FREE, 1, 0, b->col_off); b->col_off = 0; }
+    if (b->col_alt) { CALL(RAGE_GL_FREE, 1, 0, b->col_alt); b->col_alt = 0; }
     if (b->z_off) { CALL(RAGE_GL_FREE, 1, 0, b->z_off); b->z_off = 0; }
     kr = CALL(RAGE_GL_ALLOC, 2, 1, (bytes + 4095u) & ~4095u, 4096u, &off);
     if (kr) return (int)kr;
@@ -56,6 +58,8 @@ int rgb_surface(rgb_t *b, uint32_t w, uint32_t h, uint32_t bpp, int with_z)
     if (!kr && with_z) kr = CALL(RAGE_GL_SET_Z, 2, 0, zoff, pitch);
     if (kr) { CALL(RAGE_GL_FREE, 1, 0, off); if (zoff) CALL(RAGE_GL_FREE, 1, 0, zoff); return (int)kr; }
     b->col_off = off; b->z_off = zoff; b->w = w; b->h = h; b->pitch = pitch; b->bpp = bpp;
+    b->col_alt = 0;
+    if (b->dbl) { uint32_t alt = 0; if (!CALL(RAGE_GL_ALLOC, 2, 1, (bytes + 4095u) & ~4095u, 4096u, &alt)) b->col_alt = alt; }   /* no room for a second block: single buffered, the quad present is used */
     b->fmt555 = (bpp == 2 && (b->flags & RAGE_INFO_TGT555)) ? 1 : 0;
     return 0;
 }
@@ -66,6 +70,8 @@ int rgb_display(rgb_t *b, uint32_t *w, uint32_t *h, uint32_t *bpp)
 { uint32_t g, ww, hh, pitch, bb, base; kern_return_t kr = CALL(RAGE_GL_DISPLAY, 0, 6, &g, &ww, &hh, &pitch, &bb, &base); if (kr) return (int)kr; if (w) *w = ww; if (h) *h = hh; if (bpp) *bpp = bb; return 0; }
 void rgb_release(rgb_t *b)
 {
+    rgb_overlay_off(b);
+    if (b->col_alt) { CALL(RAGE_GL_FREE, 1, 0, b->col_alt); b->col_alt = 0; }
     if (b->col_off) { CALL(RAGE_GL_FREE, 1, 0, b->col_off); b->col_off = 0; }
     if (b->z_off) { CALL(RAGE_GL_FREE, 1, 0, b->z_off); b->z_off = 0; }
 }
@@ -143,3 +149,37 @@ int rgb_upload(rgb_t *b, uint32_t off, const void *d, uint32_t len, int swap16) 
 int rgb_upload2(rgb_t *b, uint32_t off, const void *d, uint32_t len, uint32_t fl) { return (int)CALL(RAGE_GL_VRAM_WRITE, 4, 0, off, (uint32_t)(uintptr_t)d, len, fl); }
 int rgb_readback2(rgb_t *b, uint32_t off, void *d, uint32_t len, uint32_t fl) { return (int)CALL(RAGE_GL_VRAM_READ, 4, 0, off, (uint32_t)(uintptr_t)d, len, fl); }
 int rgb_readback(rgb_t *b, uint32_t off, void *d, uint32_t len) { return (int)CALL(RAGE_GL_VRAM_READ, 4, 0, off, (uint32_t)(uintptr_t)d, len, 0u); }
+
+/* ---- hardware overlay scaler present (design: docs/re-notes/overlay-scaler-plan.md) ----
+ * Double buffered: the engine draws into one block while the scaler shows the other; presenting = wait for the frame, point the scaler at it (OVL_ON the first time,
+ * OVL_FLIP afterwards), then make the other block the render target.  The first/next frame is drawn into the block the scaler is NOT reading.  The scaler filters RGB
+ * sources only by replication (measured), so this path is nearest-neighbour, unlike the bilinear quad; RAGE_GL_OVERLAY=0 selects the quad. */
+int rgb_overlay_wanted(const rgb_t *b, uint32_t src_w)
+{
+    static int env = -1;
+    if (env < 0) { const char *e = getenv("RAGE_GL_OVERLAY"); env = (e && e[0] == '0') ? 0 : 1; }
+    return env && (b->features & RAGE_FBIT_OVERLAY) && src_w <= 720u;
+}
+void rgb_overlay_off(rgb_t *b)
+{
+    if (b->ovl_on) { (void)IOConnectMethodScalarIScalarO(b->conn, RAGE_GL_OVL_OFF, 0, 0); b->ovl_on = 0; }
+}
+int rgb_overlay_present(rgb_t *b, uint32_t dw, uint32_t dh)
+{
+    kern_return_t kr; uint32_t cur = b->col_off, alt = b->col_alt;
+    if (!alt || b->ovl_fail) return -1;
+    (void)rgb_fence(b);                                                    /* the frame must be complete before the scaler shows it */
+    if (b->ovl_on) {
+        kr = CALL(RAGE_GL_OVL_FLIP, 1, 0, cur);
+        if (kr) b->ovl_on = 0;                                             /* disabled behind our back (mode change): enable it again below */
+    }
+    if (!b->ovl_on) {
+        kr = CALL(RAGE_GL_OVL_ON, 6, 0, cur, b->pitch, b->w | (b->h << 16), 0u, dw | (dh << 16), b->bpp);
+        if (kr) { b->ovl_fail = 1; return (int)kr; }                       /* refused (another client owns it, unsupported, ...): the quad takes over */
+        b->ovl_on = 1;
+    } else kr = 0;
+    kr = CALL(RAGE_GL_SWAP_TARGET, 1, 0, alt);                             /* the other block receives the frame and becomes the target: it still holds the frame after a present (like the quad present); scissor and Z stay bound */
+    if (kr) { rgb_overlay_off(b); b->ovl_fail = 1; return (int)kr; }       /* nothing was swapped: the old target is still bound */
+    b->col_off = alt; b->col_alt = cur;
+    return 0;
+}

@@ -114,6 +114,7 @@ typedef struct {
     uint32_t   z_clear_pending;
     uint32_t   scr_w, scr_h;       /* scanout size at surface build; fs_scale = full-screen drawable smaller than it -> presented stretched (bilinear quad) */
     uint32_t   fs_scale;
+    uint32_t   use_ovl;            /* fs_scale presented through the hardware overlay scaler (double buffered, nearest-neighbour) instead of the bilinear quad */
     uint32_t   mode_gen;           /* display generation the surface was built for */
     uint32_t   attached;           /* a surface exists */
     uint32_t   tex_off;            /* bound texture VRAM offset */

@@ -168,3 +168,17 @@ Conclusions (matches the middle prediction):
 2. **The VERTICAL filter is inherent to the YUV path** (vertical fade with no mode bit and no table), whereas RGB sources showed sharp vertical edges (replication). So YUV = vertically bilinear + programmable horizontal luma table; RGB = replicated (only lane 0 reaches the table).
 3. **Chroma is interpolated horizontally by fixed hardware** (the markers' colours blended in all runs, even with the identity table).
 Not yet known: whether a PHASE-VARYING table (the default COEFF0-4, which COEFF4 flat showed is NOT read by position with the mode bits off) gives true bilinear horizontal luma; what SCALE_HORZ_MODE does for YUV; whether SCALE_VERT_MODE changes vertical for RGB (V1).
+
+## 21. C2 result: the overlay is the default present (release kext, G4, Nov 26)
+
+Policy: a full-screen drawable smaller than the scanout (fs_scale) and at most 720 px wide is presented through the overlay scaler instead of the textured quad; `RAGE_GL_OVERLAY=0` restores the quad.  The bundle keeps two colour blocks: draw into the back one, fence, OVL_ON (first frame) / OVL_FLIP, then RAGE_GL_SWAP_TARGET (new: 2D blit of the shown frame into the other block, which becomes the target; scissor and Z binding are kept, SET_TARGET would reset them).  Any kernel refusal falls back to the quad permanently for that drawable.  The kernel disables the overlay on OVL_OFF, client close/death, mode change and when its source block is freed.
+
+Measured with `ovl_gate` (640x480 drawable, 1024x768 scanout, clear + triangle + present):
+
+| scanout | quad | overlay |
+|---|---|---|
+| 16 bpp | 15.39 ms/frame (13.00 ms present) | 5.63 ms (3.19 ms present, the copy) |
+| 32 bpp | 16.23 ms (13.83 ms) | 6.29 ms (3.84 ms) |
+
+A first version without the copy cost 0.01 ms per present but left the target undefined after a present and broke 94 gl_suite tests (and lost the Z binding via SET_TARGET); the copy trades 3 ms for the old semantics.  Gates on the release kext: gl_suite 291/291 with the overlay and with RAGE_GL_OVERLAY=0, ovl_gate 16/16 (overlay) and 8/8 (quad) at 16 and 32 bpp scanouts; kill -9 of a client with the overlay on returns the kernel to idle; a mode change while enabled disables it.
+Trade-offs: nearest-neighbour scaling (the quad was bilinear); the software pointer is hidden under the overlay.

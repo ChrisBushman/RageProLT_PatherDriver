@@ -47,6 +47,7 @@ bool RageLTGLClient::start(IOService *provider)
     M(RAGE_GL_SET_TEXTURE, selSetTexture, kIOUCScalarIScalarO, 3, 0);
     M(RAGE_GL_CLEAR_Z,     selClearZ,     kIOUCScalarIScalarO, 1, 0);
     M(RAGE_GL_CONFIG,      selConfig,     kIOUCScalarIScalarO, 2, 0);
+    M(RAGE_GL_SWAP_TARGET, selSwapTarget,     kIOUCScalarIScalarO, 1, 0);
     M(RAGE_GL_PRESENT_SCALED, selPresentScaled, kIOUCScalarIScalarO, 5, 0);
     M(RAGE_GL_SCANOUT_READ, selScanoutRead, kIOUCScalarIScalarO, 3, 0);
     M(RAGE_GL_REG_DUMP,    selRegDump,    kIOUCScalarIScalarO, 2, 0);
@@ -102,7 +103,7 @@ IOReturn RageLTGLClient::userOut(uint32_t addr, const uint8_t *src, uint32_t len
 IOReturn RageLTGLClient::selInfo(uint32_t *gen, uint32_t *features, uint32_t *usableEnd, uint32_t *flags)
 {
     if (!fDev) return kIOReturnNotAttached;
-    *gen = fDev->modeGen(); *features = RAGE_FEATURE_BITS; *usableEnd = RAGE_VRAM_USABLE_END; *flags = (fDev->engineLive() ? RAGE_INFO_ENGINE : 0u) | (fDev->dmaActive() ? RAGE_INFO_DMA : 0u) | (fDev->scanout555() ? RAGE_INFO_TGT555 : 0u);
+    *gen = fDev->modeGen(); *features = RAGE_FEATURE_BITS; *usableEnd = RAGE_VRAM_USABLE_END; *flags = (fDev->engineLive() ? RAGE_INFO_ENGINE : 0u) | (fDev->dmaActive() ? RAGE_INFO_DMA : 0u) | (fDev->scanout555() ? RAGE_INFO_TGT555 : 0u) | (fDev->ovlActive() ? RAGE_INFO_OVL : 0u);
     return kIOReturnSuccess;
 }
 IOReturn RageLTGLClient::selAlloc(uint32_t length, uint32_t align, uint32_t *offset)
@@ -212,6 +213,8 @@ IOReturn RageLTGLClient::selVramRead(uint32_t off, uint32_t addr, uint32_t len, 
 
 IOReturn RageLTGLClient::selSetTexture(uint32_t index, uint32_t off, uint32_t fmt)
 { return fDev ? fDev->setTexture(fOwner, index, off, fmt) : kIOReturnNotAttached; }
+
+IOReturn RageLTGLClient::selSwapTarget(uint32_t dstOff) { return fDev ? fDev->swapTarget(fOwner, dstOff) : kIOReturnNotAttached; }
 
 IOReturn RageLTGLClient::selPresentScaled(uint32_t s, uint32_t sz, uint32_t d, uint32_t dsz, uint32_t filter)
 { return fDev ? fDev->presentEx(fOwner, s & 0xffffu, s >> 16, sz & 0xffffu, sz >> 16, d & 0xffffu, d >> 16, dsz & 0xffffu, dsz >> 16, filter) : kIOReturnNotAttached; }

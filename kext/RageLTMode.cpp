@@ -173,6 +173,30 @@ IOReturn RageLTDevice::presentEx(uint32_t owner, uint32_t sx, uint32_t sy, uint3
     return rc;
 }
 
+/* Copy the whole render target into another block of the same owner (same pitch, size and format as the target) and make that block the render target: one 2D-engine blit
+ * between two VRAM surfaces, the same hardware pattern as the 1:1 present.  Used by the overlay present: after the scaler is pointed at the finished frame the other block
+ * receives a copy and becomes the target, so the target still holds the frame after a present, exactly like the quad present (apps and tests may read it back or draw on top
+ * of it).  Scissor, Z binding and all other context state are untouched (SET_TARGET would reset them). */
+IOReturn RageLTDevice::swapTarget(uint32_t owner, uint32_t dstOff)
+{
+    struct rage_ctx c; IOReturn rc; uint32_t pixw, bytes;
+    if (!fEngineLive || (fModeGen & 1u)) return kIOReturnNotReady;
+    IOLockLock(fLock);
+    { struct rage_ctx *p = ctxFor(owner, false); if (!p || !p->tgt_bpp) { IOLockUnlock(fLock); return kIOReturnNotReady; } c = *p; }
+    bytes = c.tgt_bpp == 4 ? 4u : 2u;
+    if ((dstOff & 7u) || dstOff == c.tgt_off || !c.tgt_w || !c.tgt_h || (c.tgt_bpp != 2 && c.tgt_bpp != 4) ||
+        !rage_vram_owns(&fVram, dstOff, (uint64_t)c.tgt_pitch * bytes * c.tgt_h, owner)) { IOLockUnlock(fLock); return kIOReturnBadArgument; }
+    pixw = c.tgt_bpp == 4 ? RAGE_PIXW_8888 : c.tgt_555 ? RAGE_PIXW_555 : RAGE_PIXW_565;
+    if (idleWait()) { IOLockUnlock(fLock); return kIOReturnTimeout; }
+    rc = (IOReturn)eng_blit(fRegs, pixw, c.tgt_off, c.tgt_pitch, dstOff, c.tgt_pitch, 0, 0, 0, 0, c.tgt_w, c.tgt_h, ((c.tgt_w - 1u) << 16), ((c.tgt_h - 1u) << 16));
+    if (rc) { IOLockUnlock(fLock); return kIOReturnTimeout; }
+    { struct rage_ctx *p = ctxFor(owner, false); if (p) p->tgt_off = dstOff; }        /* the other block is the target from now on (the copy above is in flight; later submits are ordered after it) */
+    (void)++fFenceSubmitted;
+    rc = RAGE_OP_DONE(fFenceSubmitted);
+    IOLockUnlock(fLock);
+    return rc;
+}
+
 IOReturn RageLTDevice::present(uint32_t owner, uint32_t sx, uint32_t sy, uint32_t w, uint32_t h, uint32_t dx, uint32_t dy)
 { return presentEx(owner, sx, sy, w, h, dx, dy, w, h, 0); }
 
@@ -301,7 +325,7 @@ IOReturn RageLTDevice::ovlOn(uint32_t owner, uint32_t off, uint32_t pitch_px, ui
             ovlw(fRegs, 0x154, cf0); ovlw(fRegs, 0x158, cf1); ovlw(fRegs, 0x15c, cf2); ovlw(fRegs, 0x160, cf3); ovlw(fRegs, 0x164, cf4);   /* SCALER_H_COEFF0-4 */
             ovlw(fRegs, 0x018, 0x011u);                                          /* OVERLAY_KEY_CNTL: VIDEO_FN true | GRAPHICS_FN true, OR: always show video */
             ovlw(fRegs, 0x024, scaleCntl);                                      /* OVERLAY_SCALE_CNTL: SCALE_EN | OVERLAY_EN (+ the debug mode bits), last */
-            fOvlOwner = owner; fOvlPitch = pitch_px; fOvlH = sh; fOvlBpp = bytes; rc = kIOReturnSuccess;
+            fOvlOwner = owner; fOvlPitch = pitch_px; fOvlH = sh; fOvlBpp = bytes; fOvlOff = off; rc = kIOReturnSuccess;
         }
     }
     IOLockUnlock(fLock);
@@ -315,7 +339,7 @@ IOReturn RageLTDevice::ovlFlip(uint32_t owner, uint32_t off)
     IOLockLock(fLock);
     if (fOvlOwner && fOvlOwner == owner) {
         if (!rage_vram_owns(&fVram, off, (uint64_t)fOvlPitch * fOvlBpp * fOvlH, owner)) rc = kIOReturnBadArgument;
-        else { ovlw(fRegs, 0x034, off); ovlw(fRegs, 0x038, off); rc = kIOReturnSuccess; }          /* SCALER_BUF0/BUF1_OFFSET */
+        else { ovlw(fRegs, 0x034, off); ovlw(fRegs, 0x038, off); fOvlOff = off; rc = kIOReturnSuccess; }          /* SCALER_BUF0/BUF1_OFFSET */
     }
     IOLockUnlock(fLock);
     return rc;

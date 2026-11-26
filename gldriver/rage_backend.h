@@ -22,6 +22,10 @@ typedef struct {
     int      pot_pitch;           /* set before rgb_surface: allocate the target with a power-of-two pitch (needed to present it through the 3D engine: conversion / scaling) */
     int      fmt555;              /* colour target is ARGB1555 (the scanout is 15 bit), else RGB565; set by rgb_surface from the kernel */
     int      last_err;            /* last non-zero return of a submit (diagnostic) */
+    int      dbl;                 /* set before rgb_surface: also allocate a second colour block (hardware-overlay double buffering) */
+    uint32_t col_alt;             /* the other colour block (the one NOT currently the render target); 0 = single buffered */
+    int      ovl_on;              /* the kernel overlay is enabled and shows one of the two blocks */
+    int      ovl_fail;            /* the kernel refused the overlay (busy, unsupported ...): stay on the quad present */
 } rgb_t;
 
 int  rgb_open(rgb_t *b);                                           /* 0 or an IOKit error */
@@ -39,6 +43,9 @@ void rgb_release(rgb_t *b);                                         /* free the 
 int  rgb_clear_z(rgb_t *b, uint32_t value);                        /* fill the bound Z buffer */
 int  rgb_fence(rgb_t *b);                                          /* wait for everything submitted */
 int  rgb_present(rgb_t *b, int sx, int sy, int w, int h, int dx, int dy);
+int  rgb_overlay_wanted(const rgb_t *b, uint32_t src_w);                   /* 1 = use the hardware overlay scaler for a smaller full-screen drawable (kernel feature, width <= 720, not disabled by RAGE_GL_OVERLAY=0) */
+int  rgb_overlay_present(rgb_t *b, uint32_t dw, uint32_t dh);              /* show the finished target through the overlay and make the other block the target; 0 = done, else fall back to the quad */
+void rgb_overlay_off(rgb_t *b);                                            /* hide and disable the overlay (before blocks are freed or the surface rebuilt) */
 int  rgb_tex_alloc(rgb_t *b, uint32_t bytes, uint32_t *off);
 int  rgb_tex_free(rgb_t *b, uint32_t off);
 int  rgb_upload(rgb_t *b, uint32_t off, const void *data, uint32_t len, int swap16);   /* copies through the kernel (validated span, drains the engine first) */

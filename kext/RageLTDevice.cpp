@@ -48,7 +48,7 @@ bool RageLTDevice::start(IOService *provider)
     fDispReserved = false;
     { uint32_t k; for (k = 0; k < RAGE_MAX_CTX; k++) fCtx[k].owner = 0; }
     fFenceSubmitted = fFenceCompleted = 0;
-    fQuadU = fQuadV = fQuadX = 0; fQuadBlend = false; fQuadTcXor = fQuadScXor = 0; fOvlOwner = fOvlPitch = fOvlH = fOvlBpp = 0;
+    fQuadU = fQuadV = fQuadX = 0; fQuadBlend = false; fQuadTcXor = fQuadScXor = 0; fOvlOwner = fOvlPitch = fOvlH = fOvlBpp = fOvlOff = 0;
     fDmaCmd = fDmaCmd2 = fDmaRing = 0; fDmaCur = 0; fDmaOk = fDmaUse = fDmaPending = false;
     (void)dmaInit();
     modeStart();
@@ -121,6 +121,7 @@ IOReturn RageLTDevice::vramFree(uint32_t owner, uint32_t offset)
     int rc;
     IOLockLock(fLock);
     if (fEngineLive && fDmaPending) (void)dmaWait();
+    if (fOvlOwner && fOvlOwner == owner && fOvlOff == offset) { (void)ovlDisableLocked(); fOvlOwner = 0; }   /* the scaler must stop reading a block before it is freed */
     rc = rage_vram_free(&fVram, offset, owner);
     IOLockUnlock(fLock);
     logEvent(RAGE_EV_VRAM_FREE, owner, offset, rc ? 1u : 0u, 0, 0, 0);
