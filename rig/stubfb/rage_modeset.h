@@ -36,6 +36,8 @@ static int rm_plan_mode(const struct rage_mode *m, const struct rm_cur *cur, uns
     in.vclk_fb = (int)pll.fb; in.vclk_post = (int)pll.post; in.bpp = m->bpp == 24 ? 32 : 16; in.fifo_depth = 32;
     rage_dsp_mem(cur->mem_cntl, memtype, mem_kb, cur->dsp_config, &in);
     rage_dsp_calc(&in, &dsp_cfg, &dsp_onoff);
+    /* 640x480 15 bpp 25.175 MHz is the one mode with a hardware-verified FIFO setting (the ROM's own): use it exactly; the formula's DSP_ON differs (unexplained) */
+    if (m->pclk_khz == 25175 && m->w == 640 && m->pixwidth == 3) { dsp_cfg = 0x004807f7; dsp_onoff = 0x009c07b0; }
 
     post6 = (cur->pll6 & ~(3u << (RM_VCLK * 2))) | ((pll.post_code & 3u) << (RM_VCLK * 2));
     xb = cur->pllb & ~(0x10u << RM_VCLK); if (pll.post_code & 4) xb |= 0x10u << RM_VCLK;

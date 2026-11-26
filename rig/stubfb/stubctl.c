@@ -13,6 +13,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <stdint.h>
+#include <stdlib.h>
 
 static int reserve_offset0(void)
 {
@@ -35,9 +36,9 @@ static int reserve_offset0(void)
 
 int main(int argc, char **argv){
   io_service_t s = IOServiceGetMatchingService(kIOMasterPortDefault, IOServiceMatching("RageStubFB"));
-  int probe = (argc>1 && !strcmp(argv[1],"probe")), edid = (argc>1 && !strcmp(argv[1],"edid")), guard = !probe && !edid && !(argc>2 && !strcmp(argv[2],"noguard")), r;
-  const char *k = probe ? "rage-probe" : edid ? "rage-edid" : "rage-notify";
-  CFStringRef key = CFStringCreateWithCString(NULL,k,kCFStringEncodingASCII); int one=1; CFNumberRef v = CFNumberCreate(NULL,kCFNumberIntType,&one);
+  int probe = (argc>1 && !strcmp(argv[1],"probe")), edid = (argc>1 && !strcmp(argv[1],"edid")), setmode = (argc>2 && !strcmp(argv[1],"setmode")), guard = !probe && !edid && !setmode && !(argc>2 && !strcmp(argv[2],"noguard")), r;
+  const char *k = setmode ? "rage-setmode" : probe ? "rage-probe" : edid ? "rage-edid" : "rage-notify";
+  CFStringRef key = CFStringCreateWithCString(NULL,k,kCFStringEncodingASCII); int one = setmode ? atoi(argv[2]) : 1;   /* setmode N: N = mode index (0 = 640x480, 1 = 800x600, 2 = 1024x768, 3 = 1280x1024); then the stub re-sends the mode-change notifications */ CFNumberRef v = CFNumberCreate(NULL,kCFNumberIntType,&one);
   CFDictionaryRef d = CFDictionaryCreate(NULL,(const void**)&key,(const void**)&v,1,&kCFTypeDictionaryKeyCallBacks,&kCFTypeDictionaryValueCallBacks);
   if(!s){printf("no stub\n");return 1;}
   r = (int)IORegistryEntrySetCFProperties(s,d);

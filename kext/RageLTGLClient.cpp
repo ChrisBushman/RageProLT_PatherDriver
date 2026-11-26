@@ -124,7 +124,7 @@ IOReturn RageLTGLClient::selSubmit(uint32_t addr, uint32_t npairs)
     bytes = npairs * 8u;
     buf = (uint32_t *)IOMalloc(bytes);
     if (!buf) return kIOReturnNoMemory;
-    { uint32_t t0 = tbl32(); rc = userIn(addr, (uint8_t *)buf, bytes); pf_user += tbl32() - t0; }
+    { uint32_t t0 = tbl32(); rc = userIn(addr, (uint8_t *)buf, bytes); pf_user += (tbl32() - t0) >> 2; }
     if (rc == kIOReturnSuccess) rc = fDev->submitBatch(fOwner, buf, npairs);
     IOFree(buf, bytes);
     return rc;
@@ -137,7 +137,7 @@ IOReturn RageLTGLClient::selSubmitEx(uint32_t addr, uint32_t npairs, uint32_t te
     if (ntex > 12u || npairs > RAGE_BATCH_MAX_PAIRS) return kIOReturnBadArgument;
     if (ntex) { rc = userIn(texAddr, (uint8_t *)tex, ntex * 8u); if (rc != kIOReturnSuccess) return rc; }
     (void)fDev->setTextures(fOwner, tex, ntex, tfmt, tfmt2);                                       /* same checks as SET_TEXTURE, one lock; a refused offset stays unbound */
-    pf_tex += tbl32() - t_t;
+    pf_tex += (tbl32() - t_t) >> 2;
     return npairs ? selSubmit(addr, npairs) : kIOReturnSuccess;
 }
 

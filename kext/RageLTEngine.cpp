@@ -201,6 +201,7 @@ IOReturn RageLTDevice::waitFence(uint32_t seq)
     if ((int32_t)(fFenceCompleted - seq) >= 0) return kIOReturnSuccess;
     if (fDmaPending && dmaWait()) return kIOReturnTimeout;
     if (idleWait()) {
+        pf_err++;
         logEvent(RAGE_EV_ERROR, 0, 0xe0060000u, seq, eng_rd(fRegs, MACH64_FIFO_STAT), eng_rd(fRegs, MACH64_GUI_STAT), 0);
         eng_reset(fRegs, 1);
         fFenceCompleted = fFenceSubmitted;                     /* the stuck work is abandoned */
@@ -213,7 +214,7 @@ IOReturn RageLTDevice::waitFence(uint32_t seq)
 IOReturn RageLTDevice::submitBatch(uint32_t owner, const uint32_t *pairs, uint32_t npairs)
 {
     uint32_t i, seq; IOReturn rc; struct rage_ctx c;
-    uint32_t t_v = tbl32(), t_v2; int ok_ = rage_batch_ok(pairs, npairs); t_v2 = tbl32(); pf_valid += t_v2 - t_v;
+    uint32_t t_v = tbl32(), t_v2; int ok_ = rage_batch_ok(pairs, npairs); t_v2 = tbl32(); pf_valid += (t_v2 - t_v) >> 2;
     if (!ok_) {                                               /* whole batch dropped */
         fRefused++;
         logEvent(RAGE_EV_BATCH_REFUSED, owner, npairs, pairs ? pairs[0] : 0, pairs ? pairs[1] : 0, fRefused, 0);

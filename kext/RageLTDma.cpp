@@ -75,8 +75,9 @@ void RageLTDevice::dmaFree(void)
 
 /* PROFILE (always compiled, a few mftb reads per submit): ticks spent building the stream, waiting for the previous stream, waiting for engine idle before the kick, and in idleWait() from
  * every other path (clear/fill/present/readback...: dma part and engine-idle part).  Logged as marks 0xd0060000 / 0xd0061000 every 256 submits (raw mftb ticks). */
-uint32_t pf_user, pf_valid, pf_tex;                       /* GL client: userIn of the pairs, rage_batch_ok, tex-record handling (ticks) */
-static uint32_t pf_starved, pf_have, pf_build, pf_prev, pf_idle, pf_oth_dma, pf_oth_idle, pf_n, pf_oth_n;
+uint32_t pf_user, pf_valid, pf_tex, pf_err;   /* pf_err: cumulative engine timeouts/resets (dmaWait, idle before kick, waitFence) */
+uint32_t pf_dummy_;                       /* GL client: userIn of the pairs, rage_batch_ok, tex-record handling (ticks) */
+static uint32_t pf_starved, pf_have, pf_build, pf_prev, pf_idle, pf_oth_dma, pf_oth_idle, pf_n, pf_oth_n, pf_total;   /* cumulative since load, in units of 4 mftb ticks (96 ns): the event log drops records, so the last surviving mark holds the totals */
 
 /* Waits (bounded) for the pending stream.  Caller holds fLock.  On timeout the engine is reset and the work abandoned. */
 IOReturn RageLTDevice::dmaWait(void)
@@ -90,6 +91,7 @@ IOReturn RageLTDevice::dmaWait(void)
     }
     fDmaPending = false;
     if (idle < 8) {
+        pf_err++;
         logEvent(RAGE_EV_ERROR, 0, 0xd0020000u, eng_rd(fRegs, MACH64_BM_GUI_TABLE), eng_rd(fRegs, MACH64_GUI_STAT), eng_rd(fRegs, MACH64_FIFO_STAT), fDmaNDesc);
         logEvent(RAGE_EV_ERROR, 0, 0xd0021000u, eng_rd(fRegs, MACH64_BUS_CNTL), eng_rd(fRegs, MACH64_SRC_CNTL), eng_rd(fRegs, MACH64_BM_GUI_TABLE_CMD), fPCI->configRead32(kIOPCIConfigCommand));
         logEvent(RAGE_EV_ERROR, 0, 0xd0022000u, OSReadLittleInt32((void *)fDmaRingKva, 0), OSReadLittleInt32((void *)fDmaRingKva, 4), OSReadLittleInt32((void *)fDmaRingKva, 8), OSReadLittleInt32((void *)fDmaCmdKva, 0));
@@ -144,9 +146,9 @@ IOReturn RageLTDevice::dmaSubmit(const struct rage_ctx *c, const uint32_t *pairs
     rc = dmaWait();                                                    /* the stream on the other buffer (if any) must be finished before the engine is reprogrammed */
     if (rc) return rc;
     t_c = tbl32();
-    if (eng_wait_idle(fRegs)) return kIOReturnTimeout;
-    pf_build += (t_b - t_a); pf_prev += (t_c - t_b); pf_idle += (tbl32() - t_c);
-    if (++pf_n >= 256u) { logEvent(RAGE_EV_MARK, 0, 0xd0060000u, pf_build, pf_prev, pf_idle, pf_n); logEvent(RAGE_EV_MARK, 0, 0xd0061000u, pf_oth_dma, pf_oth_idle, pf_oth_n, 0); logEvent(RAGE_EV_MARK, 0, 0xd0062000u, pf_user, pf_valid, pf_tex, 0); logEvent(RAGE_EV_MARK, 0, 0xd0063000u, pf_starved, pf_have, 0, 0); pf_starved = pf_have = pf_user = pf_valid = pf_tex = 0; pf_build = pf_prev = pf_idle = pf_oth_dma = pf_oth_idle = pf_oth_n = pf_n = 0; }
+    if (eng_wait_idle(fRegs)) { pf_err++; return kIOReturnTimeout; }
+    pf_build += (t_b - t_a) >> 2; pf_prev += (t_c - t_b) >> 2; pf_idle += (tbl32() - t_c) >> 2; pf_total++;
+    if (++pf_n >= 256u) { logEvent(RAGE_EV_MARK, 0, 0xd0060000u, pf_build, pf_prev, pf_idle, pf_total); logEvent(RAGE_EV_MARK, 0, 0xd0061000u, pf_oth_dma, pf_oth_idle, pf_oth_n, 0); logEvent(RAGE_EV_MARK, 0, 0xd0062000u, pf_user, pf_valid, pf_tex, 0); { uint32_t vi, used = 0; for (vi = 0; vi < fVram.n; vi++) used += fVram.e[vi].len; logEvent(RAGE_EV_MARK, 0, 0xd0063000u, pf_starved, pf_have, pf_err, used); }  pf_n = 0; }
     fDmaNDesc = nd; fDmaEnd = ringBus + 16u * nd;
     fDmaSaveBus = eng_rd(fRegs, MACH64_BUS_CNTL);
     eng_wr(fRegs, MACH64_BUS_CNTL, (fDmaSaveBus & ~MACH64_BUS_MASTER_DIS) | MACH64_BUS_EXT_REG_EN);
@@ -207,10 +209,10 @@ IOReturn RageLTDevice::dmaSubmit(const struct rage_ctx *, const uint32_t *, uint
 IOReturn RageLTDevice::idleWait(void)
 {
     uint32_t t0 = tbl32(), t1; IOReturn rc = dmaWait();
-    t1 = tbl32(); pf_oth_dma += (t1 - t0); pf_oth_n++;
+    t1 = tbl32(); pf_oth_dma += (t1 - t0) >> 2; pf_oth_n++;
     if (rc) return rc;
     rc = eng_wait_idle(fRegs) ? kIOReturnTimeout : kIOReturnSuccess;
-    pf_oth_idle += (tbl32() - t1);
+    pf_oth_idle += (tbl32() - t1) >> 2;
     return rc;
 }
 

@@ -28,7 +28,7 @@ static inline int eng_is_idle(volatile uint8_t *regs)
  * touch the VRAM aperture while the engine is starting or running (found Nov 24: a premature idle let the CPU read VRAM mid-fill and wedged the
  * engine).  So: ride out the lag with dummy reads, then require 8 consecutive idle observations.  Bounded: returns -1 if it never settles. */
 static inline uint32_t tbl32(void) { uint32_t t; __asm__ volatile("mftb %0" : "=r"(t)); return t; }   /* PROFILE: raw timebase ticks (41.66 MHz on the MDD) */
-extern uint32_t pf_user, pf_valid, pf_tex;
+extern uint32_t pf_user, pf_valid, pf_tex, pf_err;
 
 static inline int eng_wait_idle(volatile uint8_t *regs)
 {

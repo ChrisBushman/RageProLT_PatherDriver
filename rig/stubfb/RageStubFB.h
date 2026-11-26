@@ -20,6 +20,11 @@ class RageStubFB : public IOFramebuffer
     volatile UInt8 *fRegs;
     bool mapRegisters(void);
     bool replayInit(void);
+    const struct rage_mode *fModes[8]; int fNModes, fMode;   /* modes offered (15 bpp, 60 Hz rows of rage_modes.h); fMode = the one the chip is running */
+    void pickModes(void);
+    bool applyMode(int idx);
+    UInt32 pllRead(UInt32 reg);
+    void pllWrite(UInt32 reg, UInt32 val);
     void clearScanout(void);
     IODeviceMemory *viewRange(UInt32 length);
     UInt32 rd(UInt32 reg);
