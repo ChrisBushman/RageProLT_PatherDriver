@@ -10,6 +10,7 @@ int main(int argc, char **argv)
 {
     static const uint32_t bar[8] = { 0xffff, 0xffe0, 0x07ff, 0x07e0, 0xf81f, 0xf800, 0x001f, 0x0000 };   /* RGB565: white yellow cyan green magenta red blue black */
     uint32_t gen, dw, dh, pitch, bpp, base, o, i, hold = argc > 1 ? (uint32_t)atoi(argv[1]) : 25; kern_return_t kr;
+    setvbuf(stdout, NULL, _IONBF, 0);
     if (ragegl_open(&c)) { printf("cannot open the GL client\n"); return 99; }
     ragegl_display(c, &gen, &dw, &dh, &pitch, &bpp, &base);
     printf("display %ux%u, %u bytes/pixel\n", dw, dh, bpp);

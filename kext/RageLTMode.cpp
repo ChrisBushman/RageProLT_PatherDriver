@@ -282,7 +282,8 @@ IOReturn RageLTDevice::ovlOn(uint32_t owner, uint32_t off, uint32_t pitch_px, ui
     if (!owner || !sw || !sh || !dw || !dh || sw > 720u || (pitch_px & 3u) || pitch_px < sw || (off & 7u)) return kIOReturnBadArgument;   /* quadword-aligned offset and pitch, width limit of this family */
     IOLockLock(fLock);
     if (fOvlOwner) rc = kIOReturnBusy;
-    else if (OSReadLittleInt32((volatile void *)fRegs, 0x024) != 0 || OSReadLittleInt32((volatile void *)fRegs, 0x018) != 0) rc = kIOReturnNotPermitted;   /* the overlay must be idle */
+    else if (OSReadLittleInt32((volatile void *)fRegs, 0x024) != 0 ||
+             (OSReadLittleInt32((volatile void *)fRegs, 0x018) != 0 && OSReadLittleInt32((volatile void *)fRegs, 0x018) != 0x110u)) rc = kIOReturnNotPermitted;   /* the overlay must be idle: scaler off, key control power-on (0) or our hidden state (0x110) */
     else if (!fDispReserved || dx + dw > fDisp.w || dy + dh > fDisp.h) rc = kIOReturnBadArgument;
     else if (!rage_vram_owns(&fVram, off, (uint64_t)pitch_px * 2u * sh, owner)) rc = kIOReturnNotPermitted;                                    /* the source block belongs to this client */
     else {
