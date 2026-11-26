@@ -1,6 +1,6 @@
 /* tools/ragegl/ovl_probe.c - overlay decoding probe with YES/NO questions.  32x24 source stretched to 1024x768 (every source pixel = a 32x32 block) on a neutral grey (64,64,64) background.
  * usage: ovl_probe [src_bpp 2|4 (default 2)] [flags (debug kext): 1 HORZ_MODE, 2 VERT_MODE, 4 identity table, 8 flat 50/50 table, 12 = identity + flat in COEFF4 only] [hold s; 0 = until SIGTERM (default 0)]
- * Five bands (screen rows, top to bottom); each is THREE contiguous cells at source columns 4,5,6 (screen x 128-223):
+ * Five bands (screen rows, top to bottom); each is THREE contiguous cells at source columns 4,5,6 (screen x 128-223), marked by a bright RED cell two columns to the left (col 2) and a bright GREEN cell two columns to the right (col 8) with one grey gap cell on each side, so the test cells are exactly the three cells between the red and green markers even when the filter shifts or widens things:
  *   band 1: red, red, black     band 2: green, green, black     band 3: blue, blue, black     band 4: white, white, black     band 5: black, white, white
  * Question per band 1-4: is the SECOND cell the same colour as the FIRST?   Band 5: is the first (black) cell pure black everywhere, or does it have a coloured band (where)?
  * Needs a 1024x768 scanout.  Writes: the step B overlay list.  Always disables the overlay on exit. */
@@ -25,7 +25,7 @@ int main(int argc, char **argv)
     if (ragegl_alloc(c, pitch_px * bpp * 24u, 4096, &o) || ragegl_target(c, o, pitch_px, bpp, 32, 24)) { printf("alloc/target failed\n"); return 1; }
     ragegl_scissor(c, 0, 31, 0, 23);
     ragegl_fill(c, 0, 0, 32, 24, col(64,64,64));
-    { uint32_t row[5][3] = { {R,R,K}, {G,G,K}, {B,B,K}, {W,W,K}, {K,W,W} }; for (band = 0; band < 5; band++) for (i = 0; i < 3; i++) ragegl_fill(c, 4 + i, 1 + band * 4, 1, 3, row[band][i]); }
+    { uint32_t row[5][3] = { {R,R,K}, {G,G,K}, {B,B,K}, {W,W,K}, {K,W,W} }; for (band = 0; band < 5; band++) for (i = 0; i < 3; i++) ragegl_fill(c, 4 + i, 1 + band * 4, 1, 3, row[band][i]); ragegl_fill(c, 2, 1 + band * 4, 1, 3, R); ragegl_fill(c, 8, 1 + band * 4, 1, 3, G); }
     { uint32_t d; ragegl_fence(c, 1, &d); }
     signal(SIGINT, off); signal(SIGTERM, off);
     kr = ragegl_overlay_on(c, o, pitch_px, 32u, 24u, 0u, 0u, 1024u, 768u, bpp | (flags << 8));
