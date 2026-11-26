@@ -96,9 +96,9 @@ void RageStubFB::fillLowBlock(void)
     if (sub) sub->release();
     if (!m) { IOLog("RageStubFB: fillLowBlock: cannot map\n"); return; }
     volatile UInt8 *p = (volatile UInt8 *)m->getVirtualAddress();
-    for (UInt32 i = 0; i < fFbOff; i++) p[i] = lowPattern(i);
+    for (UInt32 i = 0; i < fFbOff; i++) if (!(fCurOk && i >= 0x40 && i < 0x440)) p[i] = lowPattern(i);   /* a loaded hardware cursor image stays */
     eieio(); m->release();
-    wr(0x68, 0x40u >> 3);       /* CUR_OFFSET: the cursor image at 0x40, in qwords (hardware cursor stays disabled) */
+    if (!fCurVis) wr(0x68, 0x40u >> 3);       /* CUR_OFFSET: the cursor image at 0x40, in qwords (hardware cursor stays disabled) */
     IOLog("RageStubFB: low block [0,0x%x) filled (cursor image area 0x40..0x440)\n", (unsigned)fFbOff);
 }
 
@@ -116,7 +116,7 @@ UInt32 RageStubFB::checkLowBlock(void)
     if (!m) return 0xffffffffu;
     volatile UInt8 *p = (volatile UInt8 *)m->getVirtualAddress();
     UInt32 bad = 0, first = 0xffffffffu;
-    for (UInt32 i = 0; i < fFbOff; i++) if (p[i] != lowPattern(i)) { if (first == 0xffffffffu) first = i; bad++; }
+    for (UInt32 i = 0; i < fFbOff; i++) if (!(fCurOk && i >= 0x40 && i < 0x440) && p[i] != lowPattern(i)) { if (first == 0xffffffffu) first = i; bad++; }
     m->release();
     IOLog("RageStubFB: low block check: %u of %u bytes changed%s\n", (unsigned)bad, (unsigned)fFbOff, bad ? " (first at offset shown in RageCursorCheckFirst)" : "");
     OSNumber *n = OSNumber::withNumber(bad, 32); if (n) { setProperty("RageCursorCheck", n); n->release(); }
@@ -180,7 +180,9 @@ bool RageStubFB::start(IOService *provider)
 {
     fPCI = OSDynamicCast(IOPCIDevice, provider);
     if (!fPCI) return false;
-    fRegMap = 0; fRegs = 0; fFbOff = 0;
+    fRegMap = 0; fRegs = 0; fFbOff = 0; fCurOk = fCurVis = fCurPos = false; fCurX = fCurY = 0;
+    { OSBoolean *hc = OSDynamicCast(OSBoolean, getProperty("RageHwCursor")); fHwCursorOff = !(hc && hc->isTrue()); }   /* opt-in: Info.plist RageHwCursor (a failed conversion leaves IOFramebuffer without a working software cursor: panic, Nov 26) */
+    { char tmp[8]; char nm[] = "rage_hwcur0"; if (PE_parse_boot_arg(nm, tmp)) fHwCursorOff = true; }
     { OSBoolean *nl = OSDynamicCast(OSBoolean, getProperty("RageNdrvLayout")); fNdrv = !nl || nl->isTrue(); }
     { char tmp[8]; char nm[] = "rage_fb0"; if (PE_parse_boot_arg(nm, tmp)) fNdrv = false; }       /* boot-arg rage_fb0=1: frame buffer at VRAM 0 like the ROM */
     pickModes();
@@ -356,6 +358,12 @@ IOReturn RageStubFB::setProperties(OSObject *props)
         notifyModeChange(); return kIOReturnSuccess; }
     if (d && d->getObject("rage-check"))   { checkDisplay(false); return kIOReturnSuccess; }
     if (d && d->getObject("rage-cursor-check")) { checkLowBlock(); return kIOReturnSuccess; }
+    if (d && d->getObject("rage-cursor-regs")) {      /* snapshot of the hardware-cursor registers for the test tools */
+        if (!mapRegisters()) return kIOReturnNotReady;
+        char buf[200]; sprintf(buf, "GEN_TEST_CNTL %08x CUR_CLR0 %08x CUR_CLR1 %08x CUR_OFFSET %08x CUR_POSN %08x CUR_OFF %08x loaded %d visible %d",
+            (unsigned)rd(0xd0), (unsigned)rd(0x60), (unsigned)rd(0x64), (unsigned)rd(0x68), (unsigned)rd(0x6c), (unsigned)rd(0x70), fCurOk, fCurVis);
+        OSString *str = OSString::withCString(buf); if (str) { setProperty("RageCursorRegs", str); str->release(); }
+        return kIOReturnSuccess; }
     if (d && d->getObject("rage-cursor-fill"))  { fillLowBlock(); return kIOReturnSuccess; }
     return super::setProperties(props);
 }
@@ -561,7 +569,88 @@ IOReturn RageStubFB::setAttribute(IOSelect attribute, UInt32 value)
 }
 IOReturn RageStubFB::getAttribute(IOSelect attribute, UInt32 *value)
 {
+    if (attribute == kIOHardwareCursorAttribute && value && fNdrv && !fHwCursorOff) { *value = 1; IOLog("RageStubFB: getAttribute('crsr') -> hardware cursor\n"); return kIOReturnSuccess; }
     IOReturn r = super::getAttribute(attribute, value);
     IOLog("RageStubFB: getAttribute('%c%c%c%c') -> 0x%x\n", FOURCC(attribute), (unsigned)r); return r;
 }
 IOReturn RageStubFB::setStartupDisplayMode(IODisplayModeID mode, IOIndex depth) { IOLog("RageStubFB: setStartupDisplayMode(%d, %d)\n", (int)mode, (int)depth); return kIOReturnSuccess; }
+
+/* ---- hardware cursor ------------------------------------------------------------------------------------------------------------------------------
+ * 64x64, 2 bits per pixel, 16 bytes per row, first pixel in the low bits of the first byte (Programmer's Guide 6.4.3): 00 = colour 0, 01 = colour 1,
+ * 10 = transparent, 11 = complement.  The image lives at VRAM 0x40 (CUR_OFFSET = 8 qwords) exactly as under Apple's NDRV, inside the block below the frame buffer.
+ * IOFramebuffer converts the system cursor to an 8-bit indexed image with two colours and transparency (one byte per pixel: unambiguous), repacked here. */
+enum { kGenTestCntl = 0xd0 /* RRG "0_34" is a dword index: byte offset 0xd0 */, kGenCurEnable = 1u << 7, kCurClr0 = 0x60, kCurClr1 = 0x64, kCurOffset = 0x68, kCurPosn = 0x6c, kCurOff = 0x70, kCurImageOff = 0x40 };
+
+IOReturn RageStubFB::setCursorImage(void *cursorImage)
+{
+    if (!fNdrv || fHwCursorOff || fFbOff < kCurImageOff + 1024 || !mapRegisters()) return kIOReturnUnsupported;
+    IOLog("RageStubFB: setCursorImage(%p): bytesPerPixel %u, maxCursorSize %dx%d, fbOff 0x%x\n", cursorImage, (unsigned)bytesPerPixel, (int)maxCursorSize.width, (int)maxCursorSize.height, (unsigned)fFbOff);
+    IOHardwareCursorDescriptor d; bzero(&d, sizeof d);
+    d.majorVersion = kHardwareCursorDescriptorMajorVersion; d.minorVersion = kHardwareCursorDescriptorMinorVersion;
+    d.height = 64; d.width = 64; d.bitDepth = 32;       /* direct ARGB: Apple's converter fails indexed (8 bit) output on any partially transparent pixel, and the arrow is anti-aliased */
+    static UInt32 pix[64 * 64];
+    IOHardwareCursorInfo info; bzero(&info, sizeof info);
+    info.majorVersion = kHardwareCursorInfoMajorVersion; info.minorVersion = kHardwareCursorInfoMinorVersion;
+    info.hardwareCursorData = (UInt8 *)pix;
+    bzero(pix, sizeof pix);
+    if (!convertCursorImage(cursorImage, &d, &info)) { IOLog("RageStubFB: setCursorImage: convertCursorImage failed\n"); return kIOReturnUnsupported; }
+    UInt32 cw = info.cursorWidth, ch = info.cursorHeight;
+    if (cw == 0 || cw > 64 || ch == 0 || ch > 64) { IOLog("RageStubFB: setCursorImage: bad size %ux%u\n", (unsigned)cw, (unsigned)ch); return kIOReturnUnsupported; }
+    IODeviceMemory *bar0 = fPCI->getDeviceMemoryWithRegister(kIOPCIConfigBaseAddress0);
+    IODeviceMemory *sub = bar0 ? IODeviceMemory::withSubRange(bar0, kCurImageOff, 1024) : 0;
+    IOMemoryMap *m = sub ? sub->map(kIOMapInhibitCache) : 0;
+    if (sub) sub->release();
+    if (!m) return kIOReturnNoMemory;
+    volatile UInt8 *p = (volatile UInt8 *)m->getVirtualAddress();
+    UInt32 nOpaque = 0, nWhite = 0;
+    for (UInt32 row = 0; row < 64; row++) for (UInt32 b = 0; b < 16; b++) {
+        UInt8 v = 0;
+        for (UInt32 k = 0; k < 4; k++) {
+            UInt32 col = b * 4 + k, q = 2;                                   /* outside the converted image: transparent */
+            if (row < ch && col < cw) {
+                UInt32 px = pix[row * cw + col], al = px >> 24, r = (px >> 16) & 0xff, g = (px >> 8) & 0xff, bl = px & 0xff;
+                if (al >= 128) { q = ((r * 30 + g * 59 + bl * 11) / 100 >= 128) ? 1u : 0u; nOpaque++; if (q) nWhite++; }
+            }
+            v |= (UInt8)(q << (2 * k));
+        }
+        p[row * 16 + b] = v;
+    }
+    eieio();
+    wr(kCurClr0, 0x000000u); wr(kCurClr1, 0xffffffu);                           /* black and white: the arrow's colours */
+    static int logged;
+    {   /* the packed image as text, published as RageCursorArt ('.' transparent, '#' colour 0, 'o' colour 1; rows separated by '/') */
+        static char art[64 * 65 + 1]; UInt32 n = 0;
+        for (UInt32 row = 0; row < ch; row++) {
+            for (UInt32 col = 0; col < cw; col++) { UInt8 q = (p[row * 16 + col / 4] >> (2 * (col & 3))) & 3; art[n++] = q == 2 ? '.' : q == 0 ? '#' : 'o'; }
+            art[n++] = '/';
+        }
+        art[n] = 0; OSString *as = OSString::withCString(art); if (as) { setProperty("RageCursorArt", as); as->release(); }
+    }
+    m->release();
+    if (logged++ < 4) IOLog("RageStubFB: setCursorImage: %ux%u, %u opaque pixels (%u white)\n", (unsigned)cw, (unsigned)ch, (unsigned)nOpaque, (unsigned)nWhite);
+    fCurOk = true;
+    if (fCurPos) cursorApplyPos();
+    return kIOReturnSuccess;
+}
+
+/* negative positions: the chip shows nothing at a negative coordinate, so saturate to 0 and skip the clipped columns/rows (HORZ/VERT_OFF, CUR_OFFSET += 2 qwords per row) */
+void RageStubFB::cursorApplyPos(void)
+{
+    SInt32 x = fCurX, y = fCurY; UInt32 ho = 0, vo = 0, off = kCurImageOff >> 3;
+    if (x < 0) { ho = (UInt32)-x; if (ho > 63) ho = 63; x = 0; }
+    if (y < 0) { vo = (UInt32)-y; if (vo > 63) vo = 63; off += vo * 2; y = 0; }
+    wr(kCurOffset, off); wr(kCurOff, (vo << 16) | ho); wr(kCurPosn, ((UInt32)y << 16) | (UInt32)x);
+}
+
+IOReturn RageStubFB::setCursorState(SInt32 x, SInt32 y, bool visible)
+{
+    if (!fCurOk || !mapRegisters()) return kIOReturnUnsupported;
+    fCurX = x; fCurY = y; fCurPos = true;
+    cursorApplyPos();
+    if (visible != fCurVis) {
+        UInt32 g = rd(kGenTestCntl);
+        wr(kGenTestCntl, visible ? (g | kGenCurEnable) : (g & ~kGenCurEnable));
+        fCurVis = visible;
+    }
+    return kIOReturnSuccess;
+}

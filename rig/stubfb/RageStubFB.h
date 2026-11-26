@@ -24,6 +24,9 @@ class RageStubFB : public IOFramebuffer
     void fillLowBlock(void);     /* canary pattern in VRAM [0, fFbOff): stands for the hardware-cursor image of Apple's NDRV (0x40..0x440) and the rest below the frame buffer */
     UInt32 checkLowBlock(void);  /* number of bytes of that block that no longer hold the pattern */
     bool mapRegisters(void);
+    /* hardware cursor (64x64, 2 bpp, image at VRAM 0x40 like Apple's NDRV): fCurOk = image loaded, fCurX/Y last position, fCurVis enabled; boot-arg rage_hwcur0=1 turns it off (software cursor) */
+    bool fCurOk, fCurVis, fCurPos, fHwCursorOff; SInt32 fCurX, fCurY;
+    void cursorApplyPos(void);
     bool replayInit(void);
     const struct rage_mode *fModes[8], *fModes32[8]; int fNModes, fMode, fDepth;   /* fModes32[i] = the 32 bpp row of mode i or 0; fDepth 0 = 15 bpp, 1 = 32 bpp */   /* modes offered (15 bpp, 60 Hz rows of rage_modes.h); fMode = the one the chip is running */
     void pickModes(void);
@@ -72,6 +75,8 @@ public:
     virtual IOReturn setCLUTWithEntries(IOColorEntry *colors, UInt32 index, UInt32 numEntries, IOOptionBits options);
     virtual IOReturn setAttribute(IOSelect attribute, UInt32 value);
     virtual IOReturn getAttribute(IOSelect attribute, UInt32 *value);
+    virtual IOReturn setCursorImage(void *cursorImage);
+    virtual IOReturn setCursorState(SInt32 x, SInt32 y, bool visible);
     virtual IOReturn setStartupDisplayMode(IODisplayModeID mode, IOIndex depth);
     virtual IOReturn setGammaTable(UInt32 channelCount, UInt32 dataCount, UInt32 dataWidth, void *data);
 };
