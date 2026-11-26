@@ -58,6 +58,7 @@ void RageStubFB::checkDisplay(bool unblank)
         wr(kCrtcOffPitch, (op & 0xfff00000u) | (fFbOff >> 3));
         IOLog("RageStubFB: CRTC_OFF_PITCH 0x%08x -> 0x%08x (frame buffer at VRAM 0x%x)\n", (unsigned)op, (unsigned)rd(kCrtcOffPitch), (unsigned)fFbOff);
         clearScanout();
+        fillLowBlock();
     }
     UInt32 mem = rd(kMemCntl), wantEnd = fDepth ? kUpperEndian32 : kUpperEndian16;
     if (((mem >> kMemUpperEndianShift) & kMemUpperEndianMask) != wantEnd) {
@@ -82,6 +83,47 @@ static bool gReplayDone = false;
 
 /* Video memory is not cleared by a (warm) reset, so until WindowServer repaints, the screen shows the previous session's pixels and whatever test
  * tools wrote.  After a replay (boot time) fill the scanout buffer -- 640x480 at 2 bytes/pixel from offset 0, lower (unswapped) view -- with black. */
+/* The block below the frame buffer belongs to the framebuffer driver: under Apple's NDRV the 64x64 2 bpp cursor image sits at 0x40..0x440 and CUR_OFFSET points at it (8 qwords).
+ * The stub mimics the memory: it fills [0, fFbOff) with a position-dependent pattern (a real cursor image cannot be told from garbage; this can) and points CUR_OFFSET at 0x40
+ * with the cursor left disabled.  The kernel driver must never write there; rage-cursor-check counts the bytes that changed. */
+static inline UInt8 lowPattern(UInt32 i) { return (UInt8)(((i * 0x9du) + 0x31u) ^ (i >> 8)); }
+void RageStubFB::fillLowBlock(void)
+{
+    if (!fNdrv || !fFbOff || !mapRegisters()) return;
+    IODeviceMemory *bar0 = fPCI ? fPCI->getDeviceMemoryWithRegister(kIOPCIConfigBaseAddress0) : 0;
+    IODeviceMemory *sub = bar0 ? IODeviceMemory::withSubRange(bar0, 0, fFbOff) : 0;
+    IOMemoryMap *m = sub ? sub->map(kIOMapInhibitCache) : 0;
+    if (sub) sub->release();
+    if (!m) { IOLog("RageStubFB: fillLowBlock: cannot map\n"); return; }
+    volatile UInt8 *p = (volatile UInt8 *)m->getVirtualAddress();
+    for (UInt32 i = 0; i < fFbOff; i++) p[i] = lowPattern(i);
+    eieio(); m->release();
+    wr(0x68, 0x40u >> 3);       /* CUR_OFFSET: the cursor image at 0x40, in qwords (hardware cursor stays disabled) */
+    IOLog("RageStubFB: low block [0,0x%x) filled (cursor image area 0x40..0x440)\n", (unsigned)fFbOff);
+}
+
+UInt32 RageStubFB::checkLowBlock(void)
+{
+    if (!fNdrv || !fFbOff || !mapRegisters()) return 0;
+    IODeviceMemory *bar0 = fPCI ? fPCI->getDeviceMemoryWithRegister(kIOPCIConfigBaseAddress0) : 0;
+    IODeviceMemory *flush = bar0 ? IODeviceMemory::withSubRange(bar0, 0x770000, 4) : 0;      /* rewrite a word the engine never writes: its pixel cache then reaches the CPU view (as vramCopyOut does) */
+    IOMemoryMap *fm = flush ? flush->map(kIOMapInhibitCache) : 0;
+    if (flush) flush->release();
+    if (fm) { *(volatile UInt32 *)fm->getVirtualAddress() = 0; eieio(); (void)*(volatile UInt32 *)fm->getVirtualAddress(); fm->release(); }
+    IODeviceMemory *sub = bar0 ? IODeviceMemory::withSubRange(bar0, 0, fFbOff) : 0;
+    IOMemoryMap *m = sub ? sub->map(kIOMapInhibitCache) : 0;
+    if (sub) sub->release();
+    if (!m) return 0xffffffffu;
+    volatile UInt8 *p = (volatile UInt8 *)m->getVirtualAddress();
+    UInt32 bad = 0, first = 0xffffffffu;
+    for (UInt32 i = 0; i < fFbOff; i++) if (p[i] != lowPattern(i)) { if (first == 0xffffffffu) first = i; bad++; }
+    m->release();
+    IOLog("RageStubFB: low block check: %u of %u bytes changed%s\n", (unsigned)bad, (unsigned)fFbOff, bad ? " (first at offset shown in RageCursorCheckFirst)" : "");
+    OSNumber *n = OSNumber::withNumber(bad, 32); if (n) { setProperty("RageCursorCheck", n); n->release(); }
+    n = OSNumber::withNumber(first, 32); if (n) { setProperty("RageCursorCheckFirst", n); n->release(); }
+    return bad;
+}
+
 void RageStubFB::clearScanout(void)
 {
     IODeviceMemory *bar0 = fPCI ? fPCI->getDeviceMemoryWithRegister(kIOPCIConfigBaseAddress0) : 0;
@@ -313,6 +355,8 @@ IOReturn RageStubFB::setProperties(OSObject *props)
         if (!n || !applyMode((int)(n->unsigned32BitValue() & 15u), (int)(n->unsigned32BitValue() >> 4))) return kIOReturnBadArgument;   /* N = mode index + 16 * depth */
         notifyModeChange(); return kIOReturnSuccess; }
     if (d && d->getObject("rage-check"))   { checkDisplay(false); return kIOReturnSuccess; }
+    if (d && d->getObject("rage-cursor-check")) { checkLowBlock(); return kIOReturnSuccess; }
+    if (d && d->getObject("rage-cursor-fill"))  { fillLowBlock(); return kIOReturnSuccess; }
     return super::setProperties(props);
 }
 
@@ -453,6 +497,7 @@ bool RageStubFB::applyMode(int idx, int depth)
     { UInt32 mem = rd(kMemCntl), we = depth ? kUpperEndian32 : kUpperEndian16;      /* the CPU's byte order for the upper aperture follows the depth (RRG MEM_CNTL UPPER_APER_ENDIAN) */
       wr(kMemCntl, (mem & ~(kMemUpperEndianMask << kMemUpperEndianShift)) | (we << kMemUpperEndianShift)); IOLog("RageStubFB:   MEM_CNTL %08x -> %08x\n", (unsigned)mem, (unsigned)rd(kMemCntl)); }
     fMode = idx; fDepth = depth; fFbOff = cur.fb_off;
+    fillLowBlock();
     IOLog("RageStubFB: applyMode done: HTD %08x VTD %08x GEN %08x OFF_PITCH %08x\n", (unsigned)rd(0), (unsigned)rd(8), (unsigned)rd(kCrtcGenCntl), (unsigned)rd(kCrtcOffPitch));
     return true;
 }
