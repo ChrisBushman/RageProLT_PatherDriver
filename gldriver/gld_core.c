@@ -124,7 +124,9 @@ int mach64_build_surface(gld_context *ctx)
         p->rb.dbl = (int)p->use_ovl; p->rb.ovl_fail = 0;
         p->rb.pot_pitch = p->fs_scale ? 1u : 0u;                                                      /* the quad samples the target as a power-of-two texture */
         rc = rgb_surface(&p->rb, p->fb_w, p->fb_h, want, 1);
-        if (rc && want == 4u) { p->rb.pot_pitch = 1; rc = rgb_surface(&p->rb, p->fb_w, p->fb_h, 2, 1); }   /* 16 bpp target on a 32 bpp scanout: presented through the 3D engine, so power-of-two pitch */
+        if (rc && want == 4u) { p->rb.pot_pitch = 1; rc = rgb_surface(&p->rb, p->fb_w, p->fb_h, 2, 1); }
+        { static const char *sl = (const char *)1; if (sl == (const char *)1) sl = getenv("RAGE_SURF_LOG");       /* debug: RAGE_SURF_LOG=1 logs every surface build to stderr */
+          if (sl) fprintf(stderr, "RAGE_SURF: ctx %p drawable %ux%u win_mode %d scanout %ux%u bpp %u -> target bpp %u rc %d (fs_scale %u)\n", (void *)ctx, p->fb_w, p->fb_h, (int)p->win_mode, dw, dh, dbpp, p->rb.bpp, rc, p->fs_scale); }   /* 16 bpp target on a 32 bpp scanout: presented through the 3D engine, so power-of-two pitch */
         p->cbpp = p->rb.bpp ? p->rb.bpp : 2u;
     }
     if (rc) { p->attached = 0; return rc; }
