@@ -364,6 +364,13 @@ IOReturn RageStubFB::setProperties(OSObject *props)
             (unsigned)rd(0xd0), (unsigned)rd(0x60), (unsigned)rd(0x64), (unsigned)rd(0x68), (unsigned)rd(0x6c), (unsigned)rd(0x70), fCurOk, fCurVis);
         OSString *str = OSString::withCString(buf); if (str) { setProperty("RageCursorRegs", str); str->release(); }
         return kIOReturnSuccess; }
+    if (d && d->getObject("rage-chipinfo")) {         /* read-only snapshot of the chip configuration registers, for comparison with the NDRV's init constants */
+        if (!mapRegisters()) return kIOReturnNotReady;
+        char buf[240]; sprintf(buf, "CHIP_ID %08x CONFIG_STAT0 %08x CONFIG_STAT1 %08x MEM_CNTL %08x MEM_BUF_CNTL %08x BUS_CNTL %08x DAC_CNTL %08x HW_DEBUG %08x CUSTOM_MACRO_CNTL %08x",
+            (unsigned)rd(0xe0), (unsigned)rd(0xe4), (unsigned)rd(0x94), (unsigned)rd(0xb0), (unsigned)rd(0x2c), (unsigned)rd(0xa0), (unsigned)rd(0xc4), (unsigned)rd(0x7c), (unsigned)rd(0xd4));
+        IOLog("RageStubFB: chipinfo %s\n", buf);
+        OSString *str = OSString::withCString(buf); if (str) { setProperty("RageChipInfo", str); str->release(); }
+        return kIOReturnSuccess; }
     if (d && d->getObject("rage-cursor-fill"))  { fillLowBlock(); return kIOReturnSuccess; }
     return super::setProperties(props);
 }
