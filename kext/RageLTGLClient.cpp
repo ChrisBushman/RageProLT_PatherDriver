@@ -237,7 +237,7 @@ IOReturn RageLTGLClient::selDisplay(uint32_t *gen, uint32_t *w, uint32_t *h, uin
 IOReturn RageLTGLClient::selOvlOn(uint32_t off, uint32_t pitch, uint32_t src, uint32_t dst, uint32_t dsz, uint32_t bpp)
 {
     if (!fDev) return kIOReturnNotAttached;
-    return fDev->ovlOn(fOwner, off, pitch, src & 0xffffu, src >> 16, dst & 0xffffu, dst >> 16, dsz & 0xffffu, dsz >> 16, bpp);
+    return fDev->ovlOn(fOwner, off, pitch, src & 0xffffu, src >> 16, dst & 0xffffu, dst >> 16, dsz & 0xffffu, dsz >> 16, bpp & 0xffu, bpp >> 8);
 }
 IOReturn RageLTGLClient::selOvlOff(void)
 {

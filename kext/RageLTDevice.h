@@ -113,7 +113,7 @@ public:
     IOReturn     vramCopyOut(uint32_t owner, uint32_t off, uint8_t *dst, uint32_t len, uint32_t flags);
     IOReturn     scanoutCopyOut(uint32_t byteOff, uint8_t *dst, uint32_t len);                                    /* debug */
     IOReturn     regDump(uint32_t *pairs, uint32_t maxPairs, uint32_t *n);
-    IOReturn     ovlOn(uint32_t owner, uint32_t off, uint32_t pitch_px, uint32_t sw, uint32_t sh, uint32_t dx, uint32_t dy, uint32_t dw, uint32_t dh, uint32_t bpp);   /* RAGE_FEAT_OVERLAY */
+    IOReturn     ovlOn(uint32_t owner, uint32_t off, uint32_t pitch_px, uint32_t sw, uint32_t sh, uint32_t dx, uint32_t dy, uint32_t dw, uint32_t dh, uint32_t bpp, uint32_t flags);   /* RAGE_FEAT_OVERLAY; flags: bit0 = SCALE_HORZ_MODE, bit1 = SCALE_VERT_MODE (debug builds only, hypothesis test) */
     IOReturn     ovlOff(uint32_t owner);
     IOReturn     ovlFlip(uint32_t owner, uint32_t off);
     IOReturn     ovlDisableLocked(void);                                                                          /* KEY_CNTL hidden, then SCALE_CNTL 0 (fLock held) */
