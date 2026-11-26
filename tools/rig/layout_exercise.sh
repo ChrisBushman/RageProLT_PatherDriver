@@ -12,6 +12,7 @@ snap() { /usr/sbin/screencapture -x $O/$1.pdf && sips -s format png $O/$1.pdf --
 check() { say "[$1] guard: `sudo $R/cursor_guard | tail -1`; overlay: `$R/ovl_gate status`; kext: `kextstat | grep -c ATIRageProLT` loaded"; }
 front() { osascript -e "tell application \"System Events\" to set frontmost of process \"$1\" to true" >/dev/null 2>&1 || osascript -e "tell application \"$1\" to activate" >/dev/null 2>&1; sleep 1; }   # the Terminal that runs this script must not cover the app (screenshots, visible-rect clipping)
 panic() { n=`ls /Library/Logs/CrashReporter 2>/dev/null | wc -l`; say "crash logs in /Library/Logs/CrashReporter: $n"; }
+osascript -e 'tell application "System Events" to set visible of process "Terminal" to false' >/dev/null 2>&1   # the Terminal running this script must not cover the apps (a bare process like atlantis cannot be raised, so hide Terminal instead)
 sudo $R/cursor_guard fill >/dev/null; check start; panic
 say "== Atlantis ${AS}s"
 cd $HOME/atlantis-win && (RAGE_STATS=1 GLUTSHIM_SECS=$AS GLUTSHIM_POS="0,60" ./atlantis > $O/atlantis.out 2> $O/atlantis.stats & P=$!; sleep 8; front atlantis; sleep 7; snap atlantis_1; sleep 10; snap atlantis_2; wait $P; echo "atlantis exit $?" >> $O/summary.txt)
