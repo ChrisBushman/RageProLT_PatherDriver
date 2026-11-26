@@ -22,6 +22,8 @@ ovl_sweep: ovl_sweep.c ragegl.h
 	cc $(CFLAGS) -o $@ ovl_sweep.c -framework IOKit -framework CoreFoundation
 ovl_blocks: ovl_blocks.c ragegl.h
 	cc $(CFLAGS) -o $@ ovl_blocks.c -framework IOKit -framework CoreFoundation
+ovl_probe: ovl_probe.c ragegl.h
+	cc $(CFLAGS) -o $@ ovl_probe.c -framework IOKit -framework CoreFoundation
 ovl_off: ovl_off.c ragegl.h
 	cc $(CFLAGS) -o $@ ovl_off.c -framework IOKit -framework CoreFoundation
 quad_test: quad_test.c ragegl.h

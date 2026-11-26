@@ -267,11 +267,11 @@ IOReturn RageLTDevice::ovlOn(uint32_t owner, uint32_t off, uint32_t pitch_px, ui
 #if !RAGE_DEBUG_ENGTEST
     if (flags) return kIOReturnUnsupported;                       /* the interpolation-mode bits are an unproven hypothesis: debug builds only */
 #endif
-    coefSet = (flags >> 2) & 3u;                               /* debug: 0 = Win98/X defaults, 1 = identity 0x00002000 x5, 2 = flat 50/50 blend 0x00101000 x5 (3 rejected below) */
-    if (coefSet == 3u) return kIOReturnBadArgument;
+    coefSet = (flags >> 2) & 3u;                               /* debug: 0 = Win98/X defaults, 1 = identity 0x00002000 x5, 2 = flat 50/50 blend 0x00101000 x5, 3 = identity in COEFF0-3 and flat blend in COEFF4 only */
     cf0 = 0x00002000u; cf1 = 0x0d06200du; cf2 = 0x0d0a1c0du; cf3 = 0x0c0e1a0cu; cf4 = 0x0c14140cu;
     if (coefSet == 1u) cf0 = cf1 = cf2 = cf3 = cf4 = 0x00002000u;
     else if (coefSet == 2u) cf0 = cf1 = cf2 = cf3 = cf4 = 0x00101000u;
+    else if (coefSet == 3u) { cf0 = cf1 = cf2 = cf3 = 0x00002000u; cf4 = 0x00101000u; }       /* debug: only the last register (COEFF4) is the flat blend */
     scaleCntl |= ((flags & 1u) << 2) | ((flags & 2u) << 2);     /* SCALE_HORZ_MODE (bit 2) / SCALE_VERT_MODE (bit 3) */
     if (!owner || !sw || !sh || !dw || !dh || sw > 720u || (pitch_px & 3u) || pitch_px < sw || (off & 7u) || (bpp != 2u && bpp != 4u) || ((pitch_px * bpp) & 7u)) return kIOReturnBadArgument;   /* quadword-aligned offset and pitch, width limit of this family */
     IOLockLock(fLock);
