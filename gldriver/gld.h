@@ -117,6 +117,7 @@ typedef struct {
     uint32_t   use_ovl;            /* fs_scale presented through the hardware overlay scaler (double buffered, nearest-neighbour) instead of the bilinear quad */
     uint32_t   mode_gen;           /* display generation the surface was built for */
     uint32_t   attached;           /* a surface exists */
+    uint32_t   surf_evicted;       /* the colour/Z blocks were freed to make room for another context of this process (its window is off screen); rebuilt on the next draw/present */
     uint32_t   tex_off;            /* bound texture VRAM offset */
     uint32_t   tex_w, tex_h, tex2_w, tex2_h;   /* bound texture sizes (texel inset) */
     const void *tex_slot;
@@ -189,6 +190,7 @@ void     mach64_clear_zbuffer(gld_context *ctx);
 void     mach64_present(gld_context *ctx);
 int      mach64_mode_check(gld_context *ctx);
 int      mach64_build_surface(gld_context *ctx);
+void     mach64_surf_unregister(mach64_priv *p);
 void     mach64_pack_vertex(m64_vertex *out, float x, float y, float z, float w, uint32_t argb);
 void     mach64_gli_forget(gld_context *ctx);
 int      gldFlush(gld_context *ctx);

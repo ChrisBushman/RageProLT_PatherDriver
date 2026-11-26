@@ -107,6 +107,38 @@ void mach64_init_state(mach64_priv *p)
 }
 
 /* ---- surface --------------------------------------------------------- */
+/* Windowed contexts of this process.  VRAM is small (about 4.4 MB free at 1024x768x32): an app that creates a second GL view while an earlier one's window is not on
+ * screen (Chess: a 740x680 view that is never shown, then the real 630x418 one) would fail with kCGLBadAlloc.  When a surface cannot be built, the surfaces of the other
+ * contexts whose windows are not on screen are freed first; each is rebuilt on its next draw/present (mach64_mode_check). */
+#define SURF_REG_MAX 32
+static mach64_priv *g_surf_reg[SURF_REG_MAX];
+static void surf_register(mach64_priv *p)
+{
+    int i;
+    for (i = 0; i < SURF_REG_MAX; i++) if (g_surf_reg[i] == p) return;
+    for (i = 0; i < SURF_REG_MAX; i++) if (!g_surf_reg[i]) { g_surf_reg[i] = p; return; }
+}
+void mach64_surf_unregister(mach64_priv *p)
+{
+    int i;
+    for (i = 0; i < SURF_REG_MAX; i++) if (g_surf_reg[i] == p) g_surf_reg[i] = 0;
+}
+static int evict_offscreen(mach64_priv *self)
+{
+    int i, n = 0;
+    for (i = 0; i < SURF_REG_MAX; i++) {
+        mach64_priv *q = g_surf_reg[i]; short vr[16][4];
+        if (!q || q == self || !q->attached || !q->rb.col_off || !q->win_mode || !q->cgs_win) continue;
+        if (mach64_cgs_visible_rects(q->cgs_win, q->cgs_surf, (int)q->win_x, (int)q->win_y, (int)q->fb_w, (int)q->fb_h, vr, 16) != -2) continue;
+        q->batch.n = 0;                                   /* queued draws targeted the surface that is going away */
+        rgb_fence(&q->rb);
+        rgb_release(&q->rb);
+        q->surf_evicted = 1;
+        n++;
+    }
+    return n;
+}
+
 /* (Re)build the kernel render target (+ Z) for the drawable size.  Called at attach and again after a display mode change. */
 int mach64_build_surface(gld_context *ctx)
 {
@@ -123,8 +155,14 @@ int mach64_build_surface(gld_context *ctx)
         p->use_ovl = (p->fs_scale && rgb_overlay_wanted(&p->rb, p->fb_w)) ? 1u : 0u;                  /* overlay present: no engine time per frame; falls back to the quad if the kernel refuses */
         p->rb.dbl = (int)p->use_ovl; p->rb.ovl_fail = 0;
         p->rb.pot_pitch = p->fs_scale ? 1u : 0u;                                                      /* the quad samples the target as a power-of-two texture */
-        rc = rgb_surface(&p->rb, p->fb_w, p->fb_h, want, 1);
-        if (rc && want == 4u) { p->rb.pot_pitch = 1; rc = rgb_surface(&p->rb, p->fb_w, p->fb_h, 2, 1); }
+        {   int attempt;
+            for (attempt = 0; attempt < 2; attempt++) {
+                p->rb.pot_pitch = p->fs_scale ? 1u : 0u;
+                rc = rgb_surface(&p->rb, p->fb_w, p->fb_h, want, 1);
+                if (rc && want == 4u) { p->rb.pot_pitch = 1; rc = rgb_surface(&p->rb, p->fb_w, p->fb_h, 2, 1); }
+                if (!rc || attempt || !p->win_mode || !evict_offscreen(p)) break;       /* out of VRAM: free the off-screen windows' surfaces and try once more */
+            }
+        }
         { static const char *sl = (const char *)1; if (sl == (const char *)1) sl = getenv("RAGE_SURF_LOG");       /* debug: RAGE_SURF_LOG=1 logs every surface build to stderr */
           if (sl) fprintf(stderr, "RAGE_SURF: ctx %p drawable %ux%u win_mode %d scanout %ux%u bpp %u -> target bpp %u rc %d (fs_scale %u)\n", (void *)ctx, p->fb_w, p->fb_h, (int)p->win_mode, dw, dh, dbpp, p->rb.bpp, rc, p->fs_scale); }   /* 16 bpp target on a 32 bpp scanout: presented through the 3D engine, so power-of-two pitch */
         p->cbpp = p->rb.bpp ? p->rb.bpp : 2u;
@@ -132,7 +170,8 @@ int mach64_build_surface(gld_context *ctx)
     if (rc) { p->attached = 0; return rc; }
     p->rb.gen = rgb_gen(&p->rb);
     p->mode_gen = p->rb.gen;
-    p->attached = 1;
+    p->attached = 1; p->surf_evicted = 0;
+    if (p->win_mode) surf_register(p);
     mach64_zs_reset(p);
     p->frame_new = 1;
     p->init_clear = 1;
@@ -146,6 +185,9 @@ int mach64_mode_check(gld_context *ctx)
     mach64_priv *p = MACH64_PRIV(ctx);
     uint32_t g;
     if (!p || !p->attached) return 0;
+    if (p->surf_evicted && !p->rb.col_off) {                 /* freed for another context: build it again now */
+        if (mach64_build_surface(ctx)) { p->attached = 1; return 0; }           /* still no room: draw nothing, try again next time */
+    }
     g = rgb_gen(&p->rb);
     if (g & 1u) return 0;
     if (g != p->mode_gen) {
@@ -290,13 +332,14 @@ static int present_rects(mach64_priv *p)
 {
     if (g_ptrace_fn == (const char *)1) g_ptrace_fn = getenv("RAGE_PTRACE");        /* debug: RAGE_PTRACE=<file> logs every present (checked once) */
     if (p->win_mode && p->cgs_win) {
+        if (!p->rb.col_off) return 0;                                /* surface freed for another context */
         int wx = 0, wy = 0, ww = 0, wh = 0, n, i; short vr[16][4];
         if (mach64_cgs_resolve_bounds(p->cgs_win, p->cgs_surf, 0, &wx, &wy, &ww, &wh) && ww == (int)p->fb_w && wh == (int)p->fb_h) {
             p->win_x = (uint32_t)wx; p->win_y = (uint32_t)wy;
         }
         n = mach64_cgs_visible_rects(p->cgs_win, p->cgs_surf, (int)p->win_x, (int)p->win_y, (int)p->fb_w, (int)p->fb_h, vr, 16);
         if (g_ptrace_fn) ptrace_log(p, n, vr);
-        if (n == 0) return 0;                                         /* completely covered */
+        if (n == 0 || n == -2) return 0;                              /* completely covered, or the window is not on screen (blitting it would leave stale pixels the window server never repaints) */
         if (n > 0) {
             for (i = 0; i < n; i++)
                 rgb_present(&p->rb, vr[i][0] - (int)p->win_x, vr[i][1] - (int)p->win_y, vr[i][2], vr[i][3], vr[i][0], vr[i][1]);
@@ -331,7 +374,7 @@ static void *repaint_thread(void *arg)
         if (!p->rp_run) break;
         act = p->triangles + p->presents;
         if (act != last) { last = act; idle = 0; continue; }
-        if (++idle < 3 || !p->attached || !p->win_mode) continue;
+        if (++idle < 3 || !p->attached || !p->win_mode || !p->rb.col_off) continue;
         idle = 0;
         if (present_rects(p)) p->k2d_touched = 1;
     }

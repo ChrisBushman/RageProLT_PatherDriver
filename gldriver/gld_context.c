@@ -105,6 +105,7 @@ int gldDestroyContext(gld_context *ctx)
         mach64_flush_batch(ctx);
         rgb_fence(&p->rb);
         mach64_tex_ctx_gone(&p->rb);
+        mach64_surf_unregister(p);
         rgb_release(&p->rb);
         rgb_close(&p->rb);
         mach64_zs_free(p); mach64_accum_free(p);

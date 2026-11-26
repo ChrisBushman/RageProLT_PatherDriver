@@ -78,6 +78,7 @@ int gldAttachDrawable(gld_context *ctx, int type, void *drawable, uint32_t flags
         mach64_repaint_stop(pv);
         mach64_flush_batch(ctx);
         rgb_fence(&pv->rb);
+        mach64_surf_unregister(pv);
         rgb_release(&pv->rb);
         pv->attached = 0; pv->win_mode = 0;
         return 0;
@@ -89,6 +90,7 @@ int gldAttachDrawable(gld_context *ctx, int type, void *drawable, uint32_t flags
         int wx = 0, wy = 0, ww = 0, wh = 0;
         mach64_flush_batch(ctx);
         rgb_fence(&pv->rb);
+        mach64_surf_unregister(pv);
         rgb_release(&pv->rb);
         pv->attached = 0; pv->win_mode = 0; pv->win_x = pv->win_y = 0;
         if (g_gld_force_w && g_gld_force_h) { width = g_gld_force_w; height = g_gld_force_h; }

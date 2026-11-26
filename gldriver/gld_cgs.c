@@ -153,7 +153,7 @@ int mach64_display_size(int *w, int *h)
 
 /* Visible part of a GL window: its rect minus the rects of every on-screen window in FRONT of it (CGSGetOnScreenWindowList is ordered front
  * to back).  Rects are display-local like the window rect passed in (lx,ly,w,h).  Returns the number of rects (>=0), or -1 if the window is
- * not in the list / CGS fails (caller keeps the full rect).  Capped at maxr; on overflow returns the full rect (never a wrong clip). */
+ * CGS fails (caller keeps the full rect), or -2 if the window is not in the on-screen list (ordered out / not shown yet: nothing may be drawn for it).  Capped at maxr; on overflow returns the full rect (never a wrong clip). */
 int mach64_cgs_visible_rects(uint32_t window_id, uint32_t surface_id, int lx, int ly, int w, int h, short (*out)[4], int maxr)
 {
     CGSConnectionID cid = _CGSDefaultConnection();
@@ -164,7 +164,7 @@ int mach64_cgs_visible_rects(uint32_t window_id, uint32_t surface_id, int lx, in
     if (!cid || maxr < 1 || maxr > 64) return -1;
     if (CGSGetOnScreenWindowList(cid, 0, 256, wins, &nwin) != 0 || nwin <= 0) return -1;
     for (i = 0; i < nwin; i++) if ((uint32_t)wins[i] == window_id) { pos = i; break; }
-    if (pos < 0) return -1;
+    if (pos < 0) return -2;
     if (CGSGetScreenRectForWindow(cid, (CGSWindowID)window_id, &fr) != 0 ||
         CGSGetSurfaceBounds(cid, (CGSWindowID)window_id, (CGSSurfaceID)surface_id, &sb) != 0) return -1;
     gx = (int)(fr.origin.x + sb.origin.x); gy = (int)(fr.origin.y + sb.origin.y);
