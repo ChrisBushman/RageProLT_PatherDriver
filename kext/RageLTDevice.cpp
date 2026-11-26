@@ -48,7 +48,7 @@ bool RageLTDevice::start(IOService *provider)
     fDispReserved = false;
     { uint32_t k; for (k = 0; k < RAGE_MAX_CTX; k++) fCtx[k].owner = 0; }
     fFenceSubmitted = fFenceCompleted = 0;
-    fQuadU = fQuadV = fQuadX = 0;
+    fQuadU = fQuadV = fQuadX = 0; fQuadBlend = false; fQuadTcXor = fQuadScXor = 0;
     fDmaCmd = fDmaCmd2 = fDmaRing = 0; fDmaCur = 0; fDmaOk = fDmaUse = fDmaPending = false;
     (void)dmaInit();
     modeStart();

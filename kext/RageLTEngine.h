@@ -183,7 +183,8 @@ static inline int eng_tri16(volatile uint8_t *regs, uint32_t off, uint32_t pitch
  * present and the scaled present (bilinear when scale3d carries the bilinear bits).  Register order = m64_emit_state (textured) + m64_emit_triangle, as proven by
  * tools/ragegl/gldcore_test (textured quad) and gl_suite.  Float encodings are integer-built (rage_f32.h). */
 #define RAGE_SCALE3D_TEX_NEAREST 0x0141009bu
-#define RAGE_SCALE3D_TEX_BILINEAR (0x0141009bu | 0x02000000u | 0x08000000u)
+#define RAGE_SCALE3D_TEX_BILINEAR (0x0141009bu | 0x02000000u)            /* BILINEAR_TEX_EN (the magnification filter) */
+#define RAGE_SCALE3D_TEX_BLEND2   0x08000000u                              /* TEX_BLEND_FCN = 2 (2x2 within the map, the minification filter): far slower, see re-notes */
 static inline uint32_t eng_f32_signed(int32_t num, int shift) { return num < 0 ? (0x80000000u | rage_f32_pow2((uint32_t)-num, shift)) : rage_f32_pow2((uint32_t)num, shift); }
 static inline void eng_vertex(volatile uint8_t *regs, int slot, int32_t x, int32_t y, uint32_t s, uint32_t t)
 {
@@ -194,11 +195,11 @@ static inline void eng_vertex(volatile uint8_t *regs, int slot, int32_t x, int32
 }
 static inline int eng_texquad(volatile uint8_t *regs, uint32_t dst_pixw, uint32_t dst_off, uint32_t dst_pitch, uint32_t tex_fmt, uint32_t tex_off, uint32_t wl,
                               int32_t x0, int32_t y0, int32_t x1, int32_t y1, int32_t u0, int32_t v0, int32_t u1, int32_t v1,
-                              uint32_t sc_lr, uint32_t sc_tb, uint32_t scale3d)
+                              uint32_t sc_lr, uint32_t sc_tb, uint32_t scale3d, uint32_t tex_cntl_xor)
 {
     uint32_t sh = wl + 8u, s0 = eng_f32_signed(u0, (int)sh), s1 = eng_f32_signed(u1, (int)sh), t0 = eng_f32_signed(v0, (int)sh), t1 = eng_f32_signed(v1, (int)sh);
     uint32_t n = (uint32_t)((x1 - x0) / 4) * (uint32_t)((y1 - y0) / 4), oob = rage_f32_recip(n);       /* 16 / cross = 1 / (w * h) */
-    uint32_t tc = (1u << 9) | (1u << 23) | (1u << 30) | (1u << 17) | (1u << 18);                       /* as the bundle: cache flush, 4K cache, + clamp S and T */
+    uint32_t tc = ((1u << 9) | (1u << 23) | (1u << 17) | (1u << 18)) ^ tex_cntl_xor;                       /* cache flush, clamp S and T.  Bit 30 (the bundle sets it) is CLEARED: with it set a bilinear read from a pitch-1024 texture runs ~40x slower (47 ms vs 1.1 ms for 256x192, measured) */
     if (eng_wait_idle(regs)) return -1;
     eng_wq(regs, RAGE_R_DST_CNTL, 3u);
     eng_wq(regs, 0x0304, 0);                                                                           /* SETUP_CNTL */

@@ -163,7 +163,7 @@ IOReturn RageLTDevice::presentEx(uint32_t owner, uint32_t sx, uint32_t sy, uint3
         rc = (IOReturn)eng_texquad(fRegs, pixw, d.base, d.pitch_px, texfmt, c.tgt_off, wl,
                                    (int32_t)(dx * 4u) + xb, (int32_t)(dy * 4u) + xb, (int32_t)((dx + dw) * 4u) + xb, (int32_t)((dy + dh) * 4u) + xb,
                                    (int32_t)(sx * 256u) + ub, (int32_t)(sy * 256u) + vb, (int32_t)((sx + w) * 256u) + ub, (int32_t)((sy + h) * 256u) + vb,
-                                   ((right - 1u) << 16) | dx, ((bottom - 1u) << 16) | dy, (scaled && filter) ? RAGE_SCALE3D_TEX_BILINEAR : RAGE_SCALE3D_TEX_NEAREST);
+                                   ((right - 1u) << 16) | dx, ((bottom - 1u) << 16) | dy, ((scaled && filter) ? (RAGE_SCALE3D_TEX_BILINEAR | (fQuadBlend ? RAGE_SCALE3D_TEX_BLEND2 : 0u)) : RAGE_SCALE3D_TEX_NEAREST) ^ fQuadScXor, fQuadTcXor);
     }
     if (rc) { IOLockUnlock(fLock); return kIOReturnTimeout; }
     seq = ++fFenceSubmitted;
@@ -177,7 +177,7 @@ IOReturn RageLTDevice::present(uint32_t owner, uint32_t sx, uint32_t sy, uint32_
 
 void RageLTDevice::quadConfig(uint32_t key, uint32_t value)     /* experiment knobs of the textured-quad present (signed values): 3 = texel bias Q8 (S), 4 = (T), 5 = vertex bias Q2 */
 {
-    if (key == 3) fQuadU = (int32_t)value; else if (key == 4) fQuadV = (int32_t)value; else if (key == 5) fQuadX = (int32_t)value;
+    if (key == 3) fQuadU = (int32_t)value; else if (key == 4) fQuadV = (int32_t)value; else if (key == 5) fQuadX = (int32_t)value; else if (key == 6) fQuadBlend = value != 0; else if (key == 7) fQuadTcXor = value; else if (key == 8) fQuadScXor = value;
 }
 
 /* ---- VRAM copies: byte image of the user buffer == byte image in VRAM (no hidden endian assumption); flags may swap 16/32-bit units ---- */

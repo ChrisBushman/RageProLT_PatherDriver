@@ -2,6 +2,7 @@
  * 1:1 mapping, then checks conversion exactness and a scaled present.  Debug kext (scanout readback); the scanout must be 32 bpp.  Usage: quad_test [sweep|check ub vb xb] */
 #include "ragegl.h"
 #include <stdlib.h>
+#include <sys/time.h>
 #define TW 256u
 static uint32_t rd32(const uint8_t *b, uint32_t o) { return (uint32_t)b[o] | ((uint32_t)b[o + 1] << 8) | ((uint32_t)b[o + 2] << 16) | ((uint32_t)b[o + 3] << 24); }
 static uint16_t pat(uint32_t x, uint32_t y) { return (uint16_t)((((x * 5 + y * 3) & 31) << 11) | (((x * 7) ^ (y * 11)) & 63) << 5 | ((x + y * 2) & 31)); }
@@ -25,7 +26,7 @@ static int run(uint32_t sw, uint32_t sh, uint32_t dx, uint32_t dy, uint32_t dw, 
     }
     free(line); return 0;
 }
-static void cfg(int ub, int vb, int xb) { ragegl_config(c, 3, (uint32_t)ub); ragegl_config(c, 4, (uint32_t)vb); ragegl_config(c, 5, (uint32_t)xb); }
+static void cfg(int ub, int vb, int xb) { ragegl_config(c, 6, 0); ragegl_config(c, 3, (uint32_t)ub); ragegl_config(c, 4, (uint32_t)vb); ragegl_config(c, 5, (uint32_t)xb); }
 static int fails, checks;
 #define CHECK(name, cond) do { checks++; if (cond) printf("PASS  %s\n", name); else { fails++; printf("FAIL  %s\n", name); } } while (0)
 int main(int argc, char **argv)
@@ -35,6 +36,59 @@ int main(int argc, char **argv)
     ragegl_display(c, &gen, &w, &h, &pitch, &bpp, &base);
     printf("display %ux%u bpp %u\n", w, h, bpp);
     if (bpp != 4) { printf("SKIP: scanout is not 32 bpp\n"); return 77; }
+    if (argc >= 2 && !strcmp(argv[1], "bench")) {         /* full-screen present speed: 1024x768 16 bpp target (pitch 1024) -> the scanout, 1:1 and scaled */
+        uint32_t o2, n, i, d; struct timeval t0, t1; double ms;
+        if (w > 1024 || h > 768) { printf("bench needs a scanout up to 1024x768\n"); return 1; }
+        if (ragegl_alloc(c, 1024 * 768 * 2, 4096, &o2) || ragegl_target(c, o2, 1024, 2, w, h)) { printf("bench target failed\n"); return 1; }
+        for (n = 0; n < 2; n++) {
+            ragegl_fence(c, 1, &d); gettimeofday(&t0, 0);
+            for (i = 0; i < 40; i++) if (n ? ragegl_present_scaled(c, 0, 0, w / 2, h / 2, 0, 0, w, h, 1) : ragegl_present(c, 0, 0, w, h, 0, 0)) { printf("present failed\n"); { uint32_t g2; kern_return_t k2 = ragegl_present_scaled(c, 0, 0, w / 2, h / 2, 0, 0, w, h, 1); (void)g2; printf("retry returns 0x%x\n", k2); } return 1; }
+            ragegl_fence(c, 1, &d); gettimeofday(&t1, 0);
+            ms = ((t1.tv_sec - t0.tv_sec) * 1000.0 + (t1.tv_usec - t0.tv_usec) / 1000.0) / 40.0;
+            printf("%s %ux%u: %.2f ms per present (%.1f Mpix/s)\n", n ? "scaled bilinear half -> full" : "1:1 16 -> 32", w, h, ms, w * h / ms / 1000.0);
+        }
+        return 0;
+    }
+    if (argc >= 2 && !strcmp(argv[1], "cache")) {          /* bilinear 128x96 -> 256x192 from a pitch-1024 texture under register variations (TEX_CNTL / SCALE_3D_CNTL bit flips) */
+        static const uint32_t tcx[] = { 0, 1u << 30, 0, 1u << 30, 1u << 9, 1u << 17, 1u << 18, (1u << 17) | (1u << 18) }, scx[] = { 0, 0, 1u << 9, 1u << 9, 0, 0, 0, 0 }; uint32_t k, d, o2;
+        if (ragegl_alloc(c, 1024 * 1024 * 2, 4096, &o2) || ragegl_target(c, o2, 1024, 2, 256, 256)) { printf("target failed\n"); return 1; }
+        for (k = 0; k < 8; k++) {
+            struct timeval t0, t1; kern_return_t kr, ks; double ms;
+            ragegl_config(c, 7, tcx[k]); ragegl_config(c, 8, scx[k]);
+            ragegl_present_scaled(c, 0, 0, 16, 16, 0, 0, 16, 16, 0); ragegl_present_scaled(c, 0, 0, 16, 16, 0, 0, 16, 16, 0); ragegl_fence(c, 1, &d);
+            gettimeofday(&t0, 0); kr = ragegl_present_scaled(c, 0, 0, 128, 96, 0, 0, 256, 192, 1); ks = ragegl_present_scaled(c, 0, 0, 16, 16, 0, 0, 16, 16, 0); gettimeofday(&t1, 0);
+            ms = (t1.tv_sec - t0.tv_sec) * 1000.0 + (t1.tv_usec - t0.tv_usec) / 1000.0;
+            printf("TEX_CNTL ^ %08x, SCALE_3D ^ %08x: 0x%x 0x%x %.1f ms\n", tcx[k], scx[k], kr, ks, ms);
+        }
+        ragegl_config(c, 7, 0); ragegl_config(c, 8, 0);
+        return 0;
+    }
+    if (argc >= 2 && !strcmp(argv[1], "pitch")) {          /* does the texture pitch matter for bilinear speed? same 128x96 -> 256x192 bilinear from targets of different pitch */
+        static const uint32_t pit[] = { 256, 512, 1024 }; uint32_t k, d, o2;
+        for (k = 0; k < 3; k++) {
+            struct timeval t0, t1; kern_return_t kr, ks; double ms;
+            if (ragegl_alloc(c, pit[k] * pit[k] * 2, 4096, &o2) || ragegl_target(c, o2, pit[k], 2, 256, 256)) { printf("target failed\n"); return 1; }
+            ragegl_present_scaled(c, 0, 0, 16, 16, 0, 0, 16, 16, 0); ragegl_present_scaled(c, 0, 0, 16, 16, 0, 0, 16, 16, 0); ragegl_fence(c, 1, &d);
+            gettimeofday(&t0, 0); kr = ragegl_present_scaled(c, 0, 0, 128, 96, 0, 0, 256, 192, 1); ks = ragegl_present_scaled(c, 0, 0, 16, 16, 0, 0, 16, 16, 0); gettimeofday(&t1, 0);
+            ms = (t1.tv_sec - t0.tv_sec) * 1000.0 + (t1.tv_usec - t0.tv_usec) / 1000.0;
+            printf("pitch %4u: bilinear 128x96 -> 256x192: 0x%x 0x%x %.1f ms\n", pit[k], kr, ks, ms);
+        }
+        return 0;
+    }
+    if (argc >= 2 && !strcmp(argv[1], "probe")) {          /* engine time of scaled presents: issue one, then a tiny settle present, which waits for the engine to go idle */
+        static const uint32_t dsz[][2] = { {128,96}, {256,192}, {384,288}, {512,384}, {640,480}, {800,600}, {1024,768} };
+        uint32_t o2, i, f, d; if (ragegl_alloc(c, 1024 * 768 * 2, 4096, &o2) || ragegl_target(c, o2, 1024, 2, w, h)) { printf("target failed\n"); return 1; }
+        for (f = 0; f < 2; f++) for (i = 0; i < sizeof dsz / sizeof dsz[0]; i++) {
+            struct timeval t0, t1; kern_return_t k, ks; double ms; uint32_t tries = 0;
+            do { ks = ragegl_present_scaled(c, 0, 0, 16, 16, 0, 0, 16, 16, 0); ragegl_fence(c, 1, &d); } while (ks && ++tries < 4);       /* recover from the previous case */
+            gettimeofday(&t0, 0);
+            k = ragegl_present_scaled(c, 0, 0, dsz[i][0] / 2, dsz[i][1] / 2, 0, 0, dsz[i][0], dsz[i][1], f);
+            ks = ragegl_present_scaled(c, 0, 0, 16, 16, 0, 0, 16, 16, 0);
+            gettimeofday(&t1, 0); ms = (t1.tv_sec - t0.tv_sec) * 1000.0 + (t1.tv_usec - t0.tv_usec) / 1000.0;
+            printf("%s half -> %4ux%-4u: present 0x%x, wait for idle 0x%x, %7.1f ms (recover tries %u)\n", f ? "bilinear" : "nearest ", dsz[i][0], dsz[i][1], k, ks, ms, tries);
+        }
+        return 0;
+    }
     if (ragegl_alloc(c, TW * TW * 2, 4096, &off) || ragegl_target(c, off, TW, 2, TW, TW)) { printf("target failed\n"); return 1; }
     (void)zoff;
     img = malloc(TW * TW * 2); for (y = 0; y < TW; y++) for (x = 0; x < TW; x++) img[y * TW + x] = pat(x, y);

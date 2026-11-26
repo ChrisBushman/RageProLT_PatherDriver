@@ -59,6 +59,8 @@ class RageLTDevice : public IOAccelerator
     IOFramebuffer       *fFBs[RAGE_MAX_FB];
     IONotifier          *fFBNotify[RAGE_MAX_FB];
     uint32_t               fNumFB;
+    uint32_t               fQuadTcXor, fQuadScXor;   /* experiment: bits flipped in TEX_CNTL / SCALE_3D_CNTL of the quad */
+    bool                   fQuadBlend;   /* experiment: add TEX_BLEND_FCN = 2 to the bilinear present */
     int32_t                fQuadU, fQuadV, fQuadX;   /* textured-quad present biases (S/T texel Q8, vertex Q2); experiment knobs, default 0 */
     uint32_t               fFenceSubmitted, fFenceCompleted;   /* PIO phase: completes before submit returns; DMA keeps the same counters */
     /* RAGE_FEAT_DMA (RageLTDma.cpp) */

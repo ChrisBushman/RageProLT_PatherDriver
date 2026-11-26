@@ -214,7 +214,7 @@ IOReturn RageLTGLClient::selPresentScaled(uint32_t s, uint32_t sz, uint32_t d, u
 IOReturn RageLTGLClient::selConfig(uint32_t key, uint32_t value)
 {
     if (!fDev) return kIOReturnNotAttached;
-    if (key >= 3 && key <= 5) { fDev->quadConfig(key, value); return kIOReturnSuccess; }   /* textured-quad present biases (experiment) */
+    if (key >= 3 && key <= 8) { fDev->quadConfig(key, value); return kIOReturnSuccess; }   /* textured-quad present biases (experiment) */
     if (key != 1 && key != 2) return kIOReturnBadArgument;      /* 1 = DMA batch submission, 2 = DMA texture/pixel upload */
     fDev->dmaConfig(key, value);
     return kIOReturnSuccess;
