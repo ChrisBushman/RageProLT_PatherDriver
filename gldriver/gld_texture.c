@@ -1204,13 +1204,14 @@ static int bind_texture_full(gld_context *ctx)
                        | ((wl > hl ? wl : hl) << 4)
                        |  (hl << 8));
 
-    /* TEX_CNTL: COMP_COMBINE_MODULATE | TEX_CACHE_FLUSH | CACHE_SIZE_4K, plus
+    /* TEX_CNTL: COMP_COMBINE_MODULATE | TEX_CACHE_FLUSH, plus (CACHE_SIZE_4K, bit 30, is deliberately NOT set: with it, bilinear reads from textures >= 1024 texels wide
+     * were 6.5x slower (38.7 vs 5.9 ms per 256x192 quad) and 4.8x slower minified; with it clear nothing was slower and all gates pass -- measured Nov 25, design notes) plus
      * TEXTURE_CLAMP_S (1<<17) / TEXTURE_CLAMP_T (1<<18) per the app's actual
      * GL_TEXTURE_WRAP_S/T (ref mach64_texstate.c sets these for GL_CLAMP, nothing
      * for GL_REPEAT).  A REPEAT texture drawn once in [0,1] shows the mach64's
      * edge wrap (a 1px opposite-edge line) -- that IS GL_REPEAT's edge behaviour;
      * apps wanting clean edges use GL_CLAMP. */
-    st->tex_cntl       = (1u << 9) | (1u << 23) | (1u << 30)
+    st->tex_cntl       = (1u << 9) | (1u << 23)
                        | (mt ? mt_cntl(bound2) : 0u)
                        | (bound->clamp_s ? (1u << 17) : 0u)
                        | (bound->clamp_t ? (1u << 18) : 0u);

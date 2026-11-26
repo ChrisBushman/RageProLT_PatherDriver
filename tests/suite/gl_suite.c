@@ -666,22 +666,24 @@ static void t_dstalpha(void)
 
 /* MEASUREMENT ONLY (no pass/fail on time): a bilinear-magnified quad from a 1024-texel-wide texture vs a 256-wide one, drawn through the bundle's own state emission.
  * The quad present found TEX_CNTL bit 30 (set by the bundle) makes bilinear reads from pitch-1024 textures ~40x slower; this shows whether game textures hit it too. */
-static double cliff_run(int tw, float s1, const char *label)
+static double cliff_run(int tw, float s1, const char *label, unsigned filt)
 {
     unsigned char *d = calloc(1, (size_t)tw * 128 * 3); void *t; int k, n = 6; double t0, ms; int i;
     for (i = 0; i < tw * 128; i++) { d[i * 3] = (unsigned char)(i * 7); d[i * 3 + 1] = (unsigned char)(i * 3); d[i * 3 + 2] = (unsigned char)(i >> 3); }
-    t = mktex(tw, 128, 0x1907, d, (GL_CLAMP_E << 16) | GL_CLAMP_E, 0x2601, 0x2601);
+    t = mktex(tw, 128, 0x1907, d, (GL_CLAMP_E << 16) | GL_CLAMP_E, filt, filt);
     default_state(); bindtex(t, GL_REPLACE_ENV); sync(); clear_rt(0);
     tquad(0, 0, 256, 192, 0.0f, 0.0f, s1, 0.75f, 0xffffffffu); (void)px(10, 10);                    /* warm up: upload at first bind */
     t0 = now_s(); for (k = 0; k < n; k++) tquad(0, 0, 256, 192, 0.0f, 0.0f, s1, 0.75f, 0xffffffffu); (void)px(10, 10);
     ms = (now_s() - t0) * 1000.0 / n;
-    printf("    (cliff %s: bilinear 256x192 quad, %d-wide RGB texture: %.2f ms each)\n", label, tw, ms);
+    printf("    (cliff %s: %s 256x192 quad, %d-wide RGB texture: %.2f ms each)\n", label, filt == 0x2601 ? "bilinear" : "nearest", tw, ms);
     texreset(); mach64_texture_deleted(0, t); free(d);
     return ms;
 }
 static void t_cliff(void)
 {
-    double a = cliff_run(256, 0.5f, "narrow"), b = cliff_run(1024, 0.125f, "wide");
+    double a = cliff_run(256, 0.5f, "narrow", 0x2601), b = cliff_run(1024, 0.125f, "wide", 0x2601);
+    (void)cliff_run(256, 0.5f, "narrow", 0x2600); (void)cliff_run(1024, 0.125f, "wide", 0x2600);
+    (void)cliff_run(256, 2.0f, "narrow, minified", 0x2601); (void)cliff_run(1024, 1.0f, "wide, 4x minified", 0x2601);
     printf("    (cliff: wide/narrow = %.1fx)\n", b / (a > 0.01 ? a : 0.01));
     CHECK("cliff measurement completed", a > 0 && b > 0);
 }
