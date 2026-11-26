@@ -155,3 +155,8 @@ V1 `ovl_probe 2 2 0 1`: RGB 15 bpp, OVERLAY_SCALE_CNTL = 0xC0000008 (SCALE_VERT_
   - Vertical bilinear on all lanes: neutral smooth ramps across the cell height (32 px).
   - Lane-0-only vertical filter: blue-only ramp/fringe (yellow on white above black; navy on black above white).
   - No effect: everything sharp as with the mode bit off.
+
+### Y1 result (Nov 26 00:14, YUV VYUY source, flat 50/50 table; first attempt lacked usable markers, restarted with red/green chroma markers; readback SCALER_IN 0xb, table 0x00101000)
+User: everything is greyscale; the marker colours blend in "a bit, but only so far"; row 1 2nd cell grey (not white); black cell greyish with **vertical blending too: each cell fades into the background near its edges**; row 3 not white/black/white: lighter grey and two of the same darker grey; row 5 light grey, white, white; overall **softness at all edges, colours blend together quite a bit**.
+Reading: with a YUV source the overlay scaler produces genuine neutral, smooth filtering in BOTH directions (horizontal and vertical), with the vertical mode bit NOT set. This is very different from RGB sources (sharp edges, blue-lane-only table effect). So the smooth bilinear path of this hardware is the YUV (video) path; RGB sources go through a replication path.
+Y2 (control, prediction written before the run): same YUV pattern with the identity table 0x00002000 x5 (`ovl_probe 3 4 0 0`). Horizontal softness gone but vertical fade remains -> the table is the horizontal luma filter and the vertical filter is inherent to YUV; everything equally soft -> the table is irrelevant for YUV (bilinear inherent); everything sharp -> the table also gates the YUV filtering.

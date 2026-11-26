@@ -3,6 +3,7 @@
  * Five bands (screen rows, top to bottom); each is THREE contiguous cells at source columns 4,5,6 (screen x 128-223), marked by a bright RED cell two columns to the left (col 2) and a bright GREEN cell two columns to the right (col 8) with one grey gap cell on each side, so the test cells are exactly the three cells between the red and green markers even when the filter shifts or widens things:
  *   band 1: red, red, black     band 2: green, green, black     band 3: blue, blue, black     band 4: white, white, black     band 5: black, white, white
  * Question per band 1-4: is the SECOND cell the same colour as the FIRST?   Band 5: is the first (black) cell pure black everywhere, or does it have a coloured band (where)?
+ * YUV mode (bpp 3): markers are a RED pair at cols 0-1 and a GREEN pair at cols 8-9 (chroma 4:2:2 is per pixel pair), group cols 4-6 with grey gaps at cols 2-3 and 7.
  * Needs a 1024x768 scanout.  Writes: the step B overlay list.  Always disables the overlay on exit. */
 #include "ragegl.h"
 #include <stdlib.h>
@@ -25,11 +26,12 @@ int main(int argc, char **argv)
     if (dw != 1024 || dh != 768) { printf("SKIP: needs a 1024x768 scanout\n"); return 77; }
     rowbytes = (int)(pitch_px * (bpp == 4 ? 4u : 2u));
     if (bpp == 3) {            /* YUV test (debug kext): packed VYUY 4:2:2, memory bytes per 2 pixels = Y0, U, Y1, V; chroma neutral (0x80); luma only */
-        static uint8_t buf[2048 * 24]; int x, y; const uint8_t Yk = 16, Yw = 235, Yb = 64, Ym = 160;
-        uint8_t yv[32][24]; static const uint8_t bandp[5][3] = { {1,1,0}, {0,1,1}, {1,0,1}, {0,0,1}, {1,1,1} };   /* 1 = white, 0 = black */
-        for (x = 0; x < 32; x++) for (y = 0; y < 24; y++) yv[x][y] = Yb;
-        for (band = 0; band < 5; band++) for (y = 1 + band * 4; y < 4 + band * 4; y++) { for (i = 0; i < 3; i++) yv[4 + i][y] = bandp[band][i] ? Yw : Yk; yv[2][y] = Ym; yv[8][y] = Ym; }
-        for (y = 0; y < 24; y++) for (x = 0; x < 32; x += 2) { uint8_t *m = buf + y * rowbytes + x * 2; m[0] = yv[x][y]; m[1] = 0x80; m[2] = yv[x + 1][y]; m[3] = 0x80; }
+        static uint8_t buf[2048 * 24]; int x, y; const uint8_t Yk = 16, Yw = 235, Yb = 64;
+        uint8_t yv[32][24], uu[32][24], vv[32][24]; static const uint8_t bandp[5][3] = { {1,1,0}, {0,1,1}, {1,0,1}, {0,0,1}, {1,1,1} };   /* 1 = white, 0 = black */
+        for (x = 0; x < 32; x++) for (y = 0; y < 24; y++) { yv[x][y] = Yb; uu[x][y] = 0x80; vv[x][y] = 0x80; }
+        for (band = 0; band < 5; band++) for (y = 1 + band * 4; y < 4 + band * 4; y++) { for (i = 0; i < 3; i++) yv[4 + i][y] = bandp[band][i] ? Yw : Yk; for (x = 0; x < 2; x++) { yv[x][y] = 82; uu[x][y] = 90; vv[x][y] = 240; }          /* red marker pair: cols 0-1 (chroma is shared by a pixel pair) */
+            for (x = 8; x < 10; x++) { yv[x][y] = 145; uu[x][y] = 54; vv[x][y] = 34; } }     /* green marker pair: cols 8-9 */
+        for (y = 0; y < 24; y++) for (x = 0; x < 32; x += 2) { uint8_t *m = buf + y * rowbytes + x * 2; m[0] = yv[x][y]; m[1] = uu[x][y]; m[2] = yv[x + 1][y]; m[3] = vv[x][y]; }
         if (ragegl_alloc(c, (uint32_t)rowbytes * 24u, 4096, &o) || ragegl_vwrite(c, o, buf, (uint32_t)rowbytes * 24u, 0)) { printf("alloc/write failed\n"); return 1; }
         { uint32_t d; ragegl_fence(c, 1, &d); }
     } else {
