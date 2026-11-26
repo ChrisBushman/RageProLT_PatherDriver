@@ -70,7 +70,7 @@ int main(void)
     if (ctx) {
         { unsigned char *dr = calloc(1, 0x80); rc = gldAttachDrawable(ctx, 0x36, dr, 0); }
         p = MACH64_PRIV(ctx); CHECK("scale: attach", !rc && p->attached);
-        printf("      target %ux%u, %u bpp, pitch %u px, fs_scale %u\n", p->fb_w, p->fb_h, p->rb.bpp * 8, p->rb.pitch, p->fs_scale);
+        printf("      target %ux%u, %u bits, pitch %u px, fs_scale %u\n", p->fb_w, p->fb_h, p->rb.bpp * 8, p->rb.pitch, p->fs_scale);
         CHECK("scale: fs_scale selected for a 640x480 drawable on a 1024x768 scanout", p->fs_scale == 1);
         memset(gli, 0, 0x100000);
         *(uint32_t *)(gli + 0x7898) = (uint32_t)(uintptr_t)ctx;

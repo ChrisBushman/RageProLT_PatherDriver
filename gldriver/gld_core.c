@@ -119,6 +119,7 @@ int mach64_build_surface(gld_context *ctx)
         if (!rgb_display(&p->rb, &dw, &dh, &dbpp) && dbpp == 4u) want = 4u;
         p->scr_w = dw; p->scr_h = dh;
         p->fs_scale = (!p->win_mode && dw && dh && (p->fb_w < dw || p->fb_h < dh)) ? 1u : 0u;      /* FS_SCALE: a smaller full-screen drawable is stretched to the scanout */
+        if (p->fs_scale) want = 2u;                                                                    /* a 4 KB-pitch 32 bpp texture is ~30x slower to sample (387 ms vs 13 ms per 1024x768, measured): stretch from a 16 bpp target */
         p->rb.pot_pitch = p->fs_scale ? 1u : 0u;                                                      /* the quad samples the target as a power-of-two texture */
         rc = rgb_surface(&p->rb, p->fb_w, p->fb_h, want, 1);
         if (rc && want == 4u) { p->rb.pot_pitch = 1; rc = rgb_surface(&p->rb, p->fb_w, p->fb_h, 2, 1); }   /* 16 bpp target on a 32 bpp scanout: presented through the 3D engine, so power-of-two pitch */

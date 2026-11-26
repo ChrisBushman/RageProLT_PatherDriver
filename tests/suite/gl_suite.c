@@ -646,8 +646,8 @@ static void t_dstalpha(void)
     if (P->rb.bpp == 4u) {                      /* 32 bpp: glReadPixels returns the stored destination alpha (not a constant 1.0) */
         unsigned char ra[4]; unsigned bg = px(5, 5); memset(ra, 0, sizeof ra);
         mach64_ctl08(ctx, 5, (int)P->rb.h - 1 - 5, 1, 1, 0x1908u, 0x1401u, ra);
-        printf("    (glReadPixels RGBA alpha at (5,5): %02x, stored alpha %02x)\n", ra[3], ch(bg, 24));
-        CHECK("glReadPixels alpha = stored destination alpha at 32 bpp (clear A=0.5)", ch(bg, 24) != 255 && ra[3] == ch(bg, 24));
+        printf("    (glReadPixels RGBA alpha at (5,5): %02x; px() forces alpha to %02x)\n", ra[3], ch(bg, 24));
+        CHECK("glReadPixels alpha = stored destination alpha at 32 bpp (clear A=0.5 -> ~0x80, not 1.0)", ra[3] > 0x7e && ra[3] < 0x82);
     }
     c = px(80, 50); printf("    (DST_ALPHA blend, Ad=0.5: 0x%08x)\n", c);
     /* NOT APPLICABLE on the RGB565 target: it stores no destination alpha (measured above: the background reads back with no A=0.5), so DST_ALPHA
