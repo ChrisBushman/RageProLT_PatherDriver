@@ -120,7 +120,7 @@ IOReturn RageLTDevice::displayInfo(struct rage_display *out, uint32_t *gen)
     return kIOReturnSuccess;
 }
 
-/* Target -> scanout, clipped on both sides.  Raw copy: the target must have the scanout's pixel size (16 bpp now; 32 bpp / scaled present are
+/* Target -> scanout, clipped on both sides.  Raw copy: the target must have the scanout's pixel size (16->16 and 32->32; depth conversion / scaled present are
  * RAGE_FEAT_FS_SCALE work). */
 #ifndef RAGE_OP_DONE
 #ifdef RAGE_SYNC_OPS
@@ -136,7 +136,8 @@ IOReturn RageLTDevice::present(uint32_t owner, uint32_t sx, uint32_t sy, uint32_
     IOLockLock(fLock);
     { struct rage_ctx *p = ctxFor(owner, false); if (!p || !p->tgt_bpp) { IOLockUnlock(fLock); return kIOReturnNotReady; } c = *p; }
     d = fDisp;
-    if (!fDispReserved || c.tgt_bpp != 2 || d.bpp != 2 || (d.depth != 3 && d.depth != 4)) { IOLockUnlock(fLock); return kIOReturnUnsupported; }
+    if (!fDispReserved || (d.depth != 3 && d.depth != 4 && d.depth != 6)) { IOLockUnlock(fLock); return kIOReturnUnsupported; }
+    if (c.tgt_bpp != d.bpp) { IOLockUnlock(fLock); return kIOReturnUnsupported; }     /* depth conversion / scaling: textured-quad present (step 3) */
     /* clip the source to the target and the destination to the scanout (both shift the other side to match) */
     if (sx >= c.tgt_w || sy >= c.tgt_h || dx >= d.w || dy >= d.h) { IOLockUnlock(fLock); return kIOReturnSuccess; }
     if (w > c.tgt_w - sx) w = c.tgt_w - sx;
@@ -144,8 +145,8 @@ IOReturn RageLTDevice::present(uint32_t owner, uint32_t sx, uint32_t sy, uint32_
     if (w > d.w - dx) w = d.w - dx;
     if (h > d.h - dy) h = d.h - dy;
     if (!w || !h) { IOLockUnlock(fLock); return kIOReturnSuccess; }
-    if ((c.tgt_555 != 0) != (d.depth == 3)) { IOLockUnlock(fLock); return kIOReturnNotReady; }   /* the mode changed depth under this target: the client must rebuild it */
-    pixw = d.depth == 3 ? RAGE_PIXW_555 : RAGE_PIXW_565;       /* same-format raw copy: the target was created in the scanout's format */
+    if (d.bpp == 2 && (c.tgt_555 != 0) != (d.depth == 3)) { IOLockUnlock(fLock); return kIOReturnNotReady; }   /* the mode changed depth under this target: the client must rebuild it */
+    pixw = d.depth == 6 ? RAGE_PIXW_8888 : d.depth == 3 ? RAGE_PIXW_555 : RAGE_PIXW_565;       /* same-format raw copy: the target was created in the scanout's format */
     if (idleWait()) { IOLockUnlock(fLock); return kIOReturnTimeout; }
     rc = (IOReturn)eng_blit(fRegs, pixw, c.tgt_off, c.tgt_pitch, d.base, d.pitch_px, sx, sy, dx, dy, w, h, ((d.w - 1u) << 16), ((d.h - 1u) << 16));
     if (rc) { IOLockUnlock(fLock); return kIOReturnTimeout; }

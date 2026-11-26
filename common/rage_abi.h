@@ -19,7 +19,7 @@ enum {
     RAGE_GL_SET_TARGET = 3,  /* in 5 {offset, pitch_px, bpp(2|4), width, height} */
     RAGE_GL_SET_SCISSOR = 4, /* in 4 {left, right, top, bottom} signed, inclusive; clamped to the target */
     RAGE_GL_SET_Z = 5,       /* in 2 {offset, pitch_px} (16-bit Z, height of the target) */
-    RAGE_GL_FILL = 6,        /* in 5 {x, y, w, h, rgb565}; 16 bpp targets */
+    RAGE_GL_FILL = 6,        /* in 5 {x, y, w, h, colour}; colour = rgb565 (16 bpp target) or 0xAARRGGBB (32 bpp target) */
     RAGE_GL_SUBMIT = 7,      /* in 2 {user address of {reg,val} pairs, number of pairs} */
     RAGE_GL_FENCE = 8,       /* in 1 {sequence}, out 1 {completed}; waits (bounded) */
     RAGE_GL_PRESENT = 9,     /* in 6 {sx, sy, w, h, dx, dy}: target -> scanout, clipped on both sides */

@@ -29,7 +29,7 @@ int main(int argc, char **argv)
     CHECK("vram read", ragegl_vread(c, off, img, 256 * 256 * 2, 0) == 0);
     { int bad = 0; uint32_t x, y;
       for (y = 0; y < 256; y++) for (x = 0; x < 256; x++) {
-          uint16_t want = (x >= 64 && x <= 127 && y >= 32 && y <= 95) ? 0xf800 : 0x07e0;
+          uint16_t want = (x >= 64 && x <= 127 && y >= 32 && y <= 95) ? (flags & RAGE_INFO_TGT555 ? 0x7c00 : 0xf800) : (flags & RAGE_INFO_TGT555 ? 0x03e0 : 0x07e0);   /* the kernel converts the RGB565 fill colour to 1555 on a 15 bit scanout */
           if (rd16(img, (y * 256 + x) * 2) != want) bad++;
       }
       printf("      %d wrong pixels\n", bad); CHECK("fill result exact and contained", bad == 0); }
@@ -74,7 +74,7 @@ int main(int argc, char **argv)
               if (ragegl_scanout_read(c, y * pitch * bpp, line, pitch * bpp) != 0) { bad = 99999; break; }
               for (x = 0; x < 140; x++) {
                   uint16_t v2 = rd16(line, x * 2); int in = (x >= 20 && x < 120 && y >= 20 && y < 80);
-                  if (in) { inside++; if (v2 != 0x07e0) bad++; }
+                  if (in) { inside++; if (v2 != (flags & RAGE_INFO_TGT555 ? 0x03e0 : 0x07e0)) bad++; }
               }
           }
           (void)row; free(line);

@@ -157,7 +157,7 @@ IOReturn RageLTDevice::setTextures(uint32_t owner, const uint32_t *rec, uint32_t
 /* The kernel's own prologue: everything that decides WHERE the engine writes or reads. */
 uint32_t RageLTDevice::prologuePairs(const struct rage_ctx *c, uint32_t *o)
 {
-    uint32_t n = 0, k, dpw = c->tgt_bpp == 2 ? (c->tgt_555 ? RAGE_PIXW_555 : RAGE_PIXW_565) : 0x60060666u;
+    uint32_t n = 0, k, dpw = c->tgt_bpp == 2 ? (c->tgt_555 ? RAGE_PIXW_555 : RAGE_PIXW_565) : RAGE_PIXW_8888;
     if (c->tex_fmt) dpw = (dpw & ~0xf0000000u) | (c->tex_fmt << 28);
     if (c->tex2_fmt) dpw = (dpw & ~0xf0u) | (c->tex2_fmt << 4);
 #define PR(r, v) do { o[n++] = (r); o[n++] = (v); } while (0)
@@ -259,12 +259,13 @@ IOReturn RageLTDevice::clearZ(uint32_t owner, uint32_t value)
     return rc;
 }
 
+/* colour: RGB565 for a 16 bpp target, ARGB8888 (0xAARRGGBB) for a 32 bpp target */
 IOReturn RageLTDevice::fillRect(uint32_t owner, int32_t x, int32_t y, int32_t w, int32_t h, uint32_t color565)
 {
     struct rage_ctx c; IOReturn rc; uint32_t seq; int32_t x1, y1;
     if (!fEngineLive || (fModeGen & 1u)) return kIOReturnNotReady;
     IOLockLock(fLock);
-    { struct rage_ctx *p = ctxFor(owner, false); if (!p || p->tgt_bpp != 2) { IOLockUnlock(fLock); return kIOReturnNotReady; } c = *p; }
+    { struct rage_ctx *p = ctxFor(owner, false); if (!p || (p->tgt_bpp != 2 && p->tgt_bpp != 4)) { IOLockUnlock(fLock); return kIOReturnNotReady; } c = *p; }
     if (w <= 0 || h <= 0) { IOLockUnlock(fLock); return kIOReturnSuccess; }
     x1 = x + w; y1 = y + h;                                    /* clip to the scissor (already inside the target) in the kernel too */
     if (x < (int32_t)c.sc_l) x = (int32_t)c.sc_l;
@@ -272,10 +273,10 @@ IOReturn RageLTDevice::fillRect(uint32_t owner, int32_t x, int32_t y, int32_t w,
     if (x1 > (int32_t)c.sc_r + 1) x1 = (int32_t)c.sc_r + 1;
     if (y1 > (int32_t)c.sc_b + 1) y1 = (int32_t)c.sc_b + 1;
     if (x1 <= x || y1 <= y) { IOLockUnlock(fLock); return kIOReturnSuccess; }
-    if (c.tgt_555) color565 = ((color565 >> 1) & 0x7fe0u) | (color565 & 0x1fu);     /* RGB565 -> 1555: drop the green LSB, red/green move down one bit (the fill writes the raw 16 bits) */
+    if (c.tgt_bpp == 2 && c.tgt_555) color565 = ((color565 >> 1) & 0x7fe0u) | (color565 & 0x1fu);     /* RGB565 -> 1555: drop the green LSB, red/green move down one bit (the fill writes the raw 16 bits) */
     if (idleWait()) { IOLockUnlock(fLock); return kIOReturnTimeout; }
-    rc = (IOReturn)eng_fill16(fRegs, c.tgt_off, c.tgt_pitch, (uint32_t)x, (uint32_t)y, (uint32_t)(x1 - x), (uint32_t)(y1 - y), color565 & 0xffffu,
-                              (c.sc_r << 16) | c.sc_l, (c.sc_b << 16) | c.sc_t, 3u);
+    rc = (IOReturn)eng_fill(fRegs, c.tgt_bpp == 4 ? RAGE_PIXW_8888 : c.tgt_555 ? RAGE_PIXW_555 : RAGE_PIXW_565, c.tgt_off, c.tgt_pitch, (uint32_t)x, (uint32_t)y, (uint32_t)(x1 - x), (uint32_t)(y1 - y),
+                            c.tgt_bpp == 4 ? color565 : (color565 & 0xffffu), (c.sc_r << 16) | c.sc_l, (c.sc_b << 16) | c.sc_t, 3u);
     if (rc) { IOLockUnlock(fLock); return kIOReturnTimeout; }
     seq = ++fFenceSubmitted;
     rc = RAGE_OP_DONE(seq);

@@ -15,6 +15,7 @@
 #define RAGE_PIXW_555          0x60030363u        /* DP_PIX_WIDTH for ARGB1555 (565 value with the 4s replaced by 3s) */
 #define RAGE_R_GEN_TEST_CNTL   0x04d0          /* bit 8 GEN_GUI_RESETB: a high->low transition resets the GUI engine (RRG 4-21) */
 #define RAGE_PIXW_565          0x60040464u        /* DP_PIX_WIDTH for RGB565 (hardware-proven) */
+#define RAGE_PIXW_8888         0x60060666u        /* DP_PIX_WIDTH for ARGB8888 (the 565 value with the 4s replaced by 6s; 3D prologue value since the first 32 bpp target) */
 #define RAGE_WAIT_SPINS        400000u            /* ~0.4 s of register reads: the bound on every wait */
 
 static inline uint32_t eng_rd(volatile uint8_t *regs, uint32_t r) { return OSReadLittleInt32((void *)regs, r); }
@@ -87,17 +88,17 @@ static inline void eng_init_context(volatile uint8_t *regs, uint32_t pitch_px)
     eng_wq(regs, 0x0700, 0); eng_wq(regs, 0x0704, 0xffffffffu);                  /* CLR_CMP_CLR, CLR_CMP_MASK */
 }
 
-/* Solid fill, 16 bpp, kernel-programmed.  sc_lr / sc_tb are the raw scissor register values (right<<16|left, bottom<<16|top). */
-static inline int eng_fill16(volatile uint8_t *regs, uint32_t off, uint32_t pitch_px, uint32_t x, uint32_t y, uint32_t w, uint32_t h,
-                             uint32_t color565, uint32_t sc_lr, uint32_t sc_tb, uint32_t dst_cntl)
+/* Solid fill (pixw = the DP_PIX_WIDTH of the surface; colour in that format), kernel-programmed.  sc_lr / sc_tb are the raw scissor register values (right<<16|left, bottom<<16|top). */
+static inline int eng_fill(volatile uint8_t *regs, uint32_t pixw, uint32_t off, uint32_t pitch_px, uint32_t x, uint32_t y, uint32_t w, uint32_t h,
+                           uint32_t color, uint32_t sc_lr, uint32_t sc_tb, uint32_t dst_cntl)
 {
     if (eng_wait_idle(regs)) return -1;
     eng_wq(regs, 0x0304, 0);                                                 /* SETUP_CNTL: the boot state left sub-pixel (S.12.2) interpretation of DST_X/Y/height on; 0 = plain integers (G4, Nov 24) */
     eng_wq(regs, MACH64_Z_CNTL, 0);
     eng_wq(regs, MACH64_SCALE_3D_CNTL, 0);
     eng_wq(regs, RAGE_R_DST_CNTL, dst_cntl);
-    eng_wq(regs, MACH64_DP_PIX_WIDTH, RAGE_PIXW_565);
-    eng_wq(regs, MACH64_DP_FRGD_CLR, color565);
+    eng_wq(regs, MACH64_DP_PIX_WIDTH, pixw);
+    eng_wq(regs, MACH64_DP_FRGD_CLR, color);
     eng_wq(regs, MACH64_DP_WRITE_MASK, 0xffffffffu);
     eng_wq(regs, MACH64_DP_MIX, MACH64_DP_MIX_DS);
     eng_wq(regs, MACH64_DP_SRC, MACH64_DP_SRC_FLAT);
@@ -109,6 +110,10 @@ static inline int eng_fill16(volatile uint8_t *regs, uint32_t off, uint32_t pitc
     eng_wq(regs, MACH64_DST_WIDTH_HEIGHT, (h << 16) | w);                    /* trigger */
     return 0;
 }
+
+static inline int eng_fill16(volatile uint8_t *regs, uint32_t off, uint32_t pitch_px, uint32_t x, uint32_t y, uint32_t w, uint32_t h,
+                             uint32_t color565, uint32_t sc_lr, uint32_t sc_tb, uint32_t dst_cntl)
+{ return eng_fill(regs, RAGE_PIXW_565, off, pitch_px, x, y, w, h, color565, sc_lr, sc_tb, dst_cntl); }
 
 /* Blit between two surfaces of the same pixel size (raw copy: DP_PIX_WIDTH is the same for source and destination), own pitch for each. */
 static inline int eng_blit(volatile uint8_t *regs, uint32_t pixw, uint32_t src_off, uint32_t src_pitch, uint32_t dst_off, uint32_t dst_pitch,
