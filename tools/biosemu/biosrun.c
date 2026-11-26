@@ -404,13 +404,18 @@ static void vbe_probe(x86emu_t *emu)
         fprintf(stderr, "INT10 pre-mode %s: rc=%d ax=%04x\n", getenv("BIOS_PREMODE"), rc, emu->x86.R_AX);
         crtc_dump("CRTC state after the standard mode set");
     }
+    { unsigned k; fprintf(stderr, "scratch regs after premode:"); for (k = 0x80; k <= 0x8c; k += 4) fprintf(stderr, " [%02x]=%08x", k, sregs[k >> 2]); fprintf(stderr, "\n"); }
+    if (getenv("BIOS_POKE2")) {   /* sim only: reg:val, applied after the pre-mode call, before the mode set */
+        unsigned pr = strtoul(getenv("BIOS_POKE2"), NULL, 16); char *c = strchr(getenv("BIOS_POKE2"), ':');
+        if (c) { sregs[pr >> 2] = strtoul(c + 1, NULL, 16); fprintf(stderr, "poked2 sim reg 0x%02x = 0x%08x\n", pr, sregs[pr >> 2]); }
+    }
     if (getenv("BIOS_EDID")) {   /* VBE/DDC 4F15: BL=0 capabilities, BL=1 read EDID block DX into ES:DI */
         unsigned eb = 0x8400, k;
-        emu->x86.R_AX = 0x4f15; emu->x86.R_BX = 0; emu->x86.R_CX = 0; emu->x86.R_DX = 0; x86emu_set_seg_register(emu, emu->x86.seg + R_ES_INDEX, 0); emu->x86.R_DI = eb;
+        emu->x86.R_AX = getenv("BIOS_A013") ? 0xa013 : 0x4f15; emu->x86.R_BX = 0; emu->x86.R_CX = 0; emu->x86.R_DX = 0; x86emu_set_seg_register(emu, emu->x86.seg + R_ES_INDEX, 0); emu->x86.R_DI = eb;
         rc = run_int(emu, 0x10, 40000000);
         fprintf(stderr, "VBE 4F15 BL=0: rc=%d ax=%04x bx=%04x\n", rc, emu->x86.R_AX, emu->x86.R_BX);
         for (k = 0; k < 128; k++) x86emu_write_byte_noperm(emu, eb + k, 0);
-        emu->x86.R_AX = 0x4f15; emu->x86.R_BX = 1; emu->x86.R_CX = 0; emu->x86.R_DX = 0; x86emu_set_seg_register(emu, emu->x86.seg + R_ES_INDEX, 0); emu->x86.R_DI = eb;
+        emu->x86.R_AX = getenv("BIOS_A013") ? 0xa013 : 0x4f15; emu->x86.R_BX = 1; emu->x86.R_CX = 128; emu->x86.R_DX = 0; x86emu_set_seg_register(emu, emu->x86.seg + R_ES_INDEX, 0); emu->x86.R_DI = eb;
         rc = run_int(emu, 0x10, 40000000);
         fprintf(stderr, "VBE 4F15 BL=1: rc=%d ax=%04x\n", rc, emu->x86.R_AX);
         for (k = 0; k < 128; k += 16) { unsigned j; fprintf(stderr, "  EDID %02x:", k); for (j = 0; j < 16; j++) fprintf(stderr, " %02x", x86emu_read_byte_noperm(emu, eb + k + j)); fprintf(stderr, "\n"); }
