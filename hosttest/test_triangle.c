@@ -108,12 +108,14 @@ int main(void)
     if (cb.overflow) { printf("\nFAIL: overflow\n"); fail = 1; }
     if (!tri_ok)     { printf("\nFAIL: triangle reported degenerate\n"); fail = 1; }
 
-    /* 12 state + 3 vertices(7 each) + 1 trigger + 1 terminator = 17 packets;
-     * 12 + 21 + 1 + 1 = 35 registers.  (State gained ALPHA_TST_CNTL 0x550 with the
-     * GL_ALPHA_TEST work; DP_FOG_CLR is emitted only when fog is armed, so it does
-     * not count here -- dp_fog_clr==0 in this fixture.) */
-    if (npackets != 17) { printf("\nFAIL: expected 17 packets, got %d\n", npackets); fail = 1; }
-    if (nregs   != 35)  { printf("\nFAIL: expected 35 register writes, got %d\n", nregs); fail = 1; }
+    /* 13 state + 3 vertices(7 each) + 1 trigger + 1 terminator = 18 packets;
+     * 13 + 21 + 1 + 1 = 36 registers.  (State gained ALPHA_TST_CNTL 0x550 with the
+     * GL_ALPHA_TEST work and TEX_CNTL 0x774 -- cleared for untextured draws, commit 23f5424 --
+     * the expectation was stale at 17/35 and failed before the 2D work (Nov 26 fix);
+     * DP_FOG_CLR is emitted only when fog is armed, so it does not count here --
+     * dp_fog_clr==0 in this fixture.) */
+    if (npackets != 18) { printf("\nFAIL: expected 18 packets, got %d\n", npackets); fail = 1; }
+    if (nregs   != 36)  { printf("\nFAIL: expected 36 register writes, got %d\n", nregs); fail = 1; }
 
     /* The terminator MUST be last and target SRC_CNTL=0 (flushes the ring). */
     {
