@@ -7,7 +7,8 @@
 #include <string.h>
 #include "gld.h"
 
-#define MACH64_RENDERER_ID  0x00002540
+#define MACH64_CAP_FLAGS    0x00002540   /* +0x08 flag word (unchanged value; was mis-named renderer_id) */
+#define MACH64_RENDERER_ID  0x00001100   /* +0x04; Apple: Rage128 0x1000, Radeon 0x1200, unused 0x1100 */
 extern void mach64_tex_ctx_gone(rgb_t *rb);
 
 int gldGetRendererInfo(gld_renderer_info *out, uint32_t renderer_mask)
@@ -19,6 +20,7 @@ int gldGetRendererInfo(gld_renderer_info *out, uint32_t renderer_mask)
       (void)IOConnectMethodScalarIScalarO(b.conn, 0 /* RAGE_GL_INFO */, 0, 4, &g, &f, &e, &fl); vram = e; }
     memset(out, 0, sizeof *out);
     out->renderer_id   = MACH64_RENDERER_ID;
+    out->flags         = MACH64_CAP_FLAGS;
     out->buffer_modes  = 0xd;
     out->caps_accel    = 0x8400;
     out->caps_color    = 0x808000;

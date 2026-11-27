@@ -22,19 +22,7 @@ static inline float gld_flt(uint32_t u) { float f; __builtin_memcpy(&f, &u, 4); 
  * Offsets recovered from ATIRage128GLDriver`gldGetRendererInfo.  The
  * framework reads these to decide HW-vs-software and to publish caps.
  */
-typedef struct {
-    uint32_t handle;        /* 0x00 renderer handle                       */
-    uint32_t device_id;     /* 0x04 (idx<<24)|devmask                     */
-    uint32_t renderer_id;   /* 0x08 e.g. 0x2513 (Rage128); pick a new one */
-    uint32_t buffer_modes;  /* 0x0c                                       */
-    uint32_t caps_accel;    /* 0x10 accelerated + buffer-mode bits        */
-    uint32_t caps_color;    /* 0x14 color/depth-mode bits                 */
-    uint32_t caps_misc;     /* 0x18 texture/misc                          */
-    uint32_t max_something;  /* 0x1c                                       */
-    uint8_t  _pad[0x14];    /* 0x20..0x2f (shorts + a byte, see disasm)    */
-    uint32_t video_memory;  /* 0x30 VRAM bytes                            */
-    uint32_t texture_memory; /* 0x34 texture memory bytes                 */
-} gld_renderer_info;
+#include "gld_renderer_info.h"
 
 /* ---- Pixel format (gld_pixelformat.c) -------------------------------
  * Our private object returned by gldChoosePixelFormat and handed back to
