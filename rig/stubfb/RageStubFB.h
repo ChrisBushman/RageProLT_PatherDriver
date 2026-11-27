@@ -46,6 +46,10 @@ class RageStubFB : public IOFramebuffer
     void wr(UInt32 reg, UInt32 val);
     void checkDisplay(bool unblank);
     void probeAccelerator(void);
+    /* B2b (opt-in, Info.plist RagePM): behave like IONDRVFramebuffer toward IOGraphics: 3 power states and the NDRV's event sequence, NO chip writes (docs/re-notes/sleep-wake-plan.md 2.2) */
+    bool fPM; UInt32 fPmState;
+    void initForPM(IOService *provider);
+    IOReturn pmSetPower(UInt32 state);
     void notifyModeChange(void);
     /* DDC2B (I2C) over GP_IO: reads the monitor's EDID */
     void ddcSet(int clk, int dat);

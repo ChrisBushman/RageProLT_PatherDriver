@@ -180,6 +180,7 @@ bool RageStubFB::start(IOService *provider)
 {
     fPCI = OSDynamicCast(IOPCIDevice, provider);
     if (!fPCI) return false;
+    fPM = false; fPmState = 2;
     fRegMap = 0; fRegs = 0; fFbOff = 0; fCurOk = fCurVis = fCurPos = false; fCurX = fCurY = 0; fCurMap = 0; fCurImg = 0; fCurLock = IOLockAlloc();
     { OSBoolean *wc = OSDynamicCast(OSBoolean, getProperty("RageWriteCombine")); fWC = wc && wc->isTrue(); }   /* default off */
     { OSBoolean *hc = OSDynamicCast(OSBoolean, getProperty("RageHwCursor")); fHwCursorOff = !(hc && hc->isTrue()); }   /* opt-in: Info.plist RageHwCursor (a failed conversion leaves IOFramebuffer without a working software cursor: panic, Nov 26) */
@@ -194,7 +195,42 @@ bool RageStubFB::start(IOService *provider)
     checkDisplay(true);   /* nothing opens this framebuffer yet (no WindowServer), so do it here too */
     probeEdid();
     probeAccelerator();
+    { OSBoolean *pm = OSDynamicCast(OSBoolean, getProperty("RagePM")); fPM = pm && pm->isTrue(); fPmState = 2; }
+    if (fPM) initForPM(provider);
     return true;
+}
+
+/* B2b: register as a power-managed framebuffer.  The states are the ones IONDRVFramebuffer::initForPM registers (decoded from IONDRVSupport 10.3.9: template at __const+0x10f78):
+ *   0: nothing     1: input requirement kIOPMPowerOn     2: capability DeviceUsable, output PowerOn, input PowerOn
+ * IOFramebuffer implements setPowerState and calls the subclass with the 'powr' attribute (setAttribute below -> pmSetPower). */
+void RageStubFB::initForPM(IOService *provider)
+{
+    static IOPMPowerState states[3] = {
+        { kIOPMPowerStateVersion1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
+        { kIOPMPowerStateVersion1, 0, 0, kIOPMPowerOn, 0, 0, 0, 0, 0, 0, 0, 0 },
+        { kIOPMPowerStateVersion1, kIOPMDeviceUsable, kIOPMPowerOn, kIOPMPowerOn, 0, 0, 0, 0, 0, 0, 0, 0 } };
+    PMinit();
+    registerPowerDriver(this, states, 3);
+    provider->joinPMtree(this);
+    IOLog("RageStubFB: power management registered (3 states, no chip writes)\n");
+}
+
+/* The NDRV's ndrvSetPowerState event sequence (sleep-wake-plan.md 2.2) without its chip work: leaving state 2 -> (7,0); entering state 2 -> (6,0); entering state 0 -> (3, info 1);
+ * leaving state 0 -> (4, info 1); the closing event is (5,0) when the new state is below 2 and (8,0) when it is 2.  The stub never touches the chip here, so the chip stays live
+ * (which is what makes the kext's notifier path testable on this rig). */
+IOReturn RageStubFB::pmSetPower(UInt32 state)
+{
+    UInt32 prev = fPmState;
+    if (state > 2) state = 2;
+    IOLog("RageStubFB: power state %u -> %u\n", (unsigned)prev, (unsigned)state);
+    if (state == prev) return kIOReturnSuccess;
+    if (prev == 2 && state < 2) handleEvent(kIOFBNotifyWillPowerOff, 0);
+    if (state == 2 && prev < 2) handleEvent(kIOFBNotifyWillPowerOn, 0);
+    if (state == 0 && prev != 0) handleEvent(kIOFBNotifyWillSleep, (void *)1);
+    fPmState = state;
+    if (prev == 0 && state != 0) handleEvent(kIOFBNotifyDidWake, (void *)1);
+    handleEvent(state == 2 ? kIOFBNotifyDidPowerOn : kIOFBNotifyDidPowerOff, 0);
+    return kIOReturnSuccess;
 }
 
 /* IOATIRProAccelerator::start only scans for framebuffers itself on old UniNorth (device-rev <= 6); otherwise it relies on
@@ -389,6 +425,7 @@ IOReturn RageStubFB::setProperties(OSObject *props)
 void RageStubFB::stop(IOService *provider)
 {
     IOLog("RageStubFB: stop\n");
+    if (fPM) { PMstop(); fPM = false; }
     if (fCurMap) { fCurMap->release(); fCurMap = 0; fCurImg = 0; }
     if (fCurLock) { IOLockFree(fCurLock); fCurLock = 0; }
     if (fRegMap) { fRegMap->release(); fRegMap = 0; fRegs = 0; }
@@ -612,6 +649,7 @@ IOReturn RageStubFB::setCLUTWithEntries(IOColorEntry *, UInt32 index, UInt32 n, 
 IOReturn RageStubFB::setGammaTable(UInt32 ch, UInt32 cnt, UInt32 w, void *) { IOLog("RageStubFB: setGammaTable(channels %u, count %u, width %u)\n", (unsigned)ch, (unsigned)cnt, (unsigned)w); return kIOReturnSuccess; }
 IOReturn RageStubFB::setAttribute(IOSelect attribute, UInt32 value)
 {
+    if (attribute == kIOPowerAttribute && fPM) return pmSetPower(value);
     IOReturn r = super::setAttribute(attribute, value);
     IOLog("RageStubFB: setAttribute('%c%c%c%c', 0x%x) -> 0x%x\n", FOURCC(attribute), (unsigned)value, (unsigned)r); return r;
 }

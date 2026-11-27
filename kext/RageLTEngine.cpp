@@ -33,6 +33,11 @@ IOReturn RageLTDevice::engineEnable(void)
     bus = eng_rd(fRegs, MACH64_BUS_CNTL); gen = eng_rd(fRegs, RAGE_R_CRTC_GEN_CNTL);
     if (!(bus & (1u << 27)) || !(gen & (1u << 25))) { logEvent(RAGE_EV_ERROR, 0, 0xe0010000u, bus, gen, 0, 0); return kIOReturnNotReady; }
     if (eng_reset(fRegs, 0)) { logEvent(RAGE_EV_ERROR, 0, 0xe0020000u, 0, 0, 0, 0); return kIOReturnNotReady; }
+    {   /* aperture byte-order guard (byte-order-reconcile.md item 1): LOWER_APER_ENDIAN (MEM_CNTL bits 25:24) non-zero means the lower view is byte-swapped, so the byte-image paths would silently corrupt data: refuse them (loud in the log) */
+        uint32_t mem = eng_rd(fRegs, RAGE_R_MEM_CNTL); fAperEndianBad = ((mem >> 24) & 3u) != 0;
+        logEvent(RAGE_EV_MARK, 0, 0xe0040000u, mem, fAperEndianBad ? 1u : 0u, (mem >> 26) & 3u, (mem >> 24) & 3u);
+        if (fAperEndianBad) LOG("MEM_CNTL 0x%x: LOWER_APER_ENDIAN is %u, the byte-image paths (texture upload / readback) are refused\n", mem, (mem >> 24) & 3u);
+    }
     eng_init_context(fRegs, 8);
     eng_wq(fRegs, 0x0304, 0);                                  /* SETUP_CNTL: plain integer coordinates (design 11.11) */
     if (idleWait()) return kIOReturnNotReady;
@@ -200,6 +205,7 @@ IOReturn RageLTDevice::fenceWait(uint32_t seq)
 IOReturn RageLTDevice::waitFence(uint32_t seq)
 {
     if ((int32_t)(fFenceCompleted - seq) >= 0) return kIOReturnSuccess;
+    if (!chipLive()) return kIOReturnNotReady;
     if (fDmaPending && dmaWait()) return kIOReturnTimeout;
     if (idleWait()) {
         pf_err++;

@@ -1,7 +1,7 @@
 # Build on the Panther host: make -C tools/ragegl
 CFLAGS ?= -O2 -Wall -I../../common
 BUNDLE_SRC = ../../gldriver/gld_core.c ../../gldriver/gld_context.c ../../gldriver/gld_entry.c ../../gldriver/gld_prims.c ../../gldriver/gld_dispatch.c ../../gldriver/gld_pixelformat.c ../../gldriver/gld_cgs.c ../../gldriver/gld_glue.c ../../gldriver/gld_pixels.c ../../gldriver/gld_texture.c ../../gldriver/gld_stencil.c ../../gldriver/rage_backend.c ../../common/mach64_emit.c
-all: scale_ab default_vsync tear_test cgl_offscreen sleep_probe present_bench aperture_user aperture_bench twod_test twod_bench ga_probe scanshot ragegl_test depth32_test alpha_test alpha16_test ovl_dump ovl_b0 ovl_b ovl_off ovl_flip ovl_sweep ovl_blocks ovl_probe ovl_gate fb_layout cursor_guard quad_test fs_test ragegl_bench xfer_test gldcore_test bundle_test gl_suite
+all: sleep_sim scale_ab default_vsync tear_test cgl_offscreen sleep_probe present_bench aperture_user aperture_bench twod_test twod_bench ga_probe scanshot ragegl_test depth32_test alpha_test alpha16_test ovl_dump ovl_b0 ovl_b ovl_off ovl_flip ovl_sweep ovl_blocks ovl_probe ovl_gate fb_layout cursor_guard quad_test fs_test ragegl_bench xfer_test gldcore_test bundle_test gl_suite
 ga_probe: ga_probe.c
 	cc $(CFLAGS) -o $@ ga_probe.c -framework IOKit -framework CoreFoundation
 twod_bench: twod_bench.c ragegl.h
@@ -75,3 +75,6 @@ default_vsync: default_vsync.c ragegl.h
 
 scale_ab: scale_ab.c ragegl.h
 	cc $(CFLAGS) -o $@ scale_ab.c -framework IOKit -framework CoreFoundation
+
+sleep_sim: sleep_sim.c ragegl.h
+	cc $(CFLAGS) -o $@ sleep_sim.c -framework IOKit -framework CoreFoundation

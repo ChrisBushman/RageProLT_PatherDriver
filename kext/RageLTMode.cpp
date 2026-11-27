@@ -26,6 +26,7 @@ void RageLTDevice::modeStart(void)
 {
     uint32_t i;
     fModeGen = 0; fModeDepth = 0; fNumFB = 0; fFBPublish = 0;
+    rage_pm_init(&fPm); fAperEndianBad = false; fPmLock = IOLockAlloc();
     for (i = 0; i < RAGE_MAX_FB; i++) { fFBs[i] = 0; fFBNotify[i] = 0; }
     fDisp.base = fDisp.pitch_px = fDisp.w = fDisp.h = fDisp.bpp = fDisp.depth = 0;
     fFBPublish = addNotification(gIOPublishNotification, serviceMatching("IOFramebuffer"), (IOServiceNotificationHandler)&fbPublishedTramp, this, 0);
@@ -38,6 +39,7 @@ void RageLTDevice::modeStop(void)
     if (fFBPublish) { fFBPublish->remove(); fFBPublish = 0; }
     for (i = 0; i < fNumFB; i++) if (fFBNotify[i]) { fFBNotify[i]->remove(); fFBNotify[i] = 0; }
     fNumFB = 0;
+    if (fPmLock) { IOLockFree(fPmLock); fPmLock = 0; }
 }
 
 bool RageLTDevice::fbPublished(IOService *svc)
@@ -60,11 +62,23 @@ bool RageLTDevice::fbPublished(IOService *svc)
 
 IOReturn RageLTDevice::fbEvent(IOFramebuffer *fb, IOIndex event, void *info)
 {
-    bool will = (event == kIOFBNotifyDisplayModeWillChange) || (event == kIOFBNotifyWillSleep && !info);
-    bool did  = (event == kIOFBNotifyDisplayModeDidChange)  || (event == kIOFBNotifyDidWake && !info);
+    uint32_t inf = (uint32_t)(uintptr_t)info; int a;
+    bool will = (event == kIOFBNotifyDisplayModeWillChange) || (event == kIOFBNotifyWillSleep && !inf);
+    bool did  = (event == kIOFBNotifyDisplayModeDidChange)  || (event == kIOFBNotifyDidWake && !inf);
     (void)fb;
-    if (will) { if (OSIncrementAtomic((SInt32 *)&fModeDepth) == 0) modeWillChange(); }
-    else if (did) { if (fModeDepth > 0 && OSDecrementAtomic((SInt32 *)&fModeDepth) == 1) modeDidChange(); }
+#if RAGE_FEAT_SLEEPWAKE
+    if (event == kIOFBNotifyWillSleep && inf) { systemWillSleep(); return kIOReturnSuccess; }      /* the NDRV's chip suspend pair (plan 2.2): RageLTPower.cpp */
+    if (event == kIOFBNotifyDidWake && inf)   { systemDidWake();   return kIOReturnSuccess; }
+    if (!will && !did) { logEvent(RAGE_EV_MARK, 0, 0xe0050000u | ((uint32_t)event & 0xffffu), inf, 0, 0, 0); return kIOReturnSuccess; }   /* events 5-10: not ours (same as stock) */
+#endif
+    if (will) {
+        IOLockLock(fPmLock); a = rage_pm_will(&fPm); IOLockUnlock(fPmLock);
+        if (a & RAGE_PM_RUN_WILL) modeWillChange();
+    } else if (did) {
+        IOLockLock(fPmLock); a = rage_pm_did(&fPm); IOLockUnlock(fPmLock);
+        if (a & RAGE_PM_RUN_DID) modeDidChange();
+        else if (a & RAGE_PM_DUP) logEvent(RAGE_EV_MARK, 0, 0xe0050001u, (uint32_t)event, inf, 0, 0);       /* a did without its will: ignored, visible in the log */
+    }
     return kIOReturnSuccess;
 }
 
@@ -74,7 +88,7 @@ void RageLTDevice::modeWillChange(void)
     OSIncrementAtomic((SInt32 *)&fModeGen);                     /* odd: changing */
     IOLockLock(fLock);
     if (fOvlOwner) { (void)ovlDisableLocked(); fOvlOwner = 0; }     /* the scaler reads VRAM the framebuffer is about to re-lay out */
-    if (fEngineLive) (void)idleWait();                /* drain; a stuck engine is reset at the next engineEnable */
+    if (fEngineLive && chipLive()) (void)idleWait();  /* drain; a stuck engine is reset at the next engineEnable (never while the chip is asleep) */
     for (k = 0; k < RAGE_MAX_CTX; k++) if (fCtx[k].owner) { fCtx[k].tgt_bpp = 0; fCtx[k].z_set = 0; }   /* every cached offset is stale after the framebuffer re-lays VRAM */
     if (fDispReserved) {
         rage_vram_unreserve(&fVram, fDisp.base);
@@ -279,6 +293,7 @@ IOReturn RageLTDevice::vramCopyIn(uint32_t owner, uint32_t off, const uint8_t *s
     volatile uint8_t *vram = (volatile uint8_t *)fMap->getVirtualAddress(); uint32_t i; IOReturn rc = kIOReturnBadArgument;
     if ((off | len) & 3u || !len || len > 0x100000u || (flags & ~3u)) return kIOReturnBadArgument;
     IOLockLock(fLock);
+    if (!chipOK() || fAperEndianBad) { IOLockUnlock(fLock); return kIOReturnNotReady; }      /* sleep / mode change / swapped aperture: no chip or aperture access */
     if (rage_vram_owns(&fVram, off, len, owner)) {
         rc = kIOReturnSuccess;
         if (fEngineLive && idleWait()) rc = kIOReturnTimeout;      /* the CPU must not touch the aperture while the engine writes it */
@@ -299,6 +314,7 @@ IOReturn RageLTDevice::vramCopyOut(uint32_t owner, uint32_t off, uint8_t *dst, u
     volatile uint8_t *vram = (volatile uint8_t *)fMap->getVirtualAddress(); uint32_t i; IOReturn rc = kIOReturnBadArgument;
     if ((off | len) & 3u || !len || len > 0x100000u || (flags & ~3u)) return kIOReturnBadArgument;
     IOLockLock(fLock);
+    if (!chipOK() || fAperEndianBad) { IOLockUnlock(fLock); return kIOReturnNotReady; }      /* sleep / mode change / swapped aperture: no chip or aperture access */
     if (rage_vram_owns(&fVram, off, len, owner)) {
         rc = kIOReturnSuccess;
         if (fEngineLive && idleWait()) rc = kIOReturnTimeout;
@@ -320,6 +336,7 @@ IOReturn RageLTDevice::vramCopyOut(uint32_t owner, uint32_t off, uint8_t *dst, u
 static inline void ovlw(volatile uint8_t *regs, uint32_t off, uint32_t v) { OSWriteLittleInt32((volatile void *)regs, off, v); eieio(); }
 IOReturn RageLTDevice::ovlDisableLocked(void)
 {
+    if (!chipLive()) return kIOReturnNotReady;         /* asleep: the overlay was disabled before the chip suspended; never write a suspended chip */
     ovlw(fRegs, 0x018, 0x110u);          /* OVERLAY_KEY_CNTL: video never shown */
     ovlw(fRegs, 0x024, 0u);              /* OVERLAY_SCALE_CNTL: scaler and overlay off */
     return kIOReturnSuccess;
@@ -350,6 +367,7 @@ IOReturn RageLTDevice::ovlOn(uint32_t owner, uint32_t off, uint32_t pitch_px, ui
     if (!owner || !sw || !sh || !dw || !dh || sw > 720u || (pitch_px & 3u) || pitch_px < sw || (off & 7u) || (bpp < 2u || bpp > 4u) || ((pitch_px * (bpp == 4u ? 4u : 2u)) & 7u)) return kIOReturnBadArgument;   /* quadword-aligned offset and pitch, width limit of this family */
     bytes = bpp == 4u ? 4u : 2u;                                   /* bpp 3 (debug builds only) = packed VYUY 4:2:2 video, 2 bytes per pixel */
     IOLockLock(fLock);
+    if (!chipOK()) { IOLockUnlock(fLock); return kIOReturnNotReady; }
     if (fOvlOwner) rc = kIOReturnBusy;
     else if (OSReadLittleInt32((volatile void *)fRegs, 0x024) != 0 ||
              (OSReadLittleInt32((volatile void *)fRegs, 0x018) != 0 && OSReadLittleInt32((volatile void *)fRegs, 0x018) != 0x110u)) rc = kIOReturnNotPermitted;   /* the overlay must be idle: scaler off, key control power-on (0) or our hidden state (0x110) */
@@ -385,6 +403,7 @@ IOReturn RageLTDevice::ovlFlip(uint32_t owner, uint32_t off)
     IOReturn rc = kIOReturnNotPermitted;
     if (off & 7u) return kIOReturnBadArgument;
     IOLockLock(fLock);
+    if (!chipOK()) { IOLockUnlock(fLock); return kIOReturnNotReady; }
     if (fOvlOwner && fOvlOwner == owner) {
         if (!rage_vram_owns(&fVram, off, (uint64_t)fOvlPitch * fOvlBpp * fOvlH, owner)) rc = kIOReturnBadArgument;
         else { ovlw(fRegs, 0x034, off); ovlw(fRegs, 0x038, off); fOvlOff = off; rc = kIOReturnSuccess; }          /* SCALER_BUF0/BUF1_OFFSET */
@@ -409,6 +428,7 @@ IOReturn RageLTDevice::regDump(uint32_t *pairs, uint32_t maxPairs, uint32_t *n)
     uint32_t i, k = 0;
     if (maxPairs < sizeof b1 / 2 + sizeof b0 / 2 + 1) return kIOReturnNoSpace;
     IOLockLock(fLock);
+    if (!chipOK()) { IOLockUnlock(fLock); return kIOReturnNotReady; }
     for (i = 0; i < sizeof b1 / 2; i++) { pairs[2 * k] = 0x100u | b1[i]; pairs[2 * k + 1] = OSReadLittleInt32((volatile void *)fRegs, b1[i] * 4u); k++; }
     for (i = 0; i < sizeof b0 / 2; i++) { pairs[2 * k] = b0[i]; pairs[2 * k + 1] = OSReadLittleInt32((volatile void *)fRegs, 0x400u + b0[i]); k++; }
     pairs[2 * k] = 0xf00u; pairs[2 * k + 1] = fPCI->configRead32(0x08); k++;
@@ -424,6 +444,7 @@ IOReturn RageLTDevice::ovlB0(uint32_t *before, uint32_t *readback, uint32_t *aft
     const uint32_t kKeyClr = 0x008, kScaleCntl = 0x024, kKeyCntl = 0x018;
     IOReturn rc = kIOReturnSuccess; uint32_t orig;
     IOLockLock(fLock);
+    if (!chipOK()) { IOLockUnlock(fLock); return kIOReturnNotReady; }
     if (OSReadLittleInt32((volatile void *)fRegs, kScaleCntl) != 0 || OSReadLittleInt32((volatile void *)fRegs, kKeyCntl) != 0) rc = kIOReturnNotPermitted;   /* the overlay must be idle */
     else {
         orig = OSReadLittleInt32((volatile void *)fRegs, kKeyClr);
@@ -444,6 +465,7 @@ IOReturn RageLTDevice::scanoutCopyOut(uint32_t byteOff, uint8_t *dst, uint32_t l
     uint64_t size;
     if ((byteOff | len) & 3u || !len || len > 0x100000u) return kIOReturnBadArgument;
     IOLockLock(fLock);
+    if (!chipOK() || fAperEndianBad) { IOLockUnlock(fLock); return kIOReturnNotReady; }
     size = (uint64_t)fDisp.pitch_px * fDisp.h * fDisp.bpp;
     if (fDispReserved && byteOff + (uint64_t)len <= size && rage_vram_span_ok(fDisp.base + byteOff, len)) {
         rc = kIOReturnSuccess;

@@ -110,6 +110,7 @@ IOReturn RageLTDevice::xferReserve(uint8_t **stage, uint32_t *maxBytes)
 {
     IOReturn rc = kIOReturnSuccess;
     if (!fXferOk || !fXferUse || !fEngineLive) return kIOReturnUnsupported;
+    if (!chipOK() || fAperEndianBad) return kIOReturnNotReady;
     IOLockLock(fStageLock);
     IOLockLock(fLock);
     if (fXferPending) rc = xferWait();                                  /* the stage is rewritten only after the previous transfer has finished */
@@ -128,6 +129,7 @@ IOReturn RageLTDevice::xferKick(uint32_t owner, uint32_t off, uint32_t len, uint
     if (flags) rage_xfer_inplace((uint8_t *)fXferStageKva, len, flags);   /* cached stores; the stage is ours alone (stage lock) and no transfer is in flight */
     nd = (len + XFER_DESC - 1u) / XFER_DESC;
     IOLockLock(fLock);
+    if (!chipOK() || fAperEndianBad) { IOLockUnlock(fLock); IOLockUnlock(fStageLock); return kIOReturnNotReady; }      /* before idleWait, whose failure would switch DMA upload off for good */
     if (!rage_vram_owns(&fVram, off, len, owner)) { IOLockUnlock(fLock); IOLockUnlock(fStageLock); return kIOReturnBadArgument; }
     rc = idleWait();                                                    /* engine idle: the destination may be in use by a draw; also finishes any GUI stream */
     if (rc) { fXferUse = false; IOLockUnlock(fLock); IOLockUnlock(fStageLock); return rc; }
@@ -155,6 +157,7 @@ IOReturn RageLTDevice::xferWait(void)
 {
     volatile uint8_t *vram = (volatile uint8_t *)fMap->getVirtualAddress(); uint32_t spins, last, want; bool done = false;
     if (!fXferPending) return kIOReturnSuccess;
+    if (!chipLive()) return kIOReturnNotReady;
     last = fXferDst + fXferLen - 4u;
     want = OSReadLittleInt32((void *)fXferStageKva, fXferLen - 4u);
     for (spins = 0; spins < RAGE_WAIT_SPINS; spins++) {
@@ -186,6 +189,7 @@ IOReturn RageLTDevice::dmaWait(void)
 {
     uint32_t spins, idle = 0, end;
     if (!fDmaPending) return kIOReturnSuccess;
+    if (!chipLive()) return kIOReturnNotReady;
     if (fXferPending) { IOReturn xr = xferWait(); if (xr) { fDmaPending = fGuiPending; return xr; } }   /* a texture/pixel upload in flight is always finished first */
     if (!fGuiPending) { fDmaPending = false; return kIOReturnSuccess; }
     end = fDmaEnd;                                                     /* table end of the stream in flight (set at its kick) */
@@ -215,6 +219,7 @@ IOReturn RageLTDevice::dmaSubmit(const struct rage_ctx *c, const uint32_t *pairs
 {
     uint32_t n = 0, i, bytes, off, nd = 0, b = fDmaCmd2 ? fDmaCur : 0u, cmdBus, ringBus, t_a = tbl32(), t_b, t_c; IOReturn rc;
     volatile uint32_t *w = (volatile uint32_t *)(b ? fDmaCmdKva2 : fDmaCmdKva); volatile uint8_t *tab = fDmaRingKva + b * DMA_TABLE_STRIDE;
+    if (!chipOK()) return kIOReturnNotReady;
     cmdBus = b ? fDmaCmdBus2 : fDmaCmdBus; ringBus = fDmaRingBus + b * DMA_TABLE_STRIDE;
     if (!fDmaCmd2) { rc = dmaWait(); if (rc) return rc; }              /* single buffer: the previous stream must be finished before its memory is rewritten */
 #define PUT(reg, val) do { OSWriteLittleInt32((void *)w, 4u * n, MACH64_ADRINDEX(reg)); OSWriteLittleInt32((void *)w, 4u * n + 4u, (val)); n += 2; } while (0)
@@ -318,6 +323,7 @@ IOReturn RageLTDevice::dmaSubmit(const struct rage_ctx *, const uint32_t *, uint
 IOReturn RageLTDevice::idleWait(void)
 {
     uint32_t t0, t1; IOReturn rc;
+    if (!chipLive()) return kIOReturnNotReady;    /* asleep: never read a suspended chip (sleep/wake plan, risk 1) */
     __asm__ volatile("sync" ::: "memory");        /* B1g-5: drain any write-combined CPU stores into VRAM (e.g. WindowServer's) before the engine reads or overwrites it */
     t0 = tbl32(); rc = dmaWait();
     t1 = tbl32(); pf_oth_dma += (t1 - t0) >> 2; pf_oth_n++;

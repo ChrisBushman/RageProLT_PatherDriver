@@ -10,6 +10,7 @@
 #include <IOKit/graphics/IOAccelSurfaceConnect.h>
 #include "features.h"
 #include "rage_vram.h"
+#include "rage_pm.h"
 #include "rage_abi.h"
 
 /* Per-client drawing context (design 3.1 RageLTEngine).  The KERNEL owns all of it: a client can only ask for values that are checked against what it
@@ -66,7 +67,10 @@ class RageLTDevice : public ATIRagePro
     struct rage_ctx      fCtx[RAGE_MAX_CTX];
     struct rage_display  fDisp;
     struct rage_surface  fSurf[RAGE_MAX_SURF];
-    uint32_t               fModeGen, fModeDepth;               /* odd gen = a mode change is in progress; all targets invalid */
+    uint32_t               fModeGen, fModeDepth;               /* odd gen = a mode change is in progress; all targets invalid (fModeDepth is unused: the nesting lives in fPm) */
+    struct rage_pm         fPm;                                 /* will/did nesting + the system-sleep flag (common/rage_pm.h, host-tested) */
+    IOLock                *fPmLock;                             /* guards fPm only; side effects run outside it */
+    bool                   fAperEndianBad;                      /* MEM_CNTL LOWER_APER_ENDIAN (bits 25:24) is non-zero: the byte-image paths (vramCopyIn/Out, scanoutCopyOut, xferKick) refuse (byte-order-reconcile.md item 1) */
     IONotifier          *fFBPublish;
     IOFramebuffer       *fFBs[RAGE_MAX_FB];
     IONotifier          *fFBNotify[RAGE_MAX_FB];
@@ -138,6 +142,12 @@ public:
     IOReturn     exec2D(const struct rage2d_op *ops, uint32_t n);                 /* B1b: validated abstract 2D ops on the scanout (RageLT2D.cpp) */
     IOReturn     finish2D(void);                                                    /* wait until the engine is idle (type-2 client 'finish') */
     uint32_t       modeGen(void) const { return fModeGen; }
+    /* chip gate: may the chip (registers or aperture) be touched now?  False during a mode change (gen odd) and while the chip is asleep (a read of a suspended chip hangs the CPU) */
+    bool           chipOK(void) const { return rage_pm_chip_ok(&fPm, fModeGen) != 0; }
+    bool           chipLive(void) const { return !fPm.asleep; }                /* weaker: only 'not asleep'; for waits that must still be able to finish a mode change's drain */
+    void           systemWillSleep(void);                                       /* (WillSleep, info != 0): RageLTPower.cpp */
+    void           systemDidWake(void);                                         /* (DidWake, info != 0) */
+    void           simEvent(uint32_t event, uint32_t info) { (void)fbEvent(0, (IOIndex)event, (void *)(uintptr_t)info); }   /* debug: run the notifier path without IOGraphics (RAGE_GL_CONFIG key 20) */
     /* mode changes (RageLTMode.cpp) */
     void         modeWillChange(void);
     void         modeDidChange(void);

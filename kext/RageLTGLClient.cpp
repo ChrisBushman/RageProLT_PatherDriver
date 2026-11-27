@@ -27,7 +27,7 @@ bool RageLTGLClient::start(IOService *provider)
     if (!fDev) return false;
     fBenchOff = fBenchLen = 0;
     /* The first GL client is the point where the chip is first READ (it is known to be initialised by the framebuffer by now). */
-    if (fDev->engineEnable() != kIOReturnSuccess) { fDev = 0; return false; }
+    if (!fDev->chipOK() || fDev->engineEnable() != kIOReturnSuccess) { fDev = 0; return false; }       /* not while asleep or changing mode */
     if (fDev->reserveDisplay() != kIOReturnSuccess) { fDev = 0; return false; }
     fOwner = fDev->newOwner();
 #define M(i, fn, kind, nin, nout) do { IOExternalMethod e = { (IOService *)0, (IOMethod)&RageLTGLClient::fn, kind, nin, nout }; fMethods[i] = e; } while (0)
@@ -224,6 +224,9 @@ IOReturn RageLTGLClient::selPresentScaled(uint32_t s, uint32_t sz, uint32_t d, u
 IOReturn RageLTGLClient::selConfig(uint32_t key, uint32_t value)
 {
     if (!fDev) return kIOReturnNotAttached;
+#if RAGE_DEBUG_ENGTEST
+    if (key == 20) { fDev->simEvent(value & 0xffu, value >> 8); return kIOReturnSuccess; }          /* debug: inject a framebuffer notification (event | info << 8), e.g. 3|1<<8 = system will sleep */
+#endif
     if (key == 9 || key == 10) { fDev->vsyncConfig(key, value); return kIOReturnSuccess; }   /* v-sync experiment */
     if (key >= 3 && key <= 8) { fDev->quadConfig(key, value); return kIOReturnSuccess; }   /* textured-quad present biases (experiment) */
     if (key != 1 && key != 2) return kIOReturnBadArgument;      /* 1 = DMA batch submission, 2 = DMA texture/pixel upload */

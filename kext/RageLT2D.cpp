@@ -101,7 +101,7 @@ bool RageLT2DClient::start(IOService *provider)
     if (!super::start(provider)) return false;
     fDev = OSDynamicCast(RageLTDevice, provider);
     if (!fDev) return false;
-    if (fDev->engineEnable() != kIOReturnSuccess || fDev->reserveDisplay() != kIOReturnSuccess) { fDev = 0; return false; }   /* as the GL client: only after the chip is known to be initialised */
+    if (!fDev->chipOK() || fDev->engineEnable() != kIOReturnSuccess || fDev->reserveDisplay() != kIOReturnSuccess) { fDev = 0; return false; }   /* as the GL client: only after the chip is known to be initialised */
     fLock = IOLockAlloc();
     fOps = (struct rage2d_op *)IOMalloc(RAGE2D_MAXOPS * sizeof(struct rage2d_op));
     if (!fLock || !fOps) return false;
