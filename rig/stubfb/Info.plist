@@ -28,7 +28,6 @@
       <key>RageReplayInit</key>      <true/>
       <key>RageNdrvLayout</key>      <true/>
       <key>RageHwCursor</key>        <true/>
-      <key>RagePM</key>              <true/>
     </dict>
   </dict>
 </dict>

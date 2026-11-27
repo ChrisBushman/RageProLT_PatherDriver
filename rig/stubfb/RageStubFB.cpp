@@ -195,8 +195,6 @@ bool RageStubFB::start(IOService *provider)
     checkDisplay(true);   /* nothing opens this framebuffer yet (no WindowServer), so do it here too */
     probeEdid();
     probeAccelerator();
-    { OSBoolean *pm = OSDynamicCast(OSBoolean, getProperty("RagePM")); fPM = pm && pm->isTrue(); fPmState = 2; }
-    if (fPM) initForPM(provider);
     return true;
 }
 
@@ -209,9 +207,8 @@ void RageStubFB::initForPM(IOService *provider)
         { kIOPMPowerStateVersion1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
         { kIOPMPowerStateVersion1, 0, 0, kIOPMPowerOn, 0, 0, 0, 0, 0, 0, 0, 0 },
         { kIOPMPowerStateVersion1, kIOPMDeviceUsable, kIOPMPowerOn, kIOPMPowerOn, 0, 0, 0, 0, 0, 0, 0, 0 } };
-    PMinit();
+    /* like IONDRVFramebuffer::initForPM (disassembled): only registerPowerDriver -- the first version also called PMinit and joinPMtree and panicked the G4 at boot (Nov 27) */
     registerPowerDriver(this, states, 3);
-    provider->joinPMtree(this);
     IOLog("RageStubFB: power management registered (3 states, no chip writes)\n");
 }
 
@@ -418,6 +415,7 @@ IOReturn RageStubFB::setProperties(OSObject *props)
         if (!n) return kIOReturnBadArgument;
         fWC = n->unsigned32BitValue() ? true : false; IOLog("RageStubFB: aperture user mapping: %s\n", fWC ? "write-combine" : "default cache");
         return kIOReturnSuccess; }
+    if (d && d->getObject("rage-pm"))      { if (!fPM) { fPM = true; initForPM(fPCI); } return kIOReturnSuccess; }   /* B2b: on demand after boot, so a fault cannot loop the boot */
     if (d && d->getObject("rage-cursor-fill"))  { fillLowBlock(); return kIOReturnSuccess; }
     return super::setProperties(props);
 }
