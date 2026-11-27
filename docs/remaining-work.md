@@ -32,7 +32,9 @@ G4 reboots/recovery and panics acceptable; kext build/load on the G4 (not stock 
 - D6 full regression pass (T3, performance, GL suite, soak): before the next release, after the whole checklist is complete.
 
 ## Features (agreed to include)
-- B1 2D acceleration client (stock type 2, 16 selectors, IOCFPlugInTypes for ATIRageProGA.plugin)
+- B1a (user agreed Nov 26) Quartz acceleration study: what WindowServer/CoreGraphics require before using Quartz Extreme (GPU compositing) on a GPU, whether the Rage LT Pro can meet it, and whether CG's surface flush path passes through our type-0 client (so the CPU copy could move to blitter/DMA). If VRAM (8 MB) is the limit, discuss lowering requirements (QE only at lower resolution/bpp, downscaled assets, other memory users). Static first.
+- B1b 2D client for X11 only (stock type 2 is consumed only by libXplugin, not Quartz; see ga-2d-client-decode.md addendum). Small niche item, done last. Sub-items proposed (not yet agreed): class named ATIRagePro, IOCFPlugInTypes, 2D validator, DP_PIX_WIDTH reconcile, replay-from-shadow context owner, rig Info.plist patch.
+- Proposed from the B2 study (awaiting agreement): B2a RageLTPower.cpp (chipOK gate, info!=0 events, wake verify); B2b stub PM/event emitter; B2c host + ENGTEST sleep-sim; B2d staged user-attended G4 system sleep; B2e gate ungated chip-touching functions; B2f MEM_CNTL LOWER/UPPER_APER_ENDIAN guard.
 - B3 windowed-GL kernel protocol (type-1 stock layout, window rect / visible regions / surface id)
 - B4 video overlay and scaler (Y3/V1 tests need explicit go-ahead per run; include cursor-over-overlay check)
 - B5 RAGE_FEAT_FS_SCALE (hardware-scaler upscale for fullscreen 32 bpp; verify quality)
