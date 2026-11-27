@@ -41,7 +41,10 @@ enum {
     RAGE_GL_OVL_FLIP = 23,     /* in 1 {offset}: point the scaler at another buffer of the same size (owner only); applied by the chip at its next fetch (tearing possible) */
     RAGE_GL_SWAP_TARGET = 24,  /* in 1 {dstOffset}: copy the whole render target into another block of the caller's of the same size/pitch/format (2D engine blit) and make that block the render target; scissor, Z binding and every other state are kept (the overlay present: the target still holds the frame after the flip) */
     RAGE_GL_APERTURE_BENCH = 25, /* debug builds only (RAGE_DEBUG_ENGTEST), B1g-4: in 3 {offset, length, cache mode 0 inhibit/1 write-combine/2 write-through/3 copyback/4 default}, owner's own VRAM block; out 2 {ns per pass of 32-bit stores, ns per pass of 32-bit loads} (8 passes averaged) */
-    RAGE_GL_SEL_COUNT = 26
+    RAGE_GL_VRAM_WRITE_ROWS = 26, /* in 6 {offset, user address, rowbytes | nrows << 16, source pitch (bytes), destination pitch (bytes), flags}: copy nrows rows of rowbytes from the user buffer to VRAM at the destination pitch
+                                   * (rows need not be contiguous in either place).  rowbytes a multiple of 4, <= 4096; nrows 1..1024; flags bits 0-1 = swap as VRAM_WRITE, bits 8-12 = bytes (0, 4, 8, 12, 16) to replicate
+                                   * after every row from its own last bytes, bits 16-17 = extra rows (0..3) replicated from the last row.  The whole destination span must belong to the caller. */
+    RAGE_GL_SEL_COUNT = 27
 };
 #define RAGE_XFER_SWAP16 1u      /* VRAM_WRITE/READ flag: swap bytes inside every 16-bit unit */
 #define RAGE_XFER_SWAP32 2u      /* ... inside every 32-bit unit */

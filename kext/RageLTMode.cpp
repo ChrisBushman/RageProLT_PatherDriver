@@ -309,6 +309,28 @@ IOReturn RageLTDevice::vramCopyIn(uint32_t owner, uint32_t off, const uint8_t *s
     return rc;
 }
 
+IOReturn RageLTDevice::vramCopyRows(uint32_t owner, uint32_t off, const uint8_t *src, uint32_t rowBytes, uint32_t nrows, uint32_t dstPitch, uint32_t flags)
+{
+    volatile uint8_t *vram = (volatile uint8_t *)fMap->getVirtualAddress(); uint32_t i, r; IOReturn rc = kIOReturnBadArgument;
+    if ((off | rowBytes | dstPitch) & 3u || !rowBytes || !nrows || nrows > 1024u || rowBytes > 4112u || dstPitch < rowBytes || (flags & ~3u)) return kIOReturnBadArgument;
+    IOLockLock(fLock);
+    if (!chipOK() || fAperEndianBad) { IOLockUnlock(fLock); return kIOReturnNotReady; }      /* sleep / mode change / swapped aperture: no chip or aperture access */
+    if (rage_vram_owns(&fVram, off, (uint64_t)(nrows - 1u) * dstPitch + rowBytes, owner)) {
+        rc = kIOReturnSuccess;
+        if (fEngineLive && idleWait()) rc = kIOReturnTimeout;      /* the CPU must not touch the aperture while the engine writes it */
+        else {
+            volatile uint8_t *wv = fWCMap ? (volatile uint8_t *)fWCMap->getVirtualAddress() : vram;
+            for (r = 0; r < nrows; r++)
+                for (i = 0; i < rowBytes; i += 4) OSWriteLittleInt32((void *)wv, off + r * dstPitch + i, xfer_word(src + (size_t)r * rowBytes + i, flags));
+            __asm__ volatile("sync" ::: "memory");
+            (void)OSReadLittleInt32((void *)vram, off + (nrows - 1u) * dstPitch + rowBytes - 4u);     /* read back from the last word written: posted writes must have reached VRAM before the engine reads them */
+            __asm__ volatile("sync" ::: "memory");
+        }
+    }
+    IOLockUnlock(fLock);
+    return rc;
+}
+
 IOReturn RageLTDevice::vramCopyOut(uint32_t owner, uint32_t off, uint8_t *dst, uint32_t len, uint32_t flags)
 {
     volatile uint8_t *vram = (volatile uint8_t *)fMap->getVirtualAddress(); uint32_t i; IOReturn rc = kIOReturnBadArgument;

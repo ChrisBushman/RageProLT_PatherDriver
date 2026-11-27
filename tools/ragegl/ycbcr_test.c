@@ -16,8 +16,8 @@ static unsigned TEX_RECT = TEX_RECT_;   /* GL_TEXTURE_2D with the argument "2d" 
 #define S88R 0x85BB
 int main(int argc, char **argv)
 {
-    int soft = 0, rev = 0, a, rl = 0, cs = 0, sub = 0, twice = 0;
-    for (a = 1; a < argc; a++) { if (!strcmp(argv[a], "soft")) soft = 1; if (!strcmp(argv[a], "rev")) rev = 1; if (!strcmp(argv[a], "2d")) TEX_RECT = GL_TEXTURE_2D; if (!strcmp(argv[a], "rl")) rl = 1; if (!strcmp(argv[a], "cs")) cs = 1; if (!strcmp(argv[a], "sub")) sub = 1; if (!strcmp(argv[a], "twice")) twice = 1; }
+    int soft = 0, rev = 0, a, rl = 0, cs = 0, sub = 0, twice = 0, npot = 0;
+    for (a = 1; a < argc; a++) { if (!strcmp(argv[a], "soft")) soft = 1; if (!strcmp(argv[a], "rev")) rev = 1; if (!strcmp(argv[a], "2d")) TEX_RECT = GL_TEXTURE_2D; if (!strcmp(argv[a], "rl")) rl = 1; if (!strcmp(argv[a], "cs")) cs = 1; if (!strcmp(argv[a], "sub")) sub = 1; if (!strcmp(argv[a], "twice")) twice = 1; if (!strcmp(argv[a], "npot")) npot = 1; }
     CGDirectDisplayID ids[8]; CGDisplayCount n = 0, i; CGOpenGLDisplayMask mask = 0; CGLPixelFormatObj pf = 0; CGLContextObj ctx = 0; long npix = 0; CGLError e;
     CGGetActiveDisplayList(8, ids, &n);
     for (i = 0; i < n; i++) if (CGDisplayIsMain(ids[i])) mask = CGDisplayIDToOpenGLDisplayMask(ids[i]);           /* the Rage is the main display on this rig */
@@ -25,7 +25,7 @@ int main(int argc, char **argv)
     else { CGLPixelFormatAttribute at[] = { kCGLPFAOffScreen, kCGLPFAAccelerated, kCGLPFAColorSize, (CGLPixelFormatAttribute)32, kCGLPFADisplayMask, (CGLPixelFormatAttribute)mask, (CGLPixelFormatAttribute)0 }; e = CGLChoosePixelFormat(at, &pf, &npix); }
     if (e || !pf) { printf("CGLChoosePixelFormat error %d\n", (int)e); return 1; }
     if (CGLCreateContext(pf, NULL, &ctx) || !ctx) { printf("CGLCreateContext failed\n"); return 1; }
-    int W = 128, H = 64, TW = 64, TH = 16; unsigned char *mem = calloc((size_t)W * H, 4), *rb = calloc((size_t)W * H, 4);
+    int W = 128, H = 64, TW = 64, TH = 16;   /* "npot": 48 x 12 texels, padded to 64 x 16 by the driver */ unsigned char *mem = calloc((size_t)W * H, 4), *rb = calloc((size_t)W * H, 4);
     if (CGLSetOffScreen(ctx, W, H, W * 4, mem)) { printf("CGLSetOffScreen failed\n"); return 1; }
     CGLSetCurrentContext(ctx);
     printf("mode: %s%s%s%s%s%s | GL_RENDERER: %s | extensions has ycbcr: %d rectangle: %d\n", soft ? "software reference" : "Rage", rev ? " (REV)" : "", TEX_RECT == GL_TEXTURE_2D ? " (2D)" : " (rect)", rl ? " rowlen" : "", cs ? " client-storage" : "", sub ? " sub" : "", glGetString(GL_RENDERER),
@@ -34,6 +34,7 @@ int main(int argc, char **argv)
     static const struct { const char *name; int Y, Cb, Cr; unsigned char r, g, b; } bar[8] = {
         { "white",   235, 128, 128, 255, 255, 255 }, { "yellow",  210,  16, 146, 255, 255,   0 }, { "cyan",    170, 166,  16,   0, 255, 255 }, { "green",   145,  54,  34,   0, 255,   0 },
         { "magenta", 106, 202, 222, 255,   0, 255 }, { "red",      81,  90, 240, 255,   0,   0 }, { "blue",     41, 240, 110,   0,   0, 255 }, { "black",    16, 128, 128,   0,   0,   0 } };
+    if (npot) { TW = 48; TH = 12; }
     int PT = rl ? TW + 16 : TW;      /* row pitch in texels: "rl" pads each row by 16 texels of 0xAB garbage and sets GL_UNPACK_ROW_LENGTH */
     unsigned char *tex = malloc((size_t)PT * TH * 2), *zero = calloc((size_t)PT * TH, 2); int x, y;
     memset(tex, 0xAB, (size_t)PT * TH * 2);

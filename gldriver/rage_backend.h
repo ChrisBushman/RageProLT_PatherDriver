@@ -50,6 +50,7 @@ int  rgb_tex_alloc(rgb_t *b, uint32_t bytes, uint32_t *off);
 int  rgb_tex_free(rgb_t *b, uint32_t off);
 int  rgb_upload(rgb_t *b, uint32_t off, const void *data, uint32_t len, int swap16);   /* copies through the kernel (validated span, drains the engine first) */
 int  rgb_upload2(rgb_t *b, uint32_t off, const void *data, uint32_t len, uint32_t xfer_flags);   /* RAGE_XFER_* flags: 1 swap16, 2 swap32 */
+int  rgb_upload_rows(rgb_t *b, uint32_t off, const void *data, uint32_t rowbytes, uint32_t nrows, uint32_t src_pitch, uint32_t dst_pitch, uint32_t flags);   /* RAGE_GL_VRAM_WRITE_ROWS: strided copy; flags: bits 0-1 swap, 8-12 pad bytes per row, 16-17 extra rows */
 int  rgb_readback2(rgb_t *b, uint32_t off, void *data, uint32_t len, uint32_t xfer_flags);
 int  rgb_readback(rgb_t *b, uint32_t off, void *data, uint32_t len);
 

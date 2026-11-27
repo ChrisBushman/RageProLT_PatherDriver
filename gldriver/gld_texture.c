@@ -370,13 +370,20 @@ static uint32_t pal_info(const unsigned char *s, const unsigned char **pal)
     *pal = (const unsigned char *)(uintptr_t)pp;
     return f == 0x8051u ? 3u : f == 0x8058u ? 4u : 0u;
 }
+/* Rows of a client-storage image with a row length larger than the width, packed tightly into a new buffer (caller frees). */
+static unsigned char *tex_tighten(uint32_t src, uint32_t w, uint32_t h, uint32_t pitch, uint32_t bpp)
+{
+    unsigned char *d = (unsigned char *)malloc((size_t)w * h * bpp); uint32_t y;
+    if (d) for (y = 0; y < h; y++) memcpy(d + (size_t)y * w * bpp, (const unsigned char *)(uintptr_t)src + (size_t)y * pitch * bpp, (size_t)w * bpp);
+    return d;
+}
 static int mach64_upload(gld_context *ctx, void *texobj)
 {
     g_tex_epoch++;
     mach64_priv *p = MACH64_PRIV(ctx);
     g_cur = &p->rb;
     const unsigned char *t = (const unsigned char *)texobj;
-    struct { uint32_t w, h, src, fmt, type, bytes; } lvl[12];
+    struct { uint32_t w, h, src, fmt, type, bytes; } lvl[12]; uint32_t ypitch[12] = { 0 }, uprows[12] = { 0 }, st_src[12] = { 0 }, st_w[12] = { 0 }, st_h[12] = { 0 }, st_pitch[12] = { 0 };   /* st_*: a video level uploaded straight from the application's rows (RAGE_GL_VRAM_WRITE_ROWS), no padded copy */   /* ypitch[L] != 0: YCbCr level still in the application's padded rows (row length in texels); tightened only when a path needs it */
     uint32_t state, base_lod, total, cur, hwfmt, bpt;
     const unsigned char *s;
     mach64_tex_slot *slot;
@@ -414,10 +421,10 @@ static int mach64_upload(gld_context *ctx, void *texobj)
              * (green with slanting lines).  Repack to tight rows here so everything below sees width * bytes-per-texel pitch. */
             uint32_t rowlen = *(const uint16_t *)(r + 0x08), bpp = tex_src_bytes(1, 1, (uint16_t)lvl[nlevels].fmt, (uint16_t)lvl[nlevels].type);
             if ((r[0x07] & 1u) && rowlen > lw && bpp && bpp <= 16u) {
-                unsigned char *d = (unsigned char *)malloc((size_t)lw * lh * bpp); uint32_t y;
-                if (d) {
-                    for (y = 0; y < lh; y++) memcpy(d + (size_t)y * lw * bpp, (const unsigned char *)(uintptr_t)lsrc + (size_t)y * rowlen * bpp, (size_t)lw * bpp);
-                    lvl[nlevels].src = (uint32_t)(uintptr_t)d; dec_bufs[nlevels] = d;
+                if (lvl[nlevels].fmt == 0x85B9u && bpp == 2u) ypitch[nlevels] = rowlen;         /* video frames: no separate repack pass, the hash and the pad/upload copy read the rows with their pitch */
+                else {
+                    unsigned char *d = tex_tighten(lsrc, lw, lh, rowlen, bpp);
+                    if (d) { lvl[nlevels].src = (uint32_t)(uintptr_t)d; dec_bufs[nlevels] = d; }
                 }
             }
         }
@@ -429,7 +436,9 @@ static int mach64_upload(gld_context *ctx, void *texobj)
         {
             for (k = 0; k < (uint32_t)nlevels; k++) {
                 uint32_t nb = tex_src_bytes(lvl[k].w, lvl[k].h, (uint16_t)lvl[k].fmt, (uint16_t)lvl[k].type), a1, a2;
-                tex_hash((const unsigned char *)(uintptr_t)lvl[k].src, nb, &a1, &a2); h1 = (h1 * 31u) ^ a1; h2 = (h2 * 31u) ^ a2; hl += nb;
+                if (ypitch[k]) { static uint32_t nonce; a1 = ++nonce * 0x9e3779b1u; a2 = nonce; }          /* video frames (client-storage rows): a new picture every time, so no content hash -- a changing value keeps the slot from ever matching */
+                else tex_hash((const unsigned char *)(uintptr_t)lvl[k].src, nb, &a1, &a2);
+                h1 = (h1 * 31u) ^ a1; h2 = (h2 * 31u) ^ a2; hl += nb;
             }
             if (lvl[0].fmt == 0x1900u) { const unsigned char *pl; uint32_t be = pal_info(s, &pl), a1, a2; if (be) { tex_hash(pl, 256u * be, &a1, &a2); h1 ^= a1 * 31u; h2 ^= a2; } }
             h1 ^= *(const uint32_t *)(s + 0x10) * 0x9e3779b1u; h1 ^= (*(const uint32_t *)(s + 0x1c) ^ (*(const uint32_t *)(s + 0x20) << 3) ^ (*(const uint32_t *)(s + 0x24) << 6) ^ (*(const uint32_t *)(s + 0x28) << 9)) * 0x85ebca6bu;   /* the wrap modes and border colour shape the stored image */
@@ -469,6 +478,7 @@ static int mach64_upload(gld_context *ctx, void *texobj)
      * what an out-of-range or edge-filtered fetch sees) and is padded/clamped like a non-power-of-two image with the coordinates remapped onto the interior; every other
      * wrap mode samples the interior only, so the image is cropped to it. */
     bord = s[0x9c + 6]; bclamp_s = bclamp_t = 0; bw0 = lvl[0].w; bh0 = lvl[0].h;
+    if (bord) { int k; for (k = 0; k < nlevels; k++) if (ypitch[k]) { unsigned char *d = tex_tighten(lvl[k].src, lvl[k].w, lvl[k].h, ypitch[k], 2u); if (d) { lvl[k].src = (uint32_t)(uintptr_t)d; free(dec_bufs[k]); dec_bufs[k] = d; ypitch[k] = 0; } } }   /* borders use the tight-row paths */
     if (bord && bord < 8u) {
         uint32_t wrapb = *(const uint32_t *)(s + 0x10);
         bclamp_s = (wrapb >> 16) == 0x2900u; bclamp_t = (wrapb & 0xffffu) == 0x2900u;
@@ -511,14 +521,44 @@ static int mach64_upload(gld_context *ctx, void *texobj)
             for (k = 0; k < 4; k++) { uint32_t b = *(const uint32_t *)(s + 0x1c + k * 4); memcpy(&bcf[k], &b, 4); }
             for (L = 0; L < nlevels; L++) {
                 uint32_t bpp = tex_src_bytes(1, 1, (uint16_t)lvl[L].fmt, (uint16_t)lvl[L].type), w = lvl[L].w, h = lvl[L].h, nw = w, nh = h, x, y;
-                const unsigned char *src = (const unsigned char *)(uintptr_t)lvl[L].src; unsigned char *dst;
+                const unsigned char *src = (const unsigned char *)(uintptr_t)lvl[L].src; unsigned char *dst; uint32_t sp = ypitch[L] ? ypitch[L] : w, video = ypitch[L] != 0; int strided;    /* sp: source row pitch in texels */
+                if (ypitch[L] && !((wmode_s == 0 || wmode_s == 4) && (wmode_t == 0 || wmode_t == 4))) {                     /* a mirror / border / resample mode: those loops index tight rows */
+                    unsigned char *d = tex_tighten(lvl[L].src, w, h, ypitch[L], 2u);
+                    if (d) { lvl[L].src = (uint32_t)(uintptr_t)d; free(dec_bufs[L]); dec_bufs[L] = d; ypitch[L] = 0; src = d; sp = w; }
+                }
                 if (wmode_s == 1 || wmode_s == 3) nw = w * 2u; else if (wmode_s == 2) { nw = 4u; while (nw < w + 2u) nw <<= 1; } else if (wmode_s >= 4) nw = potge(w);
                 if (wmode_t == 1 || wmode_t == 3) nh = h * 2u; else if (wmode_t == 2) { nh = 4u; while (nh < h + 2u) nh <<= 1; } else if (wmode_t >= 4) nh = potge(h);
                 tex_border_pixel((uint16_t)lvl[L].fmt, (uint16_t)lvl[L].type, bcf, bpix);
-                dst = (unsigned char *)malloc((size_t)nw * nh * bpp);
-                if (!dst) { wmode_s = wmode_t = 0; break; }
-                for (y = 0; y < nh; y++) {
+                strided = video && bpp == 2u && (wmode_s == 0 || wmode_s == 4) && (wmode_t == 0 || wmode_t == 4) && (w & 1u) == 0u && w * 2u <= 4096u && h <= 1024u && nw * 2u >= w * 2u + 4u && nh > h && L == 0 && nlevels == 1;
+                if (strided) { st_src[L] = lvl[L].src; st_w[L] = w; st_h[L] = h; st_pitch[L] = sp; dst = 0; }
+                else {
+                    dst = (unsigned char *)malloc((size_t)nw * nh * bpp);
+                    if (!dst) { wmode_s = wmode_t = 0; break; }
+                }
+                for (y = 0; y < (strided ? 0u : nh); y++) {
                     int64_t sy = y; int by = 0;
+                    if ((wmode_s == 0 || wmode_s == 4) && (wmode_t == 0 || wmode_t == 4) && nw >= w && nh >= h) {      /* edge-clamp pad (every non-power-of-two image / rectangle texture): whole rows, not texel by texel -- 1024x512 per video frame took 30 ms the old way */
+                        unsigned char *drow = dst + (size_t)y * nw * bpp;
+                        if (video) {            /* client-storage YCbCr video frame: only what a bilinear fetch inside the picture can reach is padded and uploaded (rows 0..h, two edge texels) */
+                            if (y > h) continue;
+                            if (y == h) memcpy(drow, dst + (size_t)(h - 1u) * nw * bpp, (size_t)(nw < w + 2u ? nw : w + 2u) * bpp);
+                            else {
+                                const unsigned char *srow = src + (size_t)y * sp * bpp; uint32_t t;
+                                memcpy(drow, srow, (size_t)w * bpp);
+                                for (t = 0; t < 2u && w + t < nw; t++) memcpy(drow + (size_t)(w + t) * bpp, srow + (size_t)(w - 1u) * bpp, bpp);
+                            }
+                            continue;
+                        }
+                        if (y >= h) memcpy(drow, dst + (size_t)(h - 1u) * nw * bpp, (size_t)nw * bpp);
+                        else {
+                            const unsigned char *srow = src + (size_t)y * sp * bpp;
+                            memcpy(drow, srow, (size_t)w * bpp);
+                            if (bpp == 2u) { uint16_t e; uint16_t *dp = (uint16_t *)(void *)(drow + (size_t)w * 2u); memcpy(&e, srow + (size_t)(w - 1u) * 2u, 2); for (x = w; x < nw; x++) *dp++ = e; }
+                            else if (bpp == 4u) { uint32_t e; uint32_t *dp = (uint32_t *)(void *)(drow + (size_t)w * 4u); memcpy(&e, srow + (size_t)(w - 1u) * 4u, 4); for (x = w; x < nw; x++) *dp++ = e; }
+                            else for (x = w; x < nw; x++) memcpy(drow + (size_t)x * bpp, srow + (size_t)(w - 1u) * bpp, bpp);
+                        }
+                        continue;
+                    }
                     if (wmode_t == 1) sy = y >= h ? (int64_t)(2u * h - 1u - y) : (int64_t)y;
                     else if (wmode_t == 3) sy = y < h ? (int64_t)(h - 1u - y) : (int64_t)(y - h);
                     else if (wmode_t == 2) { sy = (int64_t)y - 1; by = (sy < 0 || sy >= (int64_t)h); }
@@ -539,7 +579,9 @@ static int mach64_upload(gld_context *ctx, void *texobj)
                 wscale_s = wmode_s == 1 || wmode_s == 3 ? 0.5f : (wmode_s == 2 || wmode_s == 4) ? (float)w / (float)nw : 1.0f; wbias_s = wmode_s == 3 ? 0.5f : wmode_s == 2 ? 1.0f / (float)nw : 0.0f;
                 wscale_t = wmode_t == 1 || wmode_t == 3 ? 0.5f : (wmode_t == 2 || wmode_t == 4) ? (float)h / (float)nh : 1.0f; wbias_t = wmode_t == 3 ? 0.5f : wmode_t == 2 ? 1.0f / (float)nh : 0.0f;
                 }
-                lvl[L].w = nw; lvl[L].h = nh; lvl[L].src = (uint32_t)(uintptr_t)dst; mir_bufs[L] = dst;
+                lvl[L].w = nw; lvl[L].h = nh; ypitch[L] = 0;
+                if (!strided) { lvl[L].src = (uint32_t)(uintptr_t)dst; mir_bufs[L] = dst; }      /* dst is tight; a strided level keeps pointing at the application's rows (st_src) */
+                if ((wmode_s == 0 || wmode_s == 4) && (wmode_t == 0 || wmode_t == 4) && nh > h && video) uprows[L] = h + 1u;        /* the fast pad filled rows 0..h only */
                 if (L == 0 && wmode_s == 0 && wmode_t == 0) break;
             }
         }
@@ -615,12 +657,23 @@ static int mach64_upload(gld_context *ctx, void *texobj)
         slot->mipmapped    = (nlevels > 1 && minf >= 0x2700u && minf <= 0x2703u);
     }
 
+    {   int k; for (k = 0; k < nlevels; k++) if (ypitch[k]) { unsigned char *d = tex_tighten(lvl[k].src, lvl[k].w, lvl[k].h, ypitch[k], 2u); if (d) { lvl[k].src = (uint32_t)(uintptr_t)d; free(dec_bufs[k]); dec_bufs[k] = d; ypitch[k] = 0; } } }   /* an unpadded padded-row level: upload from tight rows */
     /* Upload each level; index its offset by its maxLog2 (= its TEX_n_OFF reg). */
     cur = slot->off;
     for (L = 0; L < nlevels; L++) {
         uint32_t mx = lvl[L].w > lvl[L].h ? lvl[L].w : lvl[L].h;
         uint32_t r  = ilog2u(mx);
-        tex_upload_image(cur, lvl[L].w, lvl[L].h,
+        if (st_src[L]) {            /* video frame: rows straight from the application's buffer; the kernel pads the last macropixel of each row and one more row (all a bilinear fetch inside the picture can reach) */
+            int bad = tex_conn() ? rgb_upload_rows(g_cur, cur, (const void *)(uintptr_t)st_src[L], st_w[L] * 2u, st_h[L], st_pitch[L] * 2u, lvl[L].w * 2u, (4u << 8) | (1u << 16)) : 1;
+            if (bad) {                /* the kernel refused (older kext?): build the padded image here and upload it the ordinary way */
+                uint32_t pw = lvl[L].w, y; unsigned char *pb = (unsigned char *)calloc((size_t)pw * (st_h[L] + 1u), 2);
+                if (pb) {
+                    for (y = 0; y <= st_h[L]; y++) { const unsigned char *sr = (const unsigned char *)(uintptr_t)st_src[L] + (size_t)(y < st_h[L] ? y : st_h[L] - 1u) * st_pitch[L] * 2u; unsigned char *dr = pb + (size_t)y * pw * 2u; memcpy(dr, sr, (size_t)st_w[L] * 2u); memcpy(dr + st_w[L] * 2u, sr + st_w[L] * 2u - 4u, 4); }
+                    tex_upload_image(cur, pw, st_h[L] + 1u, pb, (uint16_t)lvl[L].fmt, (uint16_t)lvl[L].type, bpt, hwfmt); free(pb);
+                }
+            }
+        } else
+        tex_upload_image(cur, lvl[L].w, uprows[L] ? uprows[L] : lvl[L].h,
                          (const unsigned char *)(uintptr_t)lvl[L].src,
                          (uint16_t)lvl[L].fmt, (uint16_t)lvl[L].type, bpt, hwfmt);
         if (r < 12) slot->mip_off[r] = cur;

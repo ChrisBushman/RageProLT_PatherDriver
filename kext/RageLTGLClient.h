@@ -38,6 +38,7 @@ public:
     IOReturn selFence(uint32_t seq, uint32_t *completed);
     IOReturn selPresent(uint32_t sx, uint32_t sy, uint32_t w, uint32_t h, uint32_t dx, uint32_t dy);
     IOReturn selVramWrite(uint32_t off, uint32_t addr, uint32_t len, uint32_t flags);
+    IOReturn selVramWriteRows(uint32_t off, uint32_t addr, uint32_t dims, uint32_t srcPitch, uint32_t dstPitch, uint32_t flags);
     IOReturn selVramRead(uint32_t off, uint32_t addr, uint32_t len, uint32_t flags);
     IOReturn selDisplay(uint32_t *gen, uint32_t *w, uint32_t *h, uint32_t *pitch, uint32_t *bpp, uint32_t *base);
     IOReturn selClearZ(uint32_t value);

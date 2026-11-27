@@ -128,6 +128,7 @@ public:
     void                vsyncConfig(uint32_t key, uint32_t v) { if (key == 10) fVsyncMarginUs = v; else fVsync = v; }       /* v-sync experiment, RAGE_GL_CONFIG key 9 */
     void         quadConfig(uint32_t key, uint32_t value);
     IOReturn     vramCopyIn(uint32_t owner, uint32_t off, const uint8_t *src, uint32_t len, uint32_t flags);     /* src = kernel buffer */
+    IOReturn     vramCopyRows(uint32_t owner, uint32_t off, const uint8_t *src, uint32_t rowBytes, uint32_t nrows, uint32_t dstPitch, uint32_t flags);   /* src = kernel buffer of nrows packed rows; row r lands at off + r * dstPitch */
     IOReturn     vramCopyOut(uint32_t owner, uint32_t off, uint8_t *dst, uint32_t len, uint32_t flags);
     IOReturn     scanoutCopyOut(uint32_t byteOff, uint8_t *dst, uint32_t len);                                    /* debug */
     IOReturn     regDump(uint32_t *pairs, uint32_t maxPairs, uint32_t *n);

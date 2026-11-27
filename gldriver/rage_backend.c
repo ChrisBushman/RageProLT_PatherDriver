@@ -147,6 +147,7 @@ int rgb_tex_alloc(rgb_t *b, uint32_t bytes, uint32_t *off) { return (int)CALL(RA
 int rgb_tex_free(rgb_t *b, uint32_t off) { return (int)CALL(RAGE_GL_FREE, 1, 0, off); }
 int rgb_upload(rgb_t *b, uint32_t off, const void *d, uint32_t len, int swap16) { return (int)CALL(RAGE_GL_VRAM_WRITE, 4, 0, off, (uint32_t)(uintptr_t)d, len, swap16 ? RAGE_XFER_SWAP16 : 0u); }
 int rgb_upload2(rgb_t *b, uint32_t off, const void *d, uint32_t len, uint32_t fl) { return (int)CALL(RAGE_GL_VRAM_WRITE, 4, 0, off, (uint32_t)(uintptr_t)d, len, fl); }
+int rgb_upload_rows(rgb_t *b, uint32_t off, const void *d, uint32_t rowbytes, uint32_t nrows, uint32_t sp, uint32_t dp, uint32_t fl) { return (int)CALL(RAGE_GL_VRAM_WRITE_ROWS, 6, 0, off, (uint32_t)(uintptr_t)d, rowbytes | (nrows << 16), sp, dp, fl); }
 int rgb_readback2(rgb_t *b, uint32_t off, void *d, uint32_t len, uint32_t fl) { return (int)CALL(RAGE_GL_VRAM_READ, 4, 0, off, (uint32_t)(uintptr_t)d, len, fl); }
 int rgb_readback(rgb_t *b, uint32_t off, void *d, uint32_t len) { return (int)CALL(RAGE_GL_VRAM_READ, 4, 0, off, (uint32_t)(uintptr_t)d, len, 0u); }
 

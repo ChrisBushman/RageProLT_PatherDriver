@@ -44,6 +44,7 @@ bool RageLTGLClient::start(IOService *provider)
     M(RAGE_GL_PRESENT,     selPresent,    kIOUCScalarIScalarO, 6, 0);
     M(RAGE_GL_VRAM_WRITE,  selVramWrite,  kIOUCScalarIScalarO, 4, 0);
     M(RAGE_GL_VRAM_READ,   selVramRead,   kIOUCScalarIScalarO, 4, 0);
+    M(RAGE_GL_VRAM_WRITE_ROWS, selVramWriteRows, kIOUCScalarIScalarO, 6, 0);
     M(RAGE_GL_DISPLAY,     selDisplay,    kIOUCScalarIScalarO, 0, 6);
     M(RAGE_GL_SET_TEXTURE, selSetTexture, kIOUCScalarIScalarO, 3, 0);
     M(RAGE_GL_CLEAR_Z,     selClearZ,     kIOUCScalarIScalarO, 1, 0);
@@ -192,6 +193,37 @@ IOReturn RageLTGLClient::selVramWrite(uint32_t off, uint32_t addr, uint32_t len,
         done += n;
     }
     IOFree(buf, XFER_CHUNK);
+    return rc;
+}
+
+/* Strided upload (video frames): rows come straight from the application's buffer, land at the texture's pitch, and the pad the chip may sample (the last macropixel of each row, one more row) is
+ * produced here, so the user side needs neither a padded copy nor the padding bytes.  Rows are staged through a kernel buffer in batches, so no user page is touched under the device lock. */
+IOReturn RageLTGLClient::selVramWriteRows(uint32_t off, uint32_t addr, uint32_t dims, uint32_t srcPitch, uint32_t dstPitch, uint32_t flags)
+{
+    uint32_t rowbytes = dims & 0xffffu, nrows = dims >> 16, padb = (flags >> 8) & 0x1fu, extra = (flags >> 16) & 3u, swap = flags & 3u;
+    uint32_t rowtot, per, r = 0, batch; uint8_t *buf; IOReturn rc = kIOReturnSuccess; const uint32_t BUFBYTES = 32768u;
+    if (!fDev) return kIOReturnNotAttached;
+    if (fDev->modeGen() & 1u) return kIOReturnNotReady;
+    if ((flags & ~(0x3u | 0x1f00u | 0x30000u)) || !rowbytes || (rowbytes & 3u) || rowbytes > 4096u || !nrows || nrows > 1024u || (padb & 3u) || padb > 16u || (padb && rowbytes < padb)) return kIOReturnBadArgument;
+    if ((off & 3u) || (dstPitch & 3u) || dstPitch < rowbytes + padb || dstPitch > 0x100000u || srcPitch > 0x100000u) return kIOReturnBadArgument;
+    rowtot = rowbytes + padb; per = BUFBYTES / rowtot;                     /* rows per batch (>= 7 for the largest row) */
+    buf = (uint8_t *)IOMalloc(BUFBYTES);
+    if (!buf) return kIOReturnNoMemory;
+    while (r < nrows && rc == kIOReturnSuccess) {
+        uint32_t i; batch = nrows - r > per ? per : nrows - r;
+        for (i = 0; i < batch && rc == kIOReturnSuccess; i++) {
+            uint8_t *row = buf + i * rowtot;
+            rc = userIn(addr + (r + i) * srcPitch, row, rowbytes);
+            if (rc == kIOReturnSuccess && padb) bcopy(row + rowbytes - padb, row + rowbytes, padb);
+        }
+        if (rc == kIOReturnSuccess) rc = fDev->vramCopyRows(fOwner, off + r * dstPitch, buf, rowtot, batch, dstPitch, swap);
+        r += batch;
+    }
+    if (rc == kIOReturnSuccess && extra) {                                   /* rows below the picture: copies of the last one (still in the buffer: the final batch ended with it) */
+        uint32_t e; const uint8_t *last = buf + ((nrows - 1u) % per) * rowtot;
+        for (e = 0; e < extra && rc == kIOReturnSuccess; e++) rc = fDev->vramCopyRows(fOwner, off + (nrows + e) * dstPitch, last, rowtot, 1, dstPitch, swap);
+    }
+    IOFree(buf, BUFBYTES);
     return rc;
 }
 
