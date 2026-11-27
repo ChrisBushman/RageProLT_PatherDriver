@@ -61,3 +61,15 @@ Background: stock handles sleep exactly like a mode change and keeps no chip sta
 | write-combine on  | 0.15 0.94 1.07 0.21 1.51 0.68 0.80 0.86 | 0.78 | 0.83 |
 
 About 10% lower with write-combine on, but the run-to-run spread (0.15-1.62 s) is far larger than that difference, so it is **not significant**. The first run after a session restart is lowest in both settings. Conclusion unchanged: no demonstrated CPU benefit for WindowServer; leave write-combine off for it.
+
+## Addendum: tearing check (user's eyes, Nov 27, blind order)
+
+`tools/ragegl/tear_test.c`: four 40 px white bars moving at 1800 px/s (time-based, same motion at any frame rate) on a 640x480 scanout, 15 s per mode, mode order randomised and hidden from the observer.
+
+| Run | Mode (revealed after) | fps | Observer |
+|---|---|---|---|
+| A | v-sync poll | 59.8 | no tearing |
+| B | v-sync **off** | 192.5 | **tearing** |
+| C | v-sync sleep-then-spin (2.5 ms margin) | 59.8 | no tearing |
+
+Confirms the static reasoning: with the wait the blit stays ahead of the beam; without it, tearing is visible. Recommendation: make sleep-then-spin (27% CPU) the default for presents to the scanout; `RageVsyncTimeouts` was 0.
