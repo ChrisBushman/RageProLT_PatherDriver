@@ -18,6 +18,12 @@ rig (real Rage LT Pro, no panel, composite TV-out connector present).
 - C3 NDRV panel leftovers: finish decode; report which behaviour is G4-testable vs unverifiable.
 - C1 O1 (classes/properties/selectors that ATIRageProGA and GLEngine look up); C2 O2 (IOAccelerator base usable by a third-party kext).
 
+## Standing authorizations (user, Nov 26)
+G4 reboots/recovery and panics acceptable; kext build/load on the G4 (not stock kexts); GUI control and screencapture; host tooling in a container for DVD content; up to 3 agents; commit+push. Chip register experiments are LOWEST priority (likely to crash; recovery needs the user). Overlay register experiments never unattended. Work needing the user's eyes is queued, not blocking.
+
+## Added Nov 26
+- V-sync wait: measure time in waitFlip (Atlantis, Sonic R, Chess); first try the lazy fence (wait at the first draw/clear needing the retiring buffer); then sleep-then-spin; interrupt only if measurement justifies it.
+
 ## Tests to add
 - A6 off-display GL context (not drawn into our scanout): add to the test suite.
 - D3 long FIFO soak with the Apple formula (default).
