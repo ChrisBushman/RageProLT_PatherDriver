@@ -53,7 +53,8 @@ static void rage_fill_descriptor(gld_context *ctx)
                                                   30 /* EXT_stencil_wrap */, 34 /* EXT_separate_specular_color */, 36 /* EXT_blend_func_separate */, 38 /* EXT_stencil_two_side */,
                                                   69 /* SGIS_texture_edge_clamp */, 11 /* ARB_texture_mirrored_repeat */, 3 /* ARB_texture_border_clamp */, 42 /* EXT_texture_mirror_clamp */,
                                                   1 /* ARB_point_parameters */, 4 /* ARB_multitexture */, 9 /* ARB_texture_env_combine */, 7 /* ARB_texture_env_dot3 */, 41 /* EXT_blend_equation_separate */,
-                                                  20 /* ARB_vertex_buffer_object */, 21 /* EXT_compiled_vertex_array */, 28 /* EXT_abgr */, 29 /* EXT_bgra */ };
+                                                  20 /* ARB_vertex_buffer_object */, 21 /* EXT_compiled_vertex_array */, 28 /* EXT_abgr */, 29 /* EXT_bgra */,
+                                                  43 /* APPLE_ycbcr_422: hardware texel datatype 11/12, tools/ragegl/ycbcr_test (DVD Player's AltiVec driver uploads its frames this way) */ };
             unsigned i; for (i = 0; i < sizeof bits; i++) dd[0x104 / 4 + bits[i] / 32] |= 1u << (bits[i] & 31);
         }
         *(uint16_t *)(uintptr_t)(descp + 0xb2) = 1024;

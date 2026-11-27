@@ -9,14 +9,15 @@
 #include <ApplicationServices/ApplicationServices.h>
 #include <OpenGL/OpenGL.h>
 #include <OpenGL/gl.h>
-#define TEX_RECT 0x84F5
+#define TEX_RECT_ 0x84F5
+static unsigned TEX_RECT = TEX_RECT_;   /* GL_TEXTURE_2D with the argument "2d" (texture sizes must then be powers of two: 64x16 is) */
 #define YCBCR 0x85B9
 #define S88 0x85BA
 #define S88R 0x85BB
 int main(int argc, char **argv)
 {
     int soft = 0, rev = 0, a;
-    for (a = 1; a < argc; a++) { if (!strcmp(argv[a], "soft")) soft = 1; if (!strcmp(argv[a], "rev")) rev = 1; }
+    for (a = 1; a < argc; a++) { if (!strcmp(argv[a], "soft")) soft = 1; if (!strcmp(argv[a], "rev")) rev = 1; if (!strcmp(argv[a], "2d")) TEX_RECT = GL_TEXTURE_2D; }
     CGDirectDisplayID ids[8]; CGDisplayCount n = 0, i; CGOpenGLDisplayMask mask = 0; CGLPixelFormatObj pf = 0; CGLContextObj ctx = 0; long npix = 0; CGLError e;
     CGGetActiveDisplayList(8, ids, &n);
     for (i = 0; i < n; i++) if (CGDisplayIsMain(ids[i])) mask = CGDisplayIDToOpenGLDisplayMask(ids[i]);           /* the Rage is the main display on this rig */
@@ -27,7 +28,7 @@ int main(int argc, char **argv)
     int W = 128, H = 64, TW = 64, TH = 16; unsigned char *mem = calloc((size_t)W * H, 4), *rb = calloc((size_t)W * H, 4);
     if (CGLSetOffScreen(ctx, W, H, W * 4, mem)) { printf("CGLSetOffScreen failed\n"); return 1; }
     CGLSetCurrentContext(ctx);
-    printf("mode: %s%s | GL_RENDERER: %s | extensions has ycbcr: %d rectangle: %d\n", soft ? "software reference" : "Rage", rev ? " (REV)" : "", glGetString(GL_RENDERER),
+    printf("mode: %s%s%s | GL_RENDERER: %s | extensions has ycbcr: %d rectangle: %d\n", soft ? "software reference" : "Rage", rev ? " (REV)" : "", TEX_RECT == GL_TEXTURE_2D ? " (2D)" : " (rect)", glGetString(GL_RENDERER),
            strstr((const char *)glGetString(GL_EXTENSIONS), "GL_APPLE_ycbcr_422") != NULL, strstr((const char *)glGetString(GL_EXTENSIONS), "GL_EXT_texture_rectangle") != NULL);
     /* 8 bars, each TW/8 = 8 texels wide (4 macropixels).  Y,Cb,Cr from BT.601 (video range). */
     static const struct { const char *name; int Y, Cb, Cr; unsigned char r, g, b; } bar[8] = {
@@ -46,7 +47,7 @@ int main(int argc, char **argv)
     glViewport(0, 0, W, H); glMatrixMode(GL_PROJECTION); glLoadIdentity(); glOrtho(0, W, 0, H, -1, 1); glMatrixMode(GL_MODELVIEW); glLoadIdentity();
     glClearColor(0.5f, 0.5f, 0.5f, 1.0f); glClear(GL_COLOR_BUFFER_BIT);
     glEnable(TEX_RECT); glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_REPLACE); glColor3f(1, 1, 1);
-    glBegin(GL_QUADS); glTexCoord2i(0, 0); glVertex2f(0, 0); glTexCoord2i(TW, 0); glVertex2f(W, 0); glTexCoord2i(TW, TH); glVertex2f(W, H); glTexCoord2i(0, TH); glVertex2f(0, H); glEnd();
+    glBegin(GL_QUADS); { float sx = TEX_RECT == GL_TEXTURE_2D ? 1.0f : (float)TW, sy = TEX_RECT == GL_TEXTURE_2D ? 1.0f : (float)TH; glTexCoord2f(0, 0); glVertex2f(0, 0); glTexCoord2f(sx, 0); glVertex2f(W, 0); glTexCoord2f(sx, sy); glVertex2f(W, H); glTexCoord2f(0, sy); glVertex2f(0, H); } glEnd();
     glFinish(); glReadPixels(0, 0, W, H, GL_RGBA, GL_UNSIGNED_BYTE, rb);
     printf("bar      expected RGB     got RGB (centre of bar)\n");
     for (a = 0; a < 8; a++) { const unsigned char *q = rb + ((size_t)(H / 2) * W + a * (W / 8) + W / 16) * 4;
