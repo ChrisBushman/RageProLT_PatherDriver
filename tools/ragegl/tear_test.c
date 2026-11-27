@@ -25,5 +25,5 @@ int main(int argc, char **argv)
         frames++;
     }
     printf("%s: %d frames in %.1f s = %.1f fps\n", argv[1], frames, now() - t0, frames / (now() - t0));
-    ragegl_config(c, 9, 0); ragegl_free(c, off); ragegl_close(c); return 0;
+    ragegl_config(c, 9, 3); ragegl_free(c, off); ragegl_close(c); return 0;
 }

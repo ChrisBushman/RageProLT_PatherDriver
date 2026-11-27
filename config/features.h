@@ -29,6 +29,9 @@
 #ifndef RAGE_FEAT_FS_SCALE
 #define RAGE_FEAT_FS_SCALE    1   /* full-screen 32 bpp inside 8 MB VRAM (bug L4)                        (Phase 3/5) */
 #endif
+#ifndef RAGE_VSYNC_DEFAULT
+#define RAGE_VSYNC_DEFAULT    3   /* v-sync wait before a raw-copy present: 0 off, 1 poll (100% CPU), 3 sleep-then-spin (27% CPU); RAGE_GL_CONFIG key 9 overrides at run time (blind tearing test Nov 27: off tears, 1 and 3 do not) */
+#endif
 #ifndef RAGE_DEBUG_PANIC
 #define RAGE_DEBUG_PANIC      0   /* DEBUG ONLY: a selector that panics on purpose, to test what the capture paths preserve. Never in release. */
 #endif

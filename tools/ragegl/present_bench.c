@@ -25,5 +25,5 @@ int main(int argc, char **argv)
         t1 = now(); c1 = cpu();
         printf("vsync %-10s margin %4d us: %d presents in %.3f s = %6.1f fps, CPU %.2f ms/frame (%.0f%% of one CPU)\n", vsn[vs], margin, frames, t1 - t0, frames / (t1 - t0), (c1 - c0) * 1000.0 / frames, 100.0 * (c1 - c0) / (t1 - t0)); fflush(stdout);
     }
-    ragegl_config(c, 9, 0); ragegl_free(c, off); ragegl_close(c); return 0;
+    ragegl_config(c, 9, 3); ragegl_free(c, off); ragegl_close(c); return 0;
 }

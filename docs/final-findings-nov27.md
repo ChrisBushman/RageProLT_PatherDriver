@@ -73,3 +73,8 @@ About 10% lower with write-combine on, but the run-to-run spread (0.15-1.62 s) i
 | C | v-sync sleep-then-spin (2.5 ms margin) | 59.8 | no tearing |
 
 Confirms the static reasoning: with the wait the blit stays ahead of the beam; without it, tearing is visible. Recommendation: make sleep-then-spin (27% CPU) the default for presents to the scanout; `RageVsyncTimeouts` was 0.
+
+## Addendum: v-sync sleep-then-spin is now the kext default (user agreed Nov 27)
+
+`config/features.h` `RAGE_VSYNC_DEFAULT` = 3 (0 off, 1 poll, 3 sleep-then-spin, margin 2.5 ms); `RAGE_GL_CONFIG` key 9/10 still override at run time. It applies to the same-format raw-copy present only; the textured-quad and overlay presents do not wait. Verified on the release kext after a fresh load: `default_vsync` (no config call) 59.8 fps; gl_suite 291/0; layout_exercise (Atlantis, Flurry, Chess, Sonic R, 7 min): 6251 waits, 0 timeouts, 26893 sleeps, no new crash logs, panic.log unchanged. The test tools `present_bench` and `tear_test` now restore the default (3) on exit rather than forcing it off.
+Future iteration (user): event-driven or overlapped waiting so the CPU is free for other work during the wait.

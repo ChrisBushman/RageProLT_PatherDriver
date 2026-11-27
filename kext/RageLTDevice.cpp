@@ -38,7 +38,7 @@ bool RageLTDevice::start(IOService *provider)
     fFB->retain();
     fMap = fFB->map(kIOMapInhibitCache);          /* registers must never be cached on PPC */
     if (!fMap) { LOG("BAR0 map failed\n"); return false; }
-    fWCMap = 0; fVsync = fVsyncCalls = fVsyncInVbl = fVsyncTimeouts = fVsyncSleeps = 0; fVsyncMarginUs = 2500; fVsyncNs = 0;
+    fWCMap = 0; fVsync = RAGE_VSYNC_DEFAULT; fVsyncCalls = fVsyncInVbl = fVsyncTimeouts = fVsyncSleeps = 0; fVsyncMarginUs = 2500; fVsyncNs = 0;
 #if RAGE_VRAM_WC
     fWCMap = fFB->map(kIOMapWriteCombineCache);   /* data stores only; falls back to fMap if refused */
     LOG("VRAM write-combine mapping for uploads: %s\n", fWCMap ? "on" : "refused");
