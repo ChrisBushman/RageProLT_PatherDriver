@@ -172,6 +172,7 @@ public:
     virtual IOReturn newUserClient(task_t owningTask, void *securityID, UInt32 type, IOUserClient **handler);
 
     /* DEBUG ONLY (RAGE_DEBUG_ENGTEST): see RageLTSelfTest.cpp */
+    IOMemoryDescriptor *apertureMemory(uint32_t owner, uint32_t off, uint32_t len);   /* B1g-5 debug: the caller's own VRAM block as a user-mappable descriptor (caller releases) */
     IOReturn     apertureBench(uint32_t owner, uint32_t off, uint32_t len, uint32_t mode, uint32_t *wns, uint32_t *rns);   /* B1g-4 */
     IOReturn     engineSelfTest(uint32_t mask, uint32_t *passmask, uint32_t *outside, uint32_t *inside, uint32_t *status);
 

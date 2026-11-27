@@ -295,6 +295,16 @@ IOReturn RageLTDevice::engineSelfTest(uint32_t, uint32_t *, uint32_t *, uint32_t
 #endif
 
 #if RAGE_DEBUG_ENGTEST
+IOMemoryDescriptor *RageLTDevice::apertureMemory(uint32_t owner, uint32_t off, uint32_t len)
+{
+    IOMemoryDescriptor *d = 0;
+    if (!len || (off | len) & 4095u) return 0;
+    IOLockLock(fLock);
+    if (rage_vram_owns(&fVram, off, len, owner)) d = IODeviceMemory::withSubRange(fFB, off, len);
+    IOLockUnlock(fLock);
+    return d;
+}
+
 /* B1g-4: what do the CPU cache modes do to aperture store/load speed?  Only the caller's own allocated block is touched. */
 IOReturn RageLTDevice::apertureBench(uint32_t owner, uint32_t off, uint32_t len, uint32_t mode, uint32_t *wns, uint32_t *rns)
 {

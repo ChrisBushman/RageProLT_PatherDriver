@@ -25,6 +25,7 @@ bool RageLTGLClient::start(IOService *provider)
     if (!super::start(provider)) return false;
     fDev = OSDynamicCast(RageLTDevice, provider);
     if (!fDev) return false;
+    fBenchOff = fBenchLen = 0;
     /* The first GL client is the point where the chip is first READ (it is known to be initialised by the framebuffer by now). */
     if (fDev->engineEnable() != kIOReturnSuccess) { fDev = 0; return false; }
     if (fDev->reserveDisplay() != kIOReturnSuccess) { fDev = 0; return false; }
@@ -253,10 +254,18 @@ IOReturn RageLTGLClient::selOvlFlip(uint32_t off)
     if (!fDev) return kIOReturnNotAttached;
     return fDev->ovlFlip(fOwner, off);
 }
+IOReturn RageLTGLClient::clientMemoryForType(UInt32 type, IOOptionBits *options, IOMemoryDescriptor **memory)
+{
+#if RAGE_DEBUG_ENGTEST
+    if (type == 200 && fDev && fBenchLen) { *options = 0; *memory = fDev->apertureMemory(fOwner, fBenchOff, fBenchLen); return *memory ? kIOReturnSuccess : kIOReturnBadArgument; }
+#endif
+    (void)options; (void)memory; return kIOReturnUnsupported;
+}
 IOReturn RageLTGLClient::selApertureBench(uint32_t off, uint32_t len, uint32_t mode, uint32_t *wns, uint32_t *rns)
 {
 #if RAGE_DEBUG_ENGTEST
     if (!fDev) return kIOReturnNotAttached;
+    fBenchOff = off; fBenchLen = len;
     return fDev->apertureBench(fOwner, off, len, mode, wns, rns);
 #else
     (void)off; (void)len; (void)mode; (void)wns; (void)rns; return kIOReturnUnsupported;     /* debug builds only (the selector is not even reachable: getTargetAndMethodForIndex refuses it) */

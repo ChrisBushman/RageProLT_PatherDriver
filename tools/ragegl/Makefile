@@ -1,11 +1,13 @@
 # Build on the Panther host: make -C tools/ragegl
 CFLAGS ?= -O2 -Wall -I../../common
 BUNDLE_SRC = ../../gldriver/gld_core.c ../../gldriver/gld_context.c ../../gldriver/gld_entry.c ../../gldriver/gld_prims.c ../../gldriver/gld_dispatch.c ../../gldriver/gld_pixelformat.c ../../gldriver/gld_cgs.c ../../gldriver/gld_glue.c ../../gldriver/gld_pixels.c ../../gldriver/gld_texture.c ../../gldriver/gld_stencil.c ../../gldriver/rage_backend.c ../../common/mach64_emit.c
-all: aperture_bench twod_test twod_bench ga_probe scanshot ragegl_test depth32_test alpha_test alpha16_test ovl_dump ovl_b0 ovl_b ovl_off ovl_flip ovl_sweep ovl_blocks ovl_probe ovl_gate fb_layout cursor_guard quad_test fs_test ragegl_bench xfer_test gldcore_test bundle_test gl_suite
+all: aperture_user aperture_bench twod_test twod_bench ga_probe scanshot ragegl_test depth32_test alpha_test alpha16_test ovl_dump ovl_b0 ovl_b ovl_off ovl_flip ovl_sweep ovl_blocks ovl_probe ovl_gate fb_layout cursor_guard quad_test fs_test ragegl_bench xfer_test gldcore_test bundle_test gl_suite
 ga_probe: ga_probe.c
 	cc $(CFLAGS) -o $@ ga_probe.c -framework IOKit -framework CoreFoundation
 twod_bench: twod_bench.c ragegl.h
 	cc $(CFLAGS) -o $@ twod_bench.c -framework IOKit -framework CoreFoundation
+aperture_user: aperture_user.c ragegl.h
+	cc $(CFLAGS) -o $@ aperture_user.c -framework IOKit -framework CoreFoundation
 aperture_bench: aperture_bench.c ragegl.h
 	cc $(CFLAGS) -o $@ aperture_bench.c -framework IOKit -framework CoreFoundation
 twod_test: twod_test.c ragegl.h

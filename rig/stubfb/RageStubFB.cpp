@@ -423,7 +423,9 @@ IODeviceMemory *RageWCMemory::withSub(IODeviceMemory *of, IOByteCount length)
 }
 IOMemoryMap *RageWCMemory::map(task_t intoTask, IOVirtualAddress atAddress, IOOptionBits options, IOByteCount offset, IOByteCount length)
 {
-    return IOGeneralMemoryDescriptor::map(intoTask, atAddress, (options & ~kIOMapCacheMask) | kIOMapWriteCombineCache, offset, length);
+    IOMemoryMap *m = IOGeneralMemoryDescriptor::map(intoTask, atAddress, (options & ~kIOMapCacheMask) | kIOMapWriteCombineCache, offset, length);
+    IOLog("RageStubFB: write-combined aperture map (task %p, options in 0x%x -> 0x%x, offset 0x%x, length 0x%x) -> %p\n", (void *)intoTask, (unsigned)options, (unsigned)((options & ~kIOMapCacheMask) | kIOMapWriteCombineCache), (unsigned)offset, (unsigned)length, (void *)m);
+    return m;
 }
 
 extern "C" { extern task_t kernel_task; task_t current_task(void); }
@@ -459,6 +461,7 @@ IODeviceMemory *RageStubFB::getApertureRange(IOPixelAperture aperture)
 IODeviceMemory *RageStubFB::getVRAMRange(void)
 {
     IODeviceMemory *m = viewRange(0x800000);
+    if (m && fWC && current_task() != kernel_task) { IODeviceMemory *w = RageWCMemory::withSub(m, m->getLength()); if (w) { m->release(); m = w; } }   /* B1g-5: the range WindowServer actually maps (its log shows getVRAMRange, not getApertureRange) */
     IOLog("RageStubFB: getVRAMRange caller %p -> %s view\n", __builtin_return_address(0), current_task() == kernel_task ? "lower" : "upper");
     return m;
 }
