@@ -147,6 +147,7 @@ void RageLT2DClient::free(void)
 IOReturn RageLT2DClient::clientClose(void)
 {
     if (fDev) { fDev->finish2D(); fDev = 0; }            /* nothing of ours stays in flight after the client is gone */
+    if (!isInactive()) terminate();                      /* without this the client object (and its 4 buffers) outlives the process */
     return kIOReturnSuccess;
 }
 IOReturn RageLT2DClient::clientDied(void) { return clientClose(); }

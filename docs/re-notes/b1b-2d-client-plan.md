@@ -33,3 +33,21 @@ Scope of the first release: display destinations only (stream ops 0x09 CopyRegio
 - Earlier scripted drags missed because `rungui.sh` opens a Terminal window that takes focus (user noticed). Input now goes over plain ssh (`~/drag`, `osascript` work without the GUI launcher). Also `mach64_arrange rage` moves the Rage to (0,0) 640x480 and the GeForce to (640,0): create the Finder window AFTER arranging, or it sits on the other display.
 - Finder window open + drags + resize on the Rage: 7 buffers, 13 ops = 3 fills + 10 copies, 0 lines, 0 keyed fills, 0 refused (Rage2D* counters in ioreg).
 - So Quartz does send fills and copy-region (window moves), all accepted by the validator. Pixel correctness of these on the Rage screen is not yet checked (needs the user's eyes or the debug scanout read).
+
+## Result (Nov 26, night): speed of the 2D path vs the CPU path (B1g-2) and GL alongside (A5)
+Tool: `tools/ragegl/twod_bench` (release kext; 640x480x16, GL client and 2D client open together, WindowServer's own client also open). Hardware = plugin-style streams through the type-2 client, each buffer followed by finish() (so validation, per-op engine programming, idle wait and the doorbell syscalls are all included). CPU = the GL client's VRAM write/read (kernel CPU copy through the aperture, measured 44 MB/s write, 7.5 MB/s read+write) on a scratch area. The CPU proxy carries a syscall cost of about 70 us per call that Quartz writing the mapped framebuffer would not pay, so the small-size rows exaggerate the hardware advantage.
+
+| size | HW fill 1 op/buf | HW fill 32/buf | CPU write | HW copy 1 op/buf | HW copy 32/buf | CPU read+write |
+|---|---|---|---|---|---|---|
+| 16x16 | 88 us | 26 us | 79 us | 90 us | 28 us | 220 us |
+| 64x64 | 90 us | 48 us | 184 us | 100 us | 59 us | 1070 us |
+| 128x128 | 172 us | 131 us | 714 us | 202 us | 160 us | 4180 us |
+| 256x256 | 501 us (249 MB/s) | 461 us | 2854 us (44 MB/s) | 593 us (211 MB/s) | 552 us | 16.7 ms (7.5 MB/s) |
+| 512x384 | 1.38 ms (272 MB/s) | 1.34 ms | 8.5 ms | 1.63 ms (230 MB/s) | 1.59 ms | 50 ms |
+
+- Hardware fills run at 250-280 MB/s and copies at 210-235 MB/s for large rectangles: about 6x the CPU write rate for fills and about 30x the CPU copy rate (VRAM reads are the CPU's problem). Per-op overhead is about 40-85 us with one op per buffer (what the plugin sends) and about 25 us batched.
+- Break-even against a direct CPU store at 44 MB/s: about 45x45 pixels for fills (one op per buffer), about 18x18 for copies. Below that the CPU path is faster; the plugin has no say in it (CoreGraphics decides which regions go to hardware).
+- Not yet measured: the real WindowServer flush with 2D on vs off (an A/B needs a WindowServer restart per side). Quartz sent only 13 ops for a window drag and resize, so the window-level difference is expected to be small; the table is the answer to "is the hardware path faster".
+- A5 coexistence: `gl_suite` 291/0 while `twod_bench` ran concurrently from another process (2D and GL clients both using the engine, WindowServer's client also open); every op programs the full engine context, so interleaving costs only the per-op overhead above. 0 refused buffers.
+- Bug found and fixed by the leak check: `RageLT2DClient::clientClose` did not `terminate()`, so each closed client stayed alive (40 instances after about 36 short opens, with their buffers). Fixed; instance count returns to 1 (WindowServer's).
+- `twod_test` needs the debug kext (it reads the scanout through `RAGE_GL_SCANOUT_READ`, `tools/rig/redeploy.sh`); on the release kext it stops at "scanout read failed", which is expected.
