@@ -102,7 +102,7 @@ void RageLTDevice::xferInit(void)
     fXferStageKva = (volatile uint8_t *)fXferStage->getBytesNoCopy(); fXferTabKva = (volatile uint8_t *)fXferTab->getBytesNoCopy();
     if (!pt || pt >= 0x80000000u || seg < PAGE_SIZE || ((uint32_t)pt & 0xfu) || !fXferStageKva || !fXferTabKva) { LOG("upload table not usable\n"); return; }
     fXferStageBus = (uint32_t)ps; fXferTabBus = (uint32_t)pt;
-    fXferOk = true; fXferUse = true;
+    fXferOk = true; fXferUse = !RAGE_VRAM_WC;      /* with the write-combine upload mapping the CPU path is faster end to end (3.7 ms vs 7.6 ms for 256 KB, Nov 27): DMA upload stays available via RAGE_GL_CONFIG key 2 */
     logEvent(RAGE_EV_MARK, 0, 0xd0070000u, fXferStageBus, fXferTabBus, fXferStageBytes, 0);
 }
 

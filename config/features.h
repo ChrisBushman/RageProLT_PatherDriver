@@ -29,6 +29,9 @@
 #ifndef RAGE_FEAT_FS_SCALE
 #define RAGE_FEAT_FS_SCALE    1   /* full-screen 32 bpp inside 8 MB VRAM (bug L4)                        (Phase 3/5) */
 #endif
+#ifndef RAGE_VRAM_WC
+#define RAGE_VRAM_WC          1   /* second, write-combined VRAM mapping used only for texture-upload data stores (3.2x faster than the inhibited map; beats the DMA path end to end, Nov 27); registers stay on the inhibited map. 0 = single inhibited map */
+#endif
 #ifndef RAGE_VSYNC_DEFAULT
 #define RAGE_VSYNC_DEFAULT    3   /* v-sync wait before a raw-copy present: 0 off, 1 poll (100% CPU), 3 sleep-then-spin (27% CPU); RAGE_GL_CONFIG key 9 overrides at run time (blind tearing test Nov 27: off tears, 1 and 3 do not) */
 #endif

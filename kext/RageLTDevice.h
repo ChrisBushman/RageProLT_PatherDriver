@@ -55,7 +55,7 @@ class RageLTDevice : public ATIRagePro
     IOMemoryMap         *fMap;
     uint32_t            fVsync, fVsyncCalls, fVsyncInVbl, fVsyncTimeouts, fVsyncSleeps, fVsyncMarginUs; uint64_t fVsyncNs;   /* v-sync experiment (RAGE_GL_CONFIG key 9: 0 off, 1 poll for the start of vertical blank before a present) */
     void                vsyncWait(void);                  /* fLock held */
-    IOMemoryMap         *fWCMap;            /* B8 experiment (-DRAGE_VRAM_WC=1): second, write-combined mapping of VRAM used only for vramCopyIn's data stores; registers stay in fMap */
+    IOMemoryMap         *fWCMap;            /* RAGE_VRAM_WC (default 1, config/features.h): second, write-combined mapping of VRAM used only for vramCopyIn's data stores; registers stay in fMap */
     volatile uint8_t      *fRegs;        /* BAR0 + 0x7FF800: real register byte offsets 0..0x7FC */
     IOLock              *fLock;
     struct rage_vram     fVram;        /* the only VRAM allocator (design 3.1) */

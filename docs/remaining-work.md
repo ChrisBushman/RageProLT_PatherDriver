@@ -42,7 +42,7 @@ G4 reboots/recovery and panics acceptable; kext build/load on the G4 (not stock 
 - B5 RAGE_FEAT_FS_SCALE (hardware-scaler upscale for fullscreen 32 bpp; verify quality)
 - B6 GL: front-end scaler blit, paletted textures, stencil
 - B7 ARB fragment programs
-- B8 texture upload by DMA
+- B8 texture upload by DMA: DROPPED Nov 27 (user agreed): the write-combine upload mapping (RAGE_VRAM_WC, now default) is faster end to end than DMA
 - B10 hardware DVD/MPEG2 assist; author test DVD content (video + audio) ourselves
 
 - B1g-1/B1g-4 RESULTS (this commit): backing rowbytes always a multiple of 64 and page-aligned shmem, per-rect source pointer alignment depends on x; debug bit 0x400000 settable only via CGSSetDebugOptions (Quartz Debug is the only shipped caller, constants not decoded); WindowServer maps VRAM with default (inhibit) cache because our stub sets no cache flags; write-combine measured 3.7x store speed (117 vs 31 MB/s) but CoreGraphics cannot request it. PROPOSED, awaiting agreement: B1g-5 = stub returns an IODeviceMemory subclass whose map() forces write-combine (see memory-to-screen-blit.md).

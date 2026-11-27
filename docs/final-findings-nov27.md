@@ -78,3 +78,7 @@ Confirms the static reasoning: with the wait the blit stays ahead of the beam; w
 
 `config/features.h` `RAGE_VSYNC_DEFAULT` = 3 (0 off, 1 poll, 3 sleep-then-spin, margin 2.5 ms); `RAGE_GL_CONFIG` key 9/10 still override at run time. It applies to the same-format raw-copy present only; the textured-quad and overlay presents do not wait. Verified on the release kext after a fresh load: `default_vsync` (no config call) 59.8 fps; gl_suite 291/0; layout_exercise (Atlantis, Flurry, Chess, Sonic R, 7 min): 6251 waits, 0 timeouts, 26893 sleeps, no new crash logs, panic.log unchanged. The test tools `present_bench` and `tear_test` now restore the default (3) on exit rather than forcing it off.
 Future iteration (user): event-driven or overlapped waiting so the CPU is free for other work during the wait.
+
+## Addendum: write-combine upload is now the default; B8 dropped (user agreed Nov 27)
+
+`RAGE_VRAM_WC` = 1 in `config/features.h`: `vramCopyIn` stores through a second, write-combined VRAM mapping (registers stay on the inhibited map). With it the CPU upload path is the default (`fXferUse = !RAGE_VRAM_WC`); DMA upload remains available with `RAGE_GL_CONFIG` key 2 = 1. Release kext, G4: `xfer_test time` 256 KB: CPU path 3.7 ms per upload+fence, DMA path 7.6 ms; 1 MB: 14.5 ms vs 31.8 ms (the CPU path was 8.55 / 34.3 ms before write-combine). Gates: `xfer_test` ALL PASSED (byte-exact, 4 concurrent clients), `gl_suite` 291/0, layout_exercise (Atlantis, Flurry, Chess, Sonic R) with no new crash logs and panic.log unchanged. B8 (further DMA upload work) is dropped.
