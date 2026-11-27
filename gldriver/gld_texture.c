@@ -267,6 +267,10 @@ static int tex_upload_image(uint32_t dst_off, uint32_t w, uint32_t h, const unsi
     uint32_t n = w * h, i, bytes = (n * bpt + 3u) & ~3u, done = 0;
     unsigned char *buf; int rc = 0, flags = 0;
     if (!tex_conn()) return 0;
+    if ((hwfmt == 11u || hwfmt == 12u) && bpt == 2u && ((n * 2u) & 3u) == 0u) {     /* GL_APPLE_ycbcr_422: VRAM bytes = source bytes, so upload the (tight) source as it is: no staging buffer, no per-texel loop, no swap (video frames: 691 KB each, 30 per second) */
+        while (done < bytes && !rc) { uint32_t c = bytes - done; if (c > 0x80000u) c = 0x80000u; rc = rgb_upload2(g_cur, dst_off + done, src + done, c, 0); done += c; }
+        return !rc;
+    }
     buf = (unsigned char *)calloc(1, bytes);
     if (!buf) return 0;
     if (bpt == 4u) { uint32_t *d = (uint32_t *)buf; for (i = 0; i < n; i++) d[i] = tex_texel_argb(src, i, fmt, type); flags = 2; }
