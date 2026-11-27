@@ -50,3 +50,14 @@ Background: stock handles sleep exactly like a mode change and keeps no chip sta
 5. B2: agree a, c, e, f (+b); trim d.
 6. Quartz Extreme last, as you said.
 7. Remaining untested without you: overlay/FS_SCALE/DVD/TV-out visuals, tearing check, B2d.
+
+## Addendum: flush-heavy scroll test for write-combine (WindowServer CPU)
+
+`tools/rig/flushscroll.sh` scrolls a 520x8000 busy image in Preview (Actual Size, 150 wheel jumps of 40 lines, each larger than the window, so every jump is a full redraw; the engine handled only 3 ops per run, i.e. the work is CPU flush). Session restarted per write-combine setting. WindowServer CPU per 150 jumps, 8 runs each:
+
+| | runs (s) | mean | median |
+|---|---|---|---|
+| write-combine off | 0.45 1.62 1.00 0.44 0.79 1.21 0.78 1.00 | 0.91 | 0.90 |
+| write-combine on  | 0.15 0.94 1.07 0.21 1.51 0.68 0.80 0.86 | 0.78 | 0.83 |
+
+About 10% lower with write-combine on, but the run-to-run spread (0.15-1.62 s) is far larger than that difference, so it is **not significant**. The first run after a session restart is lowest in both settings. Conclusion unchanged: no demonstrated CPU benefit for WindowServer; leave write-combine off for it.
