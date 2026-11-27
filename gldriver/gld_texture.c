@@ -404,9 +404,22 @@ static int mach64_upload(gld_context *ctx, void *texobj)
         lvl[nlevels].fmt  = *(const uint16_t *)(r + 0x0c);
         lvl[nlevels].type = *(const uint16_t *)(r + 0x0e);   /* pixel type (0x1401 UBYTE / 0x8363 5_6_5) */
         lvl[nlevels].bytes = 0;
+        {   /* GL_UNPACK_CLIENT_STORAGE_APPLE: GLEngine keeps the application's own buffer (level record flag: byte +0x07 bit 0) and its row length in texels
+             * (halfword +0x08, measured with a debug dump: 64 for a tight 64-wide level, 80 with GL_UNPACK_ROW_LENGTH 80 + client storage).  Without client storage GLEngine has
+             * already repacked tightly.  DVD Player's AltiVec driver uploads its video frames this way (row pitch != width), so reading them as tight rows sheared the picture
+             * (green with slanting lines).  Repack to tight rows here so everything below sees width * bytes-per-texel pitch. */
+            uint32_t rowlen = *(const uint16_t *)(r + 0x08), bpp = tex_src_bytes(1, 1, (uint16_t)lvl[nlevels].fmt, (uint16_t)lvl[nlevels].type);
+            if ((r[0x07] & 1u) && rowlen > lw && bpp && bpp <= 16u) {
+                unsigned char *d = (unsigned char *)malloc((size_t)lw * lh * bpp); uint32_t y;
+                if (d) {
+                    for (y = 0; y < lh; y++) memcpy(d + (size_t)y * lw * bpp, (const unsigned char *)(uintptr_t)lsrc + (size_t)y * rowlen * bpp, (size_t)lw * bpp);
+                    lvl[nlevels].src = (uint32_t)(uintptr_t)d; dec_bufs[nlevels] = d;
+                }
+            }
+        }
         nlevels++;
     }
-    if (!nlevels) return 0;
+    if (!nlevels) { int k; for (k = 0; k < 12; k++) free(dec_bufs[k]); return 0; }
     /* Unchanged re-upload of a resident texture: nothing to do. */
     {   uint32_t h1 = 0, h2 = 0, hl = 0, k; mach64_tex_slot *ex;
         {
@@ -433,7 +446,7 @@ static int mach64_upload(gld_context *ctx, void *texobj)
                 uint32_t n = lvl[L].w * lvl[L].h, i, k; const unsigned char *ix = (const unsigned char *)(uintptr_t)lvl[L].src; unsigned char *d = (unsigned char *)malloc((size_t)n * be);
                 if (!d) { int q; for (q = 0; q < 12; q++) free(dec_bufs[q]); return 0; }
                 for (i = 0; i < n; i++) for (k = 0; k < be; k++) d[i * be + k] = pl[(uint32_t)ix[i] * be + k];
-                lvl[L].src = (uint32_t)(uintptr_t)d; lvl[L].fmt = be == 3u ? 0x1907u : 0x1908u; dec_bufs[L] = d;
+                lvl[L].src = (uint32_t)(uintptr_t)d; lvl[L].fmt = be == 3u ? 0x1907u : 0x1908u; free(dec_bufs[L]); dec_bufs[L] = d;
             }
         }
     }
@@ -441,7 +454,7 @@ static int mach64_upload(gld_context *ctx, void *texobj)
         if (lvl[L].fmt >= 0x83F0u && lvl[L].fmt <= 0x83F3u) {
             unsigned char *d = s3tc_decode((const unsigned char *)(uintptr_t)lvl[L].src, lvl[L].w, lvl[L].h, lvl[L].fmt);
             if (!d) { int k; for (k = 0; k < 12; k++) { free(dec_bufs[k]); } return 0; }
-            lvl[L].src = (uint32_t)(uintptr_t)d; lvl[L].fmt = (lvl[L].fmt == 0x83F0u) ? 0x1907u : 0x1908u; lvl[L].type = 0x1401u; dec_bufs[L] = d;
+            lvl[L].src = (uint32_t)(uintptr_t)d; lvl[L].fmt = (lvl[L].fmt == 0x83F0u) ? 0x1907u : 0x1908u; lvl[L].type = 0x1401u; free(dec_bufs[L]); dec_bufs[L] = d;
             if (lvl[L].fmt == 0x1907u) {                         /* RGB: drop the (opaque) alpha bytes into a packed RGB array */
                 uint32_t n = lvl[L].w * lvl[L].h, i; for (i = 0; i < n; i++) { d[i * 3] = d[i * 4]; d[i * 3 + 1] = d[i * 4 + 1]; d[i * 3 + 2] = d[i * 4 + 2]; }
             }
@@ -549,7 +562,7 @@ static int mach64_upload(gld_context *ctx, void *texobj)
             if (t0 == 0x8363u) { hwfmt = 4u; bpt = 2u; }
             else if (t0 == 0x8033u) { hwfmt = 15u; bpt = 2u; }
             else if (t0 == 0x8034u) { hwfmt = 3u; bpt = 2u; }
-            else if (f0 == 0x85B9u && (t0 == 0x85BAu || t0 == 0x85BBu)) { hwfmt = (t0 == 0x85BAu) ? 12u : 11u; bpt = 2u; }   /* GL_APPLE_ycbcr_422: memory [Cb Y0 Cr Y1] (8_8_APPLE) = hardware datatype 12 (measured: it takes Y from the 2nd byte); _REV [Y0 Cb Y1 Cr] = 11 */
+            else if (f0 == 0x85B9u && (t0 == 0x85BAu || t0 == 0x85BBu)) { hwfmt = (t0 == 0x85BAu) ? 11u : 12u; bpt = 2u; }   /* GL_APPLE_ycbcr_422: 8_8_APPLE = memory [Y0 Cb Y1 Cr] = hardware datatype 11; _REV [Cb Y0 Cr Y1] = datatype 12 (which takes Y from the 2nd byte).  Established from DVD Player's AltiVec driver: its decoder writes Y Cb Y Cr and uploads it as 8_8_APPLE (this was swapped before: the colours came out wrong, red->green); tools/ragegl/ycbcr_test. */
             else if (f0 == 0x1909u && t0 == 0x1401u && lvl[0].w >= 4) { hwfmt = 8u; bpt = 1u; }   /* GL_LUMINANCE -> Y8 (1 byte/texel) */
             else { hwfmt = alpha0 ? 15u : 4u; bpt = 2u; }   /* default: 16-bit (565 / 4444) -- the 1.5 MB heap otherwise thrashes (Sonic R: 6800 evictions/20 s as ARGB8888) */
         }

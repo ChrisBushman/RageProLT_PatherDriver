@@ -398,7 +398,16 @@ int gldModifyTexture(void *ctx, void *t, uint32_t a3)
     return 0;
 }
 int gldModifyTextureLevel(void *ctx, void *t, uint32_t a3, uint32_t lvl, uint32_t a5, uint32_t a6, uint32_t a7)
-{ (void)ctx; return 0; }
+{
+    /* glTexSubImage2D after the texture exists reaches the driver ONLY as this call (a3 = 0, level, rectangle args 0): gldModifyTexture is not called again (measured with a
+     * debug log, tools/ragegl/ycbcr_test "sub twice").  Ignoring it left every later sub-image update invisible -- DVD Player's AltiVec driver updates its video texture
+     * with glTexSubImage2D each frame, so the picture never changed from its initial fill.  Queue the texture for re-upload at the next draw; the content hash in
+     * mach64_upload skips it when nothing changed. */
+    (void)a3; (void)lvl; (void)a5; (void)a6; (void)a7;
+    rage_fill_descriptor((gld_context *)ctx);
+    mach64_texture_dirtied(t);
+    return 0;
+}
 int gldGetTextureLevel(void *ctx, void *t, uint32_t a3, uint32_t a4, uint32_t a5, uint32_t a6, uint32_t a7)
 { (void)ctx; return 0; }
 /* glGetTexLevelParameter for the driver.  a3=level, a5=pname (GL enum), a6=out (write the value here),
