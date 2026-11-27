@@ -8,6 +8,7 @@
 #include <IOKit/IOLib.h>
 
 #if RAGE_DEBUG_ENGTEST
+#include <kern/clock.h>
 
 #define SURF_PX     256u                    /* test surface 256 x 256, 16 bpp */
 #define SURF_BYTES  (SURF_PX * SURF_PX * 2u)
@@ -291,4 +292,35 @@ IOReturn RageLTDevice::engineSelfTest(uint32_t mask, uint32_t *passmask, uint32_
 }
 #else
 IOReturn RageLTDevice::engineSelfTest(uint32_t, uint32_t *, uint32_t *, uint32_t *, uint32_t *) { return kIOReturnUnsupported; }
+#endif
+
+#if RAGE_DEBUG_ENGTEST
+/* B1g-4: what do the CPU cache modes do to aperture store/load speed?  Only the caller's own allocated block is touched. */
+IOReturn RageLTDevice::apertureBench(uint32_t owner, uint32_t off, uint32_t len, uint32_t mode, uint32_t *wns, uint32_t *rns)
+{
+    static const IOOptionBits opt[5] = { kIOMapInhibitCache, kIOMapWriteCombineCache, kIOMapWriteThruCache, kIOMapCopybackCache, kIOMapDefaultCache };
+    IOMemoryMap *m; volatile uint8_t *v; uint32_t pass, i, sink = 0; IOReturn rc = kIOReturnBadArgument; AbsoluteTime t0, t1; uint64_t n0, n1, n2;
+    if (mode > 4 || (off | len) & 3u || !len || len > 0x100000u) return kIOReturnBadArgument;
+    m = (mode == 0) ? fMap : fFB->map(opt[mode]);
+    if (!m) return kIOReturnNoMemory;
+    if (mode == 0) m->retain();
+    v = (volatile uint8_t *)m->getVirtualAddress();
+    IOLockLock(fLock);
+    if (rage_vram_owns(&fVram, off, len, owner)) {
+        rc = kIOReturnSuccess;
+        if (fEngineLive && idleWait()) rc = kIOReturnTimeout;
+        else {
+            clock_get_uptime(&t0); absolutetime_to_nanoseconds(t0, &n0);
+            for (pass = 0; pass < 8; pass++) { for (i = 0; i < len; i += 4) OSWriteLittleInt32((void *)v, off + i, i ^ pass); __asm__ volatile("sync" ::: "memory"); }
+            (void)OSReadLittleInt32((void *)v, off + len - 4); __asm__ volatile("sync" ::: "memory");
+            clock_get_uptime(&t1); absolutetime_to_nanoseconds(t1, &n1);
+            for (pass = 0; pass < 8; pass++) for (i = 0; i < len; i += 4) sink += OSReadLittleInt32((void *)v, off + i);
+            clock_get_uptime(&t0); absolutetime_to_nanoseconds(t0, &n2);
+            *wns = (uint32_t)((n1 - n0) / 8u); *rns = (uint32_t)((n2 - n1) / 8u) + (sink == 0x12345678u ? 1u : 0u);
+        }
+    }
+    IOLockUnlock(fLock);
+    m->release();
+    return rc;
+}
 #endif

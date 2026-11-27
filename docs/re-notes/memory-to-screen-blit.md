@@ -211,3 +211,32 @@ Reading:
 - Wiring cost per page; behaviour when the owning task dies mid-transfer.
 - Behaviour of `kIOBlitBeamSync`; meaning of `dev8+0xac` bit 0x08 and of the registry number property that sets bit 0x80.
 - Why the stock plugin never implemented the memory protocol; whether the Lombard's PCI path is cache-coherent for DMA reads of user memory.
+
+## B1g-1 and B1g-4 results (Nov 26, static decode of CoreGraphics + one G4 measurement)
+
+### B1g-1: window backing alignment (static, CoreGraphics `_CGXBackingStoreCreate` 0x936d9bc8)
+- `rowbytes = ((width * bitsPerPixel / 8) + 63) & ~63` (0x936d9c34-0x936d9c5c: `srwi 3`, `mullw`, `addi 0x3f`, `rlwinm ..0,0,0x19`). **Rowbytes is always a multiple of 64.**
+- Size = `rowbytes * (height + 4)` (0x936d9c74: `r24 + 4` rows), with an overflow check; the memory is a shared-memory object made by `_CGXCreateShmem` (0x936dfae4: `_allocTaskVM` + `mach_make_memory_entry_64`), i.e. **page-aligned** at its base. The record keeps rowbytes at +0x48 and the shmem address at +0x38 (read back by `_CGXWindowBackingGet`).
+- The gate in 1.4 therefore passes the 64-byte rowbytes test for every backing, and the base is page aligned. What is NOT aligned is the per-blit source pointer: it is the pixel at (x, y) of the dirty rect (`base + y*rowbytes + x*bytes`), so its 16-byte/64-byte alignment depends on the rect's left edge; only x multiples of 64/bytes-per-pixel qualify without a CPU edge fix-up. Not measured: the distribution of dirty-rect x origins in real use.
+- The GL-compositor tile path (`_bestBackingStoreSize` 0x9371bd2c) is Quartz Extreme only and not used here.
+
+### B1g-1: CGS debug option bits (static)
+- 44 CoreGraphics functions load the flag word `__CGSDebugOptionFlags_`; bits tested (heuristic scan of the next 40 instructions, so a bit can be attributed to a neighbouring function): 0x1 (`_CGXGetNextEvent`, obscure/reveal), 0x2 (`__CGXGeometryUpdate`, window dirty region), 0x4 (`_CGXRedrawDisplay`, `__CGSLockWindow`), 0x8 (`_CGSUpdateDebugOptions` enables malloc debugging; `_CGXWindowHasShadow`), 0x10 (`_MPHWCopyPixels`), 0x100 (`_CGXAccessDisplayDeviceSurface`, `_CGXMoveableVisibleRegion`), 0x20000 (`__CGSDebugXORFlashRegion`: screen-update flash), 0x40000 (drawing entry points: `_CGContextDrawImage`, `DrawPath`, ...), 0x100000 (`_CGXFlushWindow`, `_CGXMoveWindowList`, tracking rects), **0x400000 (only `_CGXNextSurface`: the memory-source request)**, 0x8000000 (`_MPHWCopy`, `_MPHWCopyRegion`, `_MPHWCopyPixels`: hardware-2D enables/disables), 0x10000000 and above (tracking-area drawing, `_CGXRunOneServerPass`).
+- **Who can set it:** only the client call `CGSSetDebugOptions` -> server `__CGSSetDebugOptions`. There is no environment variable or defaults key in the library (the only `getenv` calls are `CG_FONT_LIBRARY` and `CGS_LIBRARY_PATH`). The one shipped caller found is **Quartz Debug** (`/Developer/Applications/Performance Tools/Quartz Debug.app` imports `_CGSSetDebugOptions`; its menu has "Flash screen updates (yellow)", "Flash identical updates (red)", "No delay after flash", a Quartz Extreme toggle and a frame meter, with a hot key toggling the flags). Which constants Quartz Debug passes was not decoded (`otool -tv` produced no listing on this host), so whether any of its checkboxes sets 0x400000 is **not established**; nothing in its menu is labelled as a memory blit.
+- Verdict for the memory-to-screen path: it only exists behind an unlabelled debug bit that no shipped tool is known to set; the feature cannot be relied on in normal use. (Recommendation unchanged: do not build it.)
+
+### B1g-4: cache mode of the aperture mapping WindowServer gets
+- **How CoreGraphics picks the mode** (`_CGXMappedDisplayStart` 0x93789aa4-0x93789ac4; `_MPMapFramebuffer` 0x9373a934 uses a stored copy): it reads the framebuffer's pixel-information `flags` and requests `IOConnectMapMemory(.., type 0x6e, options)` with options **0x300 (kIOMapCopybackCache) if `kFramebufferSupportsCopybackCache` (0x10000)**, **0x200 (kIOMapWriteThruCache) if `kFramebufferSupportsWritethruCache` (0x20000)**, otherwise **0 (default cache)**; on failure it retries with `| 1` (kIOMapAnywhere). `IOFramebufferUserClient::clientMemoryForType` does not set any options itself, so the user's options are the only source of the cache mode. **CoreGraphics never asks for write-combine.**
+- Our stub's mode info sets only `kDisplayModeValidFlag/SafeFlag` and the pixel-info `flags` are not set, so WindowServer gets the default cache mode, which for device memory is cache-inhibited (guarded): the same as the kext's own register/aperture mapping.
+- **Measured** (debug kext, new selector 25 `RAGE_GL_APERTURE_BENCH`, tool `tools/ragegl/aperture_bench`, 256 KB of the caller's own VRAM, 32-bit stores/loads in the kernel, 8 passes, `sync` + read-back of the last word at the end):
+
+| mode | store | load | note |
+|---|---|---|---|
+| inhibit (kext) / default | 31.3 MB/s | 9.6 MB/s | same as the earlier 33 MB/s |
+| **write-combine** | **117-122 MB/s** | 13.6 MB/s | about 3.7x the stores; close to the 33 MHz PCI burst limit; reads stay slow |
+| write-through | 985 MB/s | 1271 MB/s | NOT a valid VRAM speed: stores sit in the cache and the read-back hits the cache, so nothing proves they reached the chip |
+| copyback | 1046 MB/s | 1365 MB/s | same caveat; cached reads would also go stale after any engine write |
+
+- Cached modes (write-through/copyback) are unsafe with the hardware 2D path: the engine writes VRAM behind the CPU cache, nothing on PCI snoops, and a cached load would return stale pixels. They should stay off. **Write-combine is the useful one** but CoreGraphics cannot request it.
+- **Possible route (not built, needs agreement):** the stub's `getApertureRange` hands WindowServer an `IODeviceMemory`; a small subclass overriding `map()` to OR in `kIOMapWriteCombineCache` would give WindowServer's CPU stores (everything the hardware 2D path does not take, i.e. window flushes) about 3.7x the speed with no DMA. Risks to check first: store ordering/flush at the end of a frame (the stock path relies on the swapped upper aperture view), cursor and overlay interaction, and that the kernel really maps the upper (byte-swapped) view write-combined. This is a candidate follow-up, call it B1g-5, and it is also the cheap alternative to the DMA flush idea of section 5.
+- The debug selector is only in `RAGE_DEBUG_ENGTEST` builds.

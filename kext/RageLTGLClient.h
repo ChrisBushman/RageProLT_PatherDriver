@@ -46,6 +46,7 @@ public:
     IOReturn selSwapTarget(uint32_t dstOff);
     IOReturn selPresentScaled(uint32_t s, uint32_t sz, uint32_t d, uint32_t dsz, uint32_t filter);
     IOReturn selScanoutRead(uint32_t byteOff, uint32_t addr, uint32_t len);
+    IOReturn selApertureBench(uint32_t off, uint32_t len, uint32_t mode, uint32_t *wns, uint32_t *rns);   /* RAGE_DEBUG_ENGTEST only */
     IOReturn selRegDump(uint32_t addr, uint32_t len);       /* debug builds only, read-only */
     IOReturn selOvlOn(uint32_t off, uint32_t pitch, uint32_t src, uint32_t dst, uint32_t dsz, uint32_t bpp);   /* RAGE_FEAT_OVERLAY */
     IOReturn selOvlOff(void);
