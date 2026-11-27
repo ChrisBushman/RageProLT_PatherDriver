@@ -187,3 +187,9 @@ Trade-offs: nearest-neighbour scaling (the quad was bilinear); (the pointer-hidd
 
 `tools/rig/pointer_over_overlay.sh`: Rage display switched to 1024x768, `ovl_flip 2 15 3000` (640x480 15 bpp buffers stretched over the scanout, bars/grid and diagonals), `cursor_walk` x3 then parked in the middle (centre, edges, corners; stub registers during the walk: GEN_TEST_CNTL 0x180, loaded 1, visible 1).
 User: arrow visible over the picture, proper shape and colour, no vanishing at edges/corners, no picture flicker or breakup when it moves. **This supersedes the earlier "pointer hidden under the overlay" limitation (Nov 25/26, software cursor): the stub's hardware cursor (default since Nov 26) is drawn above the overlay.** The cursor-over-overlay item of B4 is closed.
+
+## 23. FS_SCALE quality, blind A/B (user's eyes, Nov 27)
+
+`tools/ragegl/scale_ab.c`: the same 640x480 picture (diagonals, three circles, colour + grey gradient strips, 1-pixel line box) on a 1024x768 1555 scanout (1.6x), 25 s each, order randomised and hidden. A = textured-quad present (bilinear), B = hardware overlay (nearest/replicating).
+User: A slightly stair-stepped, lines crisp, gradients smooth; B the same on all three points; **no visible difference**.
+Conclusion: for the 1.6x full-screen upscale the overlay's replication is visually indistinguishable from the quad's bilinear filter on this display, and the overlay costs 5.6 ms/frame against 15.4 ms (section 21). The overlay stays the default; nothing to gain from making it filter (B4 V1/Y3 filter experiments are not needed for FS_SCALE quality). B5 quality check closed.
