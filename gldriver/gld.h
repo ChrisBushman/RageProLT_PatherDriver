@@ -96,6 +96,8 @@ typedef struct {
     uint32_t   fb_w, fb_h;         /* drawable size */
     uint32_t   win_x, win_y;       /* window content origin on the Rage's display (present destination) */
     uint32_t   win_mode;           /* 1 = a window (present at win_x,win_y), 0 = full screen */
+    uint32_t   offscreen;          /* 1 = CGL off-screen context (attach type 0x35): never presented to the scanout; glFinish/CGLFlushDrawable copy the target into the app's memory */
+    uint32_t   off_base, off_rowbytes;   /* the app's system-memory drawable (descriptor words 3 and 2): top-down ARGB8888 rows */
     uint32_t   cgs_win, cgs_surf;
     uint32_t   frame_new;          /* 1 => the colour/Z clear of this frame is still owed */
     uint32_t   init_clear;         /* 1 => the colour buffer has never been defined (new surface): clear it once even if the app does not glClear */
@@ -176,6 +178,7 @@ void     mach64_frame_start(gld_context *ctx);
 void     mach64_clear_color(gld_context *ctx);
 void     mach64_clear_zbuffer(gld_context *ctx);
 void     mach64_present(gld_context *ctx);
+int      mach64_offscreen_flush(mach64_priv *p);   /* copy the colour target into the off-screen drawable's memory (top-down ARGB8888); 0 = ok */
 int      mach64_mode_check(gld_context *ctx);
 int      mach64_build_surface(gld_context *ctx);
 void     mach64_surf_unregister(mach64_priv *p);

@@ -74,13 +74,15 @@ int gldAttachDrawable(gld_context *ctx, int type, void *drawable, uint32_t flags
     if (!ctx) return 0x271e;
     pv = MACH64_PRIV(ctx);
     if ((type == 0x50 || type == 0x5a || type == 0x36) && !drawable) return 0x2715;
+    { static const char *al = (const char *)1; if (al == (const char *)1) al = getenv("RAGE_ATTACH_LOG");       /* debug: RAGE_ATTACH_LOG=1 prints every attach (type, flags, first descriptor words) to stderr */
+      if (al && drawable) { const uint32_t *w = (const uint32_t *)drawable; fprintf(stderr, "rage attach: type 0x%x flags 0x%x drawable %p: %08x %08x %08x %08x %08x %08x %08x %08x\n", type, flags, drawable, w[0], w[1], w[2], w[3], w[4], w[5], w[6], w[7]); } }
     if (type == 0 || !drawable) {                         /* detach: drain, give the VRAM back */
         mach64_repaint_stop(pv);
         mach64_flush_batch(ctx);
         rgb_fence(&pv->rb);
         mach64_surf_unregister(pv);
         rgb_release(&pv->rb);
-        pv->attached = 0; pv->win_mode = 0;
+        pv->attached = 0; pv->win_mode = 0; pv->offscreen = 0;
         return 0;
     }
     {
@@ -92,8 +94,11 @@ int gldAttachDrawable(gld_context *ctx, int type, void *drawable, uint32_t flags
         rgb_fence(&pv->rb);
         mach64_surf_unregister(pv);
         rgb_release(&pv->rb);
-        pv->attached = 0; pv->win_mode = 0; pv->win_x = pv->win_y = 0;
-        if (g_gld_force_w && g_gld_force_h) { width = g_gld_force_w; height = g_gld_force_h; }
+        pv->attached = 0; pv->win_mode = 0; pv->offscreen = 0; pv->win_x = pv->win_y = 0;
+        if (type == 0x35) {          /* CGL off-screen drawable: descriptor words = width, height, rowbytes, base address (cgl_offscreen on the G4); never shown on the scanout */
+            if (!d[0] || !d[1] || d[0] > 2048 || d[1] > 2048 || !d[3] || d[2] < d[0] * 4u) return 0x2715;      /* not a layout we understand: refuse so GLEngine uses another renderer */
+            width = d[0]; height = d[1]; pv->offscreen = 1; pv->off_rowbytes = d[2]; pv->off_base = d[3];
+        } else if (g_gld_force_w && g_gld_force_h) { width = g_gld_force_w; height = g_gld_force_h; }
         else if (mach64_cgs_resolve_bounds(d[1], d[2], pv->dbuf, &wx, &wy, &ww, &wh) && ww > 0 && wh > 0 && ww <= 2048 && wh <= 2048) {
             /* a window: the descriptor carries CGS ids, the true content rectangle comes from CGS (resolved once; the position drifts per call) */
             width = (uint32_t)ww; height = (uint32_t)wh; pv->win_mode = 1; pv->win_x = (uint32_t)wx; pv->win_y = (uint32_t)wy;

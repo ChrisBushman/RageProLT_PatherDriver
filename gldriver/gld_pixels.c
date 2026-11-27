@@ -442,3 +442,32 @@ int mach64_cb_is555(gld_context *c) { return MACH64_PRIV(c)->rb.fmt555 != 0; }
 int mach64_cb_is32(gld_context *c) { return MACH64_PRIV(c)->rb.bpp == 4u; }
 uint32_t mach64_cb_pack(gld_context *c, unsigned R, unsigned G, unsigned B) { return pack16(MACH64_PRIV(c), R, G, B); }
 void mach64_cb_unpack(gld_context *c, unsigned v, unsigned *R, unsigned *G, unsigned *B) { unpack16(MACH64_PRIV(c), v, R, G, B); }
+
+
+/* CGL off-screen drawable (attach type 0x35): copy the colour target into the app's memory.  Reference layout (generic software renderer, cgl_offscreen soft on the G4): rows top-down
+ * (row 0 = top of the image), ARGB8888 words in memory byte order A,R,G,B, alpha byte 0 for a format without alpha bits.  The target holds the same rows top-down. */
+int mach64_offscreen_flush(mach64_priv *p)
+{
+    uint32_t pb, rows, y = 0, x; unsigned char *tmp;
+    if (!p || !p->offscreen || !p->off_base || !p->rb.col_off || !p->fb_w || !p->fb_h) return -1;
+    pb = p->rb.pitch * p->rb.bpp;
+    rows = 0x80000u / pb; if (rows < 1) rows = 1;
+    tmp = (unsigned char *)malloc((size_t)rows * pb);
+    if (!tmp) return -1;
+    while (y < p->fb_h) {
+        uint32_t n = p->fb_h - y < rows ? p->fb_h - y : rows, r;
+        if (rgb_readback2(&p->rb, p->rb.col_off + y * pb, tmp, n * pb, XFER_FOR(p->rb.bpp))) { free(tmp); return -1; }
+        for (r = 0; r < n; r++) {
+            const unsigned char *src = tmp + (size_t)r * pb;
+            unsigned char *dst = (unsigned char *)(uintptr_t)p->off_base + (size_t)(y + r) * p->off_rowbytes;
+            for (x = 0; x < p->fb_w; x++) {
+                unsigned R, G, B; uint32_t v = p->rb.bpp == 4u ? *(const uint32_t *)(const void *)(src + (size_t)x * 4) : *(const uint16_t *)(const void *)(src + (size_t)x * 2);
+                unpack16(p, v, &R, &G, &B);
+                dst[x * 4] = 0; dst[x * 4 + 1] = (unsigned char)R; dst[x * 4 + 2] = (unsigned char)G; dst[x * 4 + 3] = (unsigned char)B;
+            }
+        }
+        y += n;
+    }
+    free(tmp);
+    return 0;
+}

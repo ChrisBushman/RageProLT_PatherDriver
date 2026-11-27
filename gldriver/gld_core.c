@@ -150,7 +150,8 @@ int mach64_build_surface(gld_context *ctx)
         uint32_t dw = 0, dh = 0, dbpp = 2u, want = 2u;
         if (!rgb_display(&p->rb, &dw, &dh, &dbpp) && dbpp == 4u) want = 4u;
         p->scr_w = dw; p->scr_h = dh;
-        p->fs_scale = (!p->win_mode && dw && dh && (p->fb_w < dw || p->fb_h < dh)) ? 1u : 0u;      /* FS_SCALE: a smaller full-screen drawable is stretched to the scanout */
+        p->fs_scale = (!p->win_mode && !p->offscreen && dw && dh && (p->fb_w < dw || p->fb_h < dh)) ? 1u : 0u;      /* FS_SCALE: a smaller full-screen drawable is stretched to the scanout */
+        if (p->offscreen) want = 4u;                                                                   /* off-screen: full-precision ARGB8888 target (falls back to 16 bpp below if the VRAM does not allow it) */
         if (p->fs_scale) want = 2u;                                                                    /* a 4 KB-pitch 32 bpp texture is ~30x slower to sample (387 ms vs 13 ms per 1024x768, measured): stretch from a 16 bpp target */
         p->use_ovl = (p->fs_scale && rgb_overlay_wanted(&p->rb, p->fb_w)) ? 1u : 0u;                  /* overlay present: no engine time per frame; falls back to the quad if the kernel refuses */
         p->rb.dbl = (int)p->use_ovl; p->rb.ovl_fail = 0;
@@ -360,6 +361,7 @@ void mach64_present(gld_context *ctx)
     if (!p || !p->attached) return;
     mach64_flush_batch(ctx);
     if (!mach64_mode_check(ctx)) return;
+    if (p->offscreen) { rgb_fence(&p->rb); mach64_offscreen_flush(p); p->presents++; return; }       /* off-screen: into the app's memory, never onto the scanout */
     if (present_rects(p)) p->dirty |= MACH64_DIRTY_STATE;                /* the kernel blit reprogrammed the engine for 2D */
     p->presents++;
 }
@@ -400,7 +402,7 @@ int gldFlush(gld_context *ctx)
     mach64_priv *p = MACH64_PRIV(ctx);
     if (!p) return 0;
     mach64_flush_batch(ctx);
-    if (!p->dbuf && p->attached) mach64_present(ctx);                    /* single-buffered: the scanout copy is the only visible result */
+    if (!p->dbuf && p->attached && !p->offscreen) mach64_present(ctx);       /* off-screen contexts copy to memory at glFinish / CGLFlushDrawable only */                    /* single-buffered: the scanout copy is the only visible result */
     return 0;
 }
 
