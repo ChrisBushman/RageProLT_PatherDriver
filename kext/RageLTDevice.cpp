@@ -26,11 +26,23 @@ bool RageLTDevice::start(IOService *provider)
     if (!fPCI) return false;
 
     fPCI->setMemoryEnable(true);                 /* config-space command bits only; no chip access */
+    {   /* B2 evidence (read-only, config space cannot hang): status/command, capability list (ID chain), PM capability and control/status */
+        uint16_t st = fPCI->configRead16(kIOPCIConfigStatus), cmd = fPCI->configRead16(kIOPCIConfigCommand); uint8_t ptr = (st & 0x10) ? (uint8_t)(fPCI->configRead8(0x34) & 0xfc) : 0; int hops = 0;
+        LOG("PCI: command 0x%x status 0x%x capabilities-list %s\n", cmd, st, (st & 0x10) ? "present" : "absent");
+        while (ptr && hops++ < 8) { uint8_t id = fPCI->configRead8(ptr), nx = (uint8_t)(fPCI->configRead8(ptr + 1) & 0xfc); LOG("PCI: capability at 0x%x id 0x%x%s next 0x%x\n", ptr, id, id == 1 ? " (power management)" : id == 2 ? " (AGP)" : "", nx);
+            if (id == 1) LOG("PCI: PM capabilities 0x%x control/status 0x%x\n", fPCI->configRead16(ptr + 2), fPCI->configRead16(ptr + 4));
+            ptr = nx; }
+    }
     fFB = fPCI->getDeviceMemoryWithRegister(kIOPCIConfigBaseAddress0);
     if (!fFB) { LOG("no BAR0\n"); return false; }
     fFB->retain();
     fMap = fFB->map(kIOMapInhibitCache);          /* registers must never be cached on PPC */
     if (!fMap) { LOG("BAR0 map failed\n"); return false; }
+    fWCMap = 0; fVsync = fVsyncCalls = fVsyncInVbl = fVsyncTimeouts = fVsyncSleeps = 0; fVsyncMarginUs = 2500; fVsyncNs = 0;
+#if RAGE_VRAM_WC
+    fWCMap = fFB->map(kIOMapWriteCombineCache);   /* data stores only; falls back to fMap if refused */
+    LOG("VRAM write-combine mapping for uploads: %s\n", fWCMap ? "on" : "refused");
+#endif
     fRegs = (volatile uint8_t *)(fMap->getVirtualAddress() + MACH64_REG_WINDOW);
 
     fLock = IOLockAlloc();
@@ -75,6 +87,7 @@ void RageLTDevice::stop(IOService *provider)
 void RageLTDevice::free(void)
 {
     dmaFree();
+    if (fWCMap) { fWCMap->release(); fWCMap = 0; }
     if (fMap) { fMap->release(); fMap = 0; }
     if (fFB)  { fFB->release();  fFB = 0; }
     if (fLock) { IOLockFree(fLock); fLock = 0; }

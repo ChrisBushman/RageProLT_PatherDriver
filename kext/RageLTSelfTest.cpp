@@ -310,18 +310,22 @@ IOReturn RageLTDevice::apertureBench(uint32_t owner, uint32_t off, uint32_t len,
 {
     static const IOOptionBits opt[5] = { kIOMapInhibitCache, kIOMapWriteCombineCache, kIOMapWriteThruCache, kIOMapCopybackCache, kIOMapDefaultCache };
     IOMemoryMap *m; volatile uint8_t *v; uint32_t pass, i, sink = 0; IOReturn rc = kIOReturnBadArgument; AbsoluteTime t0, t1; uint64_t n0, n1, n2;
+    uint32_t viaBcopy = mode & 0x100u; uint8_t *tmp = 0;       /* B8 experiment: mode | 0x100 = write with the kernel's bcopy (wide stores) from a cached buffer instead of word stores */
+    mode &= 0xffu;
     if (mode > 4 || (off | len) & 3u || !len || len > 0x100000u) return kIOReturnBadArgument;
     m = (mode == 0) ? fMap : fFB->map(opt[mode]);
     if (!m) return kIOReturnNoMemory;
     if (mode == 0) m->retain();
     v = (volatile uint8_t *)m->getVirtualAddress();
+    if (viaBcopy) { tmp = (uint8_t *)IOMalloc(len); if (!tmp) { m->release(); return kIOReturnNoMemory; } for (i = 0; i < len; i += 4) *(uint32_t *)(tmp + i) = i * 2654435761u; }
     IOLockLock(fLock);
     if (rage_vram_owns(&fVram, off, len, owner)) {
         rc = kIOReturnSuccess;
         if (fEngineLive && idleWait()) rc = kIOReturnTimeout;
         else {
             clock_get_uptime(&t0); absolutetime_to_nanoseconds(t0, &n0);
-            for (pass = 0; pass < 8; pass++) { for (i = 0; i < len; i += 4) OSWriteLittleInt32((void *)v, off + i, i ^ pass); __asm__ volatile("sync" ::: "memory"); }
+            if (viaBcopy) for (pass = 0; pass < 8; pass++) { bcopy(tmp, (void *)(v + off), len); __asm__ volatile("sync" ::: "memory"); }
+            else for (pass = 0; pass < 8; pass++) { for (i = 0; i < len; i += 4) OSWriteLittleInt32((void *)v, off + i, i ^ pass); __asm__ volatile("sync" ::: "memory"); }
             (void)OSReadLittleInt32((void *)v, off + len - 4); __asm__ volatile("sync" ::: "memory");
             clock_get_uptime(&t1); absolutetime_to_nanoseconds(t1, &n1);
             for (pass = 0; pass < 8; pass++) for (i = 0; i < len; i += 4) sink += OSReadLittleInt32((void *)v, off + i);
@@ -330,6 +334,7 @@ IOReturn RageLTDevice::apertureBench(uint32_t owner, uint32_t off, uint32_t len,
         }
     }
     IOLockUnlock(fLock);
+    if (tmp) IOFree(tmp, len);
     m->release();
     return rc;
 }

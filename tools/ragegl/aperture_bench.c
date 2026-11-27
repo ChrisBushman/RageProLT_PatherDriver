@@ -11,6 +11,10 @@ int main(void)
         if (kr) { printf("%-30s error 0x%x\n", nm[mode], kr); continue; }
         printf("%-30s store %7.1f MB/s   load %7.1f MB/s\n", nm[mode], len / (w * 1e-9) / 1048576.0, len / (r * 1e-9) / 1048576.0); fflush(stdout);
     }
+    { static const unsigned bm[2] = { 0x100, 0x101 }; static const char *bn[2] = { "inhibit (kext map) + bcopy", "write-combine + bcopy" }; int k;
+      for (k = 0; k < 2; k++) { kern_return_t kr = RGL_CALL(RAGE_GL_APERTURE_BENCH, 3, 2, off, len, bm[k], &w, &r);
+        if (kr) { printf("%-30s error 0x%x\n", bn[k], kr); continue; }
+        printf("%-30s store %7.1f MB/s   (kernel bcopy from a cached buffer)\n", bn[k], len / (w * 1e-9) / 1048576.0); fflush(stdout); } }
     ragegl_free(c, off); ragegl_close(c);
     return 0;
 }

@@ -2,6 +2,7 @@
  * aperture benchmark).  Settles whether a user task's kIOMapWriteCombineCache mapping is really faster than the default one (what WindowServer gets). */
 #include "ragegl.h"
 #include <sys/time.h>
+#include <string.h>
 static double now(void) { struct timeval t; gettimeofday(&t, 0); return t.tv_sec + t.tv_usec * 1e-6; }
 int main(void)
 {
@@ -18,6 +19,9 @@ int main(void)
         t0 = now(); for (p = 0; p < 8; p++) { for (i = 0; i < len / 4; i++) v[i] = i ^ p; __asm__ volatile("sync" ::: "memory"); } t1 = now();
         for (p = 0; p < 8; p++) for (i = 0; i < len / 4; i++) sink += v[i]; t2 = now();
         printf("%-24s store %7.1f MB/s   load %7.1f MB/s%s\n", m[mi].n, 8.0 * len / (t1 - t0) / 1048576.0, 8.0 * len / (t2 - t1) / 1048576.0, sink == 1 ? " " : ""); fflush(stdout);
+        { static uint32_t src[0x10000]; double m0, m1; for (i = 0; i < 0x10000; i++) src[i] = i * 2654435761u;
+          m0 = now(); for (p = 0; p < 8; p++) { memcpy((void *)a, src, len); __asm__ volatile("sync" ::: "memory"); } m1 = now();
+          printf("%-24s memcpy %6.1f MB/s (libc, wide stores)\n", "", 8.0 * len / (m1 - m0) / 1048576.0); fflush(stdout); }
         (void)k; IOConnectUnmapMemory(c, 200, mach_task_self(), a);
     }
     ragegl_free(c, off); ragegl_close(c); return 0;

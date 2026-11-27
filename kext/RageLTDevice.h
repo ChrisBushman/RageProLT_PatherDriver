@@ -53,6 +53,9 @@ class RageLTDevice : public ATIRagePro
     IOPCIDevice         *fPCI;
     IODeviceMemory      *fFB;          /* BAR0: 8 MB VRAM + the register file in its top 2 KB */
     IOMemoryMap         *fMap;
+    uint32_t            fVsync, fVsyncCalls, fVsyncInVbl, fVsyncTimeouts, fVsyncSleeps, fVsyncMarginUs; uint64_t fVsyncNs;   /* v-sync experiment (RAGE_GL_CONFIG key 9: 0 off, 1 poll for the start of vertical blank before a present) */
+    void                vsyncWait(void);                  /* fLock held */
+    IOMemoryMap         *fWCMap;            /* B8 experiment (-DRAGE_VRAM_WC=1): second, write-combined mapping of VRAM used only for vramCopyIn's data stores; registers stay in fMap */
     volatile uint8_t      *fRegs;        /* BAR0 + 0x7FF800: real register byte offsets 0..0x7FC */
     IOLock              *fLock;
     struct rage_vram     fVram;        /* the only VRAM allocator (design 3.1) */
@@ -118,6 +121,7 @@ public:
     IOReturn     present(uint32_t owner, uint32_t sx, uint32_t sy, uint32_t w, uint32_t h, uint32_t dx, uint32_t dy);
     IOReturn     swapTarget(uint32_t owner, uint32_t dstOff);
     IOReturn     presentEx(uint32_t owner, uint32_t sx, uint32_t sy, uint32_t w, uint32_t h, uint32_t dx, uint32_t dy, uint32_t dw, uint32_t dh, uint32_t filter);
+    void                vsyncConfig(uint32_t key, uint32_t v) { if (key == 10) fVsyncMarginUs = v; else fVsync = v; }       /* v-sync experiment, RAGE_GL_CONFIG key 9 */
     void         quadConfig(uint32_t key, uint32_t value);
     IOReturn     vramCopyIn(uint32_t owner, uint32_t off, const uint8_t *src, uint32_t len, uint32_t flags);     /* src = kernel buffer */
     IOReturn     vramCopyOut(uint32_t owner, uint32_t off, uint8_t *dst, uint32_t len, uint32_t flags);

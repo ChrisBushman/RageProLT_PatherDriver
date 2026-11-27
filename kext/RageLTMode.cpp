@@ -131,6 +131,51 @@ IOReturn RageLTDevice::displayInfo(struct rage_display *out, uint32_t *gen)
 #define RAGE_OP_DONE(seq) ((void)(seq), kIOReturnSuccess)
 #endif
 #endif
+/* v-sync experiment: poll CRTC_VLINE_CRNT_VLINE until the beam enters vertical blank (line >= V_DISP), at most 40 ms.  Called with fLock held before the present blit so the
+ * engine copy runs while (and ahead of) the scan-out.  Read-only register polling (the chip is live: the engine is enabled).  Totals are published as ioreg properties. */
+void RageLTDevice::vsyncWait(void)
+{
+    AbsoluteTime t0, t1; uint64_t n0, n1; uint32_t vd, line, spins = 0, entryLine, nsl = 0; bool inVbl, timedOut = false;
+    if (!fVsync) return;
+    if (fVsync == 2) {      /* granularity probe for a sleep-then-spin wait: how long does IOSleep(1) really take on this kernel?  (no vblank wait in this mode) */
+        uint32_t k; uint64_t tot = 0, mx = 0;
+        for (k = 0; k < 20; k++) { AbsoluteTime a, b; uint64_t na, nb; clock_get_uptime(&a); absolutetime_to_nanoseconds(a, &na); IOSleep(1); clock_get_uptime(&b); absolutetime_to_nanoseconds(b, &nb); tot += nb - na; if (nb - na > mx) mx = nb - na; }
+        setProperty("RageIOSleep1AvgUs", (unsigned long long)(tot / 20000ull), 32); setProperty("RageIOSleep1MaxUs", (unsigned long long)(mx / 1000ull), 32);
+        fVsync = 0; return;
+    }
+    clock_get_uptime(&t0); absolutetime_to_nanoseconds(t0, &n0);
+    vd = ((eng_rd(fRegs, MACH64_CRTC_V_TOTAL_DISP) >> 16) & 0x7ffu) + 1u;
+    line = (eng_rd(fRegs, MACH64_CRTC_VLINE_CRNT_VLINE) >> 16) & 0x7ffu;
+    inVbl = line >= vd; entryLine = line;
+    if (fVsync == 3 && !inVbl) {         /* sleep-then-spin: IOSleep(1) steps while more than fVsyncMarginUs remain (key 10, default 2500), then poll; line rate (lines per ms x 1000) re-measured on every wake */
+        uint32_t vt = (eng_rd(fRegs, MACH64_CRTC_V_TOTAL_DISP) & 0x7ffu) + 1u, last = line, sleeps = 0; uint64_t rate = (uint64_t)vt * 1000ull / 15ull, lastNs = n0;
+        for (;;) {
+            uint64_t remainUs = (uint64_t)(vd - line) * 1000000ull / rate;
+            if (remainUs <= (uint64_t)fVsyncMarginUs || sleeps > 20) break;
+            IOSleep(1); sleeps++;
+            clock_get_uptime(&t1); absolutetime_to_nanoseconds(t1, &n1);
+            line = (eng_rd(fRegs, MACH64_CRTC_VLINE_CRNT_VLINE) >> 16) & 0x7ffu;
+            if (line >= vd) { inVbl = true; break; }
+            if (line > last && n1 > lastNs) rate = (uint64_t)(line - last) * 1000000000ull / (n1 - lastNs);
+            last = line; lastNs = n1;
+        }
+        fVsyncSleeps += sleeps; nsl = sleeps;
+        setProperty("RageVsyncSleeps", (unsigned long long)fVsyncSleeps, 32);
+    }
+    while (!inVbl) {
+        line = (eng_rd(fRegs, MACH64_CRTC_VLINE_CRNT_VLINE) >> 16) & 0x7ffu;
+        if (line >= vd) { uint32_t l2 = (eng_rd(fRegs, MACH64_CRTC_VLINE_CRNT_VLINE) >> 16) & 0x7ffu, vt = (eng_rd(fRegs, MACH64_CRTC_V_TOTAL_DISP) & 0x7ffu) + 1u;
+            if (l2 >= vd && l2 <= vt && l2 >= line) break; }       /* a glitched single read (seen: 0x1ff) must not end the wait: confirm with a second read, in range and not going backwards */
+        if ((++spins & 255u) == 0) { clock_get_uptime(&t1); absolutetime_to_nanoseconds(t1, &n1); if (n1 - n0 > 40000000ull) { timedOut = true; break; } }
+    }
+    clock_get_uptime(&t1); absolutetime_to_nanoseconds(t1, &n1);
+    { static uint32_t ring = 0; char nm[24]; nm[0]='R';nm[1]='V';nm[2]='r';nm[3]='0'+(char)(ring%8);nm[4]=0; ring++;
+      setProperty(nm, (unsigned long long)(((unsigned long long)entryLine << 48) | ((unsigned long long)nsl << 40) | ((unsigned long long)line << 24) | ((n1 - n0) / 1000ull & 0xffffffull)), 64); }
+    fVsyncCalls++; if (inVbl) fVsyncInVbl++; if (timedOut) fVsyncTimeouts++; fVsyncNs += n1 - n0;
+    setProperty("RageVsyncCalls", (unsigned long long)fVsyncCalls, 32); setProperty("RageVsyncAlreadyInVblank", (unsigned long long)fVsyncInVbl, 32);
+    setProperty("RageVsyncTimeouts", (unsigned long long)fVsyncTimeouts, 32); setProperty("RageVsyncWaitUs", (unsigned long long)(fVsyncNs / 1000ull), 64);
+}
+
 /* Present, general form.  Same-format 1:1 = the 2D engine's raw blit.  Anything else (the target and the scanout differ in pixel size, or the destination rectangle is a different size
  * = scaled present) = a textured quad of the 3D engine reading the target as a SQUARE power-of-two texture (the bundle allocates the target with a power-of-two pitch when it needs this).
  * The engine converts between pixel formats itself.  scale3d: nearest for the 1:1 conversion, bilinear when scaling and filter != 0.  Both write the scanout only inside the
@@ -153,6 +198,7 @@ IOReturn RageLTDevice::presentEx(uint32_t owner, uint32_t sx, uint32_t sy, uint3
         if (w > d.w - dx) w = d.w - dx;
         if (h > d.h - dy) h = d.h - dy;
         if (idleWait()) { IOLockUnlock(fLock); return kIOReturnTimeout; }
+        vsyncWait();
         rc = (IOReturn)eng_blit(fRegs, pixw, c.tgt_off, c.tgt_pitch, d.base, d.pitch_px, sx, sy, dx, dy, w, h, ((d.w - 1u) << 16), ((d.h - 1u) << 16));
     } else {
         uint32_t wl = 0, texfmt = c.tgt_bpp == 4 ? 6u : (c.tgt_555 ? 3u : 4u), right, bottom;
@@ -237,7 +283,8 @@ IOReturn RageLTDevice::vramCopyIn(uint32_t owner, uint32_t off, const uint8_t *s
         rc = kIOReturnSuccess;
         if (fEngineLive && idleWait()) rc = kIOReturnTimeout;      /* the CPU must not touch the aperture while the engine writes it */
         else {
-            for (i = 0; i < len; i += 4) OSWriteLittleInt32((void *)vram, off + i, xfer_word(src + i, flags));
+            volatile uint8_t *wv = fWCMap ? (volatile uint8_t *)fWCMap->getVirtualAddress() : vram;
+            for (i = 0; i < len; i += 4) OSWriteLittleInt32((void *)wv, off + i, xfer_word(src + i, flags));
             __asm__ volatile("sync" ::: "memory");
             (void)OSReadLittleInt32((void *)vram, off + len - 4);       /* read back from the last word written: posted writes must have reached VRAM before the engine reads them as texels */
             __asm__ volatile("sync" ::: "memory");

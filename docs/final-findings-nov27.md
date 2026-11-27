@@ -1,0 +1,52 @@
+# Experiment findings and recommendations (Nov 27) -- for review
+
+Rig: G4 MDD, real Rage LT Pro (640x480, 60 Hz, 16 bpp 5-5-5 / 32 bpp), RageStubFB, Panther 10.3.9. "Measured" = run on the rig this session; "static" = read from code/disassembly; "not established" = no evidence. Raw tools: `tools/rig/*`, `tools/ragegl/*`.
+
+## 1. Gains (measured)
+
+| Item | Result | Verdict |
+|---|---|---|
+| Hardware 2D client (B1b), real WindowServer, scrolling a TextEdit window (240 wheel events) | WindowServer CPU 2.06-2.15 s (CPU path) vs 1.29-1.38 s (hardware copies): **about 36% less**; one engine copy per event; pixels correct | keep (already built) |
+| Hardware 2D client, window moves (240 AppleScript moves of a 540x380 Finder window) | 2.26-2.62 s vs 2.0-2.4 s: at most 10%, within noise | keep; gain is mostly scrolling/copies |
+| Real Quartz op mix (Finder view switches, resizes, navigation) | almost no engine ops (3 copies, 0 fills in the whole run), 0 refused. Most of the desktop is Quartz drawing into the backing store plus a CPU flush | 2D engine helps scroll/copy, little else |
+| Write-combine for WindowServer's framebuffer map (B1g-5) | user-space `memcpy` into the **default** (inhibited) VRAM mapping already runs at 122 MB/s; write-combine also 122 MB/s (PCI ceiling). Paced flush benchmark (100 ms/frame, 480 KB): 5.7-6.1 ms per frame with write-combine, 5.7-9.2 ms without. **No measurable gain.** The 3.9x seen earlier was for 4-byte stores only (31 -> 121 MB/s) | leave OFF (default) |
+| **Write-combine mapping for the kext's own texture upload (`vramCopyIn`)** | 256 KB upload: 8.55 -> **2.65 ms**; 1 MB: 34.3 -> **10.6 ms**; end-to-end 2.76 ms against 7.5 ms for the DMA path; `xfer_test` (byte-exact readbacks, 4 concurrent clients) and `gl_suite` 291/0 pass. Kernel `bcopy` is *slower* (15.7 MB/s) so the gain needs the write-combine mapping + word stores | **recommend: make it default** (`-DRAGE_VRAM_WC=1` today, off). Then B8 (DMA texture upload) is not worth building further: DMA's call costs 2.1 ms of CPU and its transfer takes 7.5 ms; write-combine CPU stores take 2.65 ms and finish |
+| Corrected CPU-path figure | WindowServer's flush uses wide stores: ~120 MB/s writes (not the 44 MB/s measured with 4-byte stores). Reads from VRAM stay ~10 MB/s, which is why hardware copies (210-235 MB/s) win scrolling, and fills (250-280 MB/s) win by about 2x | doc corrected |
+
+## 2. v-sync (B9, measured; kext debug switch, default OFF)
+- Present today is an immediate engine blit (no v-sync): 2.4 ms for 640x480x16 (~250 MB/s), 412 fps unthrottled. Display refresh is **60 Hz** (frame 16.7 ms; vblank ~1.4 ms).
+- A blit started at the beginning of vblank runs ~5x faster than the beam reads, so it stays ahead of the beam: **should not tear** (static reasoning; the visual check is queued for you).
+- Polled wait on `CRTC_VLINE_CRNT_VLINE`: locks presents to 59.8 fps but **burns 100% of a CPU**. A single read of that register sometimes returns an out-of-range value (seen 0x1ff, ~7% of waits ended early) so the poll needs a second confirming read (implemented).
+- `IOSleep(1)` on Panther takes 1.009 ms (max 1.06 ms): sleep-then-spin works. 59.8 fps kept, CPU **27%** with a 2.5 ms spin margin (of which 2.4 ms is waiting for the previous blit), 32% at 3.5 ms, 40% at 4.5 ms. The lazy fence idea does not apply: the standalone driver does not page-flip.
+- Recommendation: implement v-sync as sleep-then-spin (margin 2.5 ms) behind a per-context default decided after your eyes-on check of tearing with it off/on. Interrupt-driven wait is not justified (remaining CPU is the blit wait).
+
+## 3. Robustness and soak (measured)
+- 2D client: 5 x `kill -9` of a process in the middle of a stream: 0 leaked clients, no panic. 4 mode changes (800x600x16, 640x480x32, 800x600x32, 640x480x16) with a looping 2D stream: no panic, no leak, `twod_test` and `gl_suite` (291/0) pass afterwards.
+- **D3 soak** (Apple FIFO formula, the default): 24 min = Flurry 240 s, Atlantis 240 s (128 presents/s), Sonic R 240 s, 15 process cycles. No panic; IOMalloc +176 bytes in total, instance counts flat. PASS.
+- **D5**: the stub offers only 16 bpp (5-5-5) and 32 bpp (static: `getPixelFormats`; `cgmode ... 8` reports no exact mode). 16 bpp 5-5-5 was already tested in the 7 rig modes. Nothing more to test on this rig.
+- **Test artefact**: unloading/reloading the kext under a running WindowServer leaves WindowServer spinning at ~85-100% CPU and, after one such, a stuck WindowServer that survived `killall loginwindow` (needed `kill -9`). Not a product path (the kext loads before WindowServer), but any rig script that reloads must restart the session.
+
+## 4. Bug found: A6 off-display GL context (measured) -- needs your decision
+`tools/ragegl/cgl_offscreen.c` (CGL off-screen pixel format + Rage display mask, system-memory drawable). Hardware renderer is selected ("ATI Rage LT Pro (mach64)"), clear and triangle read back correctly through `glReadPixels`, **but** (a) the context's frames appear **on the real Rage screen** (a screenshot after the test shows a full red screen with the green triangle) and (b) the drawable's own memory is never written (CGLFlushDrawable leaves it zero). So an off-screen context corrupts the visible display and CGL off-screen apps would get no image. Not yet fixed: the fix is in the bundle's present/flush path (off-screen contexts must render to a private target and copy back to the drawable memory instead of presenting). Recommend: fix, test stays in `tools/rig/offscreen_test.sh`.
+
+## 5. Read-only evidence for B2 (measured)
+- The Rage has a **PCI power-management capability** (at config 0x5c, version 1, D1 and D2 supported, state D0). So the PCI side can really be put to sleep by IOPCIFamily on the MDD; whether the MDD cuts slot power is still not established.
+- Still impossible here: the real NDRV event order on a Lombard (list for the contributor in sleep-wake-plan.md section 7 tier D).
+
+## 6. What each B2 item is, and my recommendation
+Background: stock handles sleep exactly like a mode change and keeps no chip state; our kext only handles the "info == 0" events (as mode change), ignores real system-sleep events, and has no guard stopping client calls from touching the chip while it is suspended (a read of a suspended chip hangs the machine).
+- **B2a** `RageLTPower.cpp`: act on the system-sleep/wake events, add a "chip may be touched" gate, verify PCI config before touching the chip on wake. Small; the real safety fix. **Agree.**
+- **B2e** put the same gate at the top of the functions that touch the chip but are ungated today (`vramCopyIn/Out`, DMA, overlay, register dump...). Also fixes a latent mode-change gap. **Agree (do with B2a).**
+- **B2c** host state-machine test and a kext `sleep-sim` test of B2a/B2e: proves the gate without hardware risk. **Agree.**
+- **B2f** guard the MEM_CNTL aperture-endian bits (byte-order-reconcile item) in the wake verify. Tiny. **Agree.**
+- **B2b** make the G4 stub emit the same power events as the Lombard's NDRV, so B2a runs on the G4 with software events only and no chip writes. Moderate; improves rig parity. **Agree (optional but cheap).**
+- **B2d** real G4 system sleep, staged, you present to wake it; it can hang the G4 and tells us only about the MDD slot, not the Lombard. **Trim / defer** to the very end, only if you want the rig to survive sleep.
+
+## 7. Recommendations
+1. Make the write-combine upload mapping the default; drop B8 (DMA upload) as a feature.
+2. Leave write-combine for WindowServer OFF; close B1g-3 (DMA window flush) as agreed.
+3. Fix the A6 off-screen context bug.
+4. Implement sleep-then-spin v-sync after your tearing check.
+5. B2: agree a, c, e, f (+b); trim d.
+6. Quartz Extreme last, as you said.
+7. Remaining untested without you: overlay/FS_SCALE/DVD/TV-out visuals, tearing check, B2d.
