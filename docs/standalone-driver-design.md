@@ -95,7 +95,7 @@ One header `config/features.h` and Makefile switches, all default ON except wher
 4. Nothing is ever mapped before the context is fully set up (the stock NULL-deref panic of mapping an un-bound context).
 5. Each new guard gets a refusal case in the suite's `guards` test.
 
-### 3.6 VRAM byte order (open item O4)
+### 3.6 VRAM byte order (O4: resolved, see 11.3 and re-notes/byte-order-reconcile.md)
 
 The existing notes found texels arrive byte-reversed through the plain LE aperture on the G4 stub rig, and could not establish whether Apple's framebuffer supplies a swapped view on the Lombard. The mach64 BAR0 is 16 MB; the second 8 MB is documented as a big-endian alias of the first (not probed so far). Plan: have the **kernel** own the question. It maps the aperture view that is correct for a PPC host and exposes a single "write texels in surface format" path, so the user plugin never swaps bytes. The G4 can test the BE alias with a single, bounded, read/write at a known-safe VRAM address after the existing safe-bring-up (no scan). That is a live experiment and will be proposed separately before it is run.
 
@@ -124,7 +124,7 @@ Source: `README-SONICR.md` (Lombard session, 2026-11-22 on), `README.md` known g
 | L6 | Snowball Run: no textures, no background, then a full lockup, no panic | Hypothesis (unconfirmed): game's own mode switch reinits `BUS_CNTL`, DMA path calls `dma_disable()` for the process lifetime; mode-generation query shared the DMA connection | open | §3.3/3.4: DMA state is kernel-owned and re-established per did-change; mode generation is separate state; no unbounded spin. Game is not on the G4 test list, so this stays open until a Lombard report. |
 | L7 | Intermittent kernel panic ~10% of processes (uninitialised stack descriptor in Apple's `clientMemoryForType`) | Stock Apple bug | worked around by 1-instruction patch | Gone by replacement. |
 | L8 | Several simultaneous GL windows: resolver picks the first window with a surface | Design gap | open (README) | §4. Regression with two Atlantis instances. |
-| L9 | Texels byte-reversed on the G4 stub rig; Lombard behaviour unknown | Unknown | open | §3.6, open item O4. |
+| L9 | Texels byte-reversed on the G4 stub rig (old patched Apple kext) | Old path used a swapped aperture view; halves-exchange signature fits UPPER_APER_ENDIAN=01 | superseded | New kext writes the lower view with explicit SWAP flags (290/290 + xfer_test on the G4). See re-notes/byte-order-reconcile.md; new risk: NDRV Crtc2 instance writes LOWER_APER_ENDIAN (guard planned, B2f). |
 | L10 | Chip registers latch but setup engine never fires | `BUS_CNTL.BUS_EXT_REG_EN` (bit 27) clear after PC BIOS | fixed in `biosrun` | Kernel init sets it on attach and on every did-change. |
 | L11 | Never-posted card hangs on any read | BIOS POST not run | worked around on G4 (`biosrun`) | G4 only; the Lombard POSTs from its own firmware. Not a driver concern, but `bringup` tooling for the G4 rig stays (tools/). |
 | L12 | Kernel peeks of unchecked addresses (panic risk) | Patch design | mitigated by `m64_peek` range check | Eliminated: no peek exists. |
@@ -163,7 +163,7 @@ Any live G4 run follows the standing rules: explicit safe arguments, never `mach
 | O1 | Exactly which classes/IOKit properties/selector numbers does `ATIRageProGA.plugin` and GLEngine look up on the accelerator (names, `IOGLBundleName`, `IOAccelIndex`, type numbers)? Can our kext simply provide these under our own bundle id, with Apple's kext moved aside? | Static analysis of the stock kext's `Info.plist` and the GA plugin on the G4's Panther HD (read-only). |
 | O2 | Does Panther's `IOAccelerator` base come from `IOGraphicsFamily` (usable by a third-party kext) or only inside Apple's kext? | Symbols and `kextstat` dependency lists. |
 | O3 | What does stock already provide for sleep/wake, overlay, scaler, DVD (affects the flags' defaults)? | Symbol and selector inventory of stock `ATIRagePro` and `ATIRageProGA`. |
-| O4 | Byte-order/aperture question (§3.6). | Offline first (what Apple's framebuffer does on the Lombard may be readable from its binary), then one proposed bounded G4 experiment. |
+| O4 | Byte-order/aperture question (§3.6). | **Resolved (11.3, byte-order-reconcile.md).** | Offline first (what Apple's framebuffer does on the Lombard may be readable from its binary), then one proposed bounded G4 experiment. |
 | O5 | Does Panther's xnu-517 offer a panic callback usable from a kext? | Kernel headers for 10.3.9 and symbol check on the G4. |
 | O6 | Interrupt line wiring for the chip and whether stock uses it. | **Answered Nov 25:** line wired (OpenPIC, level), stock does not use it, but the chip raises no interrupt for GUI-master completion (BUSMASTER_EOL_INT never sets on that list, measured); completion stays polled. See re-notes/dma-async-queue.md. |
 | O7 | Installation: how stock `ATIRagePro.kext` is set aside (moved to a backup dir, kext caches rebuilt, revertable) so there is never a window with two accelerators matching. | Existing `install-*.sh` plus `swap.sh` patterns on the G4. |
