@@ -153,6 +153,7 @@ IOReturn RageLT2DClient::clientDied(void) { return clientClose(); }
 
 IOExternalMethod *RageLT2DClient::getTargetAndMethodForIndex(IOService **target, UInt32 index)
 {
+    LOG("2D: selector %u\n", (unsigned)index);
     if (!fDev || index >= RAGE2D_NSEL) return 0;         /* 16-18 (stock's raw register window) do not exist here */
     *target = this;
     return &fMethods[index];
@@ -177,6 +178,7 @@ IOReturn RageLT2DClient::process(IOBufferMemoryDescriptor *b)
 IOReturn RageLT2DClient::clientMemoryForType(UInt32 type, UInt32 *options, IOMemoryDescriptor **memory)
 {
     IOBufferMemoryDescriptor *b;
+    LOG("2D: clientMemoryForType(%u)\n", (unsigned)type);
     if (!fDev) return kIOReturnNotReady;
     *options = 0;
     if (type == 1) { fCtxBuf->retain(); *memory = fCtxBuf; return kIOReturnSuccess; }
@@ -193,6 +195,7 @@ IOReturn RageLT2DClient::clientMemoryForType(UInt32 type, UInt32 *options, IOMem
 IOReturn RageLT2DClient::mSetSurface(UInt32 id, UInt32 mode, void *out, IOByteCount *outSize)
 {
     struct rage_display d; uint32_t gen, pix; uint32_t *o = (uint32_t *)out;
+    LOG("2D: set_surface id %u mode 0x%x outSize %u\n", (unsigned)id, (unsigned)mode, (unsigned)*outSize);
     if (!fDev || *outSize != 0x30) return kIOReturnBadArgument;
     if (mode & 0x800u) return kIOReturnBadArgument;                       /* surface-backed 2D is not provided (first scope: display destinations) */
     if (id != 0) return kIOReturnBadArgument;                             /* one display, index 0 */
@@ -208,7 +211,7 @@ IOReturn RageLT2DClient::mSetSurface(UInt32 id, UInt32 mode, void *out, IOByteCo
     o[9] = pix;                                                         /* +0x24 pixel code byte value */
     return kIOReturnSuccess;
 }
-IOReturn RageLT2DClient::mGetConfig(UInt32 *a, UInt32 *b) { *a = 0x04000000u; *b = 0; return kIOReturnSuccess; }     /* LI caps (ga-2d-client-decode.md) */
+IOReturn RageLT2DClient::mGetConfig(UInt32 *a, UInt32 *b) { LOG("2D: get_config\n"); *a = 0x04000000u; *b = 0; return kIOReturnSuccess; }     /* LI caps (ga-2d-client-decode.md) */
 IOReturn RageLT2DClient::mSwap(UInt32 ignored, UInt32 *out) { (void)ignored; *out = 0; return RAGE_E_2BE; }           /* nothing is bound that could be swapped: stock's "no surface" answer */
 IOReturn RageLT2DClient::mLockMemory(UInt32 ignored, UInt32 *o0, UInt32 *o1) { (void)ignored; *o0 = 0xDEADBEEFu; *o1 = 0; return RAGE_E_2CC; }
 IOReturn RageLT2DClient::mUnlockMemory(UInt32 arg, UInt32 *out) { (void)arg; *out = 0; return kIOReturnSuccess; }

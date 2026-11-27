@@ -16,3 +16,10 @@ Scope of the first release: display destinations only (stream ops 0x09 CopyRegio
 ## Risks
 * A bad 2D client can corrupt the Rage display or wedge the engine; the Rage is the secondary display on the rig, and recovery is a reboot (2-3 min); an engine wedge from bad bus-master state is the known one (11.16).
 * The plugin ABI is decoded statically; nothing here has run. Struct fields marked "not established" in ga-2d-client-decode.md (lock out1, get_config +0x9c, set_surface mode bits) must be handled conservatively and observed.
+
+## Result (Nov 26, G4): stock plugin loads and starts for RageStubFB
+- `twod_test` (tools/ragegl): 15/15 on the G4 at 640x480x16 and 1024x768x32 (type-2 client ABI, fills, clipping, forward/overlapping/clamped copies, refused streams, a line). `gl_suite` still 291/0.
+- Stock edit, backed up: `/System/Library/Extensions/ATIRageProGA.plugin/Contents/Info.plist` `IOProviderClass` `IONDRVFramebuffer` -> `IOFramebuffer` (one line). Original kept at `~/stock-backup/ATIRageProGA.Info.plist.orig` on the G4 (md5 f1628b95863a9bad385384f010b180f8). Restore by copying it back.
+- Before the edit: `IOCreatePlugInInterfaceForService` returned 0xe00002c7 (personality did not match RageStubFB). After: the plugin is found, Probe scores 2000, Start succeeds (class gate `ATIRagePro` satisfied, type-2 open, get_config, Reset all accepted by our client). The interface UUID to ask for is `6766E94A-0000-0000-0000-000A2789904E`; asking for kIOCFPlugInInterfaceID makes the plugin's QueryInterface fail and IOKit then reports 0xe00002be.
+- Tool: `tools/ragegl/ga_probe`. Kernel LOG lines appear in `dmesg`, not `/var/log/system.log`.
+- Not yet established: whether WindowServer opens the plugin after this edit without a restart (checked next).
