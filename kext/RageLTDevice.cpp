@@ -10,9 +10,11 @@
 #include <kern/clock.h>
 #include "RageLTLogClient.h"
 #include "RageLTGLClient.h"
+#include "RageLT2DClient.h"
 
-#define super IOAccelerator
-OSDefineMetaClassAndStructors(RageLTDevice, IOAccelerator)
+#define super ATIRagePro
+OSDefineMetaClassAndAbstractStructors(ATIRagePro, IOAccelerator)
+OSDefineMetaClassAndStructors(RageLTDevice, ATIRagePro)
 
 #define LOG(...) IOLog("RageLT: " __VA_ARGS__)
 
@@ -176,6 +178,9 @@ IOReturn RageLTDevice::newUserClient(task_t owningTask, void *securityID, UInt32
     if (type == RAGE_CLIENT_LOG && RAGE_FEAT_PANIC_LOG) c = new RageLTLogClient;
     else if (type == RAGE_CLIENT_GL) c = new RageLTGLClient;
     else if (type == kIOAccelSurfaceClientType) c = new RageLTSurfaceClient;
+#if RAGE_FEAT_2D_GA
+    else if (type == 2) c = new RageLT2DClient;                 /* stock type 2 = the 2D context (ATIR32DContext) */
+#endif
     else return kIOReturnUnsupported;
     if (!c) return kIOReturnNoMemory;
     if (!c->initWithTask(owningTask, securityID, type) || !c->attach(this) || !c->start(this)) { c->release(); return kIOReturnError; }

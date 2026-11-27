@@ -34,6 +34,12 @@
       <!-- CGL reads this from the accelerator the framebuffer's IOAccelTypes names, and loads that bundle as the renderer -->
       <key>IOGLBundleName</key>      <string>ATIRageProGLDriver</string>
       <key>IOProbeScore</key>        <integer>1000</integer>
+      <!-- Quartz 2D: IOKit finds the plugin through the FRAMEBUFFER (publishFramebuffer copies this property onto it); ATIRageProGA.plugin stays in /System/Library/Extensions
+           (docs/re-notes/ga-2d-client-decode.md section 1) -->
+      <key>IOCFPlugInTypes</key>
+      <dict>
+        <key>ACCF0000-0000-0000-0000-000a2789904e</key> <string>ATIRageProGA.plugin</string>
+      </dict>
     </dict>
   </dict>
   <key>OSBundleRequired</key>        <string>Console</string>

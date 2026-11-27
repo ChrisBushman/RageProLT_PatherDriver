@@ -49,6 +49,9 @@ void RageLTDevice::publishFramebuffer(IOFramebuffer *fb, uint32_t index)
     fb->setProperty("IOAccelTypes", path);
     fb->setProperty("IOAccelIndex", (unsigned long long)index, 32);
     fb->setProperty("IOAccelRevision", (unsigned long long)2, 32);
+#if RAGE_FEAT_2D_GA
+    { OSObject *t = getProperty("IOCFPlugInTypes"); if (t) fb->setProperty("IOCFPlugInTypes", t); }   /* stock foundFramebuffer does the same: IOFindPlugIns matches the plugin against the framebuffer */
+#endif
     LOG("framebuffer %s: IOAccelTypes %s index %u\n", fb->getName(), path, (unsigned)index);
 }
 

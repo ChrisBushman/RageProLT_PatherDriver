@@ -224,4 +224,86 @@ static inline int eng_texquad(volatile uint8_t *regs, uint32_t dst_pixw, uint32_
     eng_wq(regs, MACH64_ONE_OVER_AREA_UC, oob);
     return 0;
 }
+/* ---- B1b: primitives for the 2D client (docs/re-notes/ga-2d-stream-spec.md section 8).  Same register recipes as eng_fill / eng_blit (which are hardware-proven); the additions
+ * are the walk direction of a blit, the colour-compare of a keyed fill and the Bresenham line, each NOT yet proven on hardware (tools/ragegl/twod_test.c is the proof). ---- */
+
+/* Blit inside one surface with an explicit walk direction.  xrev/yrev = walk right-to-left / bottom-to-top (needed when the destination overlaps the source and lies
+ * after it on that axis); the start registers then hold the LAST pixel of the rectangle (RRG DST_CNTL bits 0/1, spec 4.1).  sx,sy,dx,dy,w,h are the clipped left/top/size. */
+static inline int eng_blit_dir(volatile uint8_t *regs, uint32_t pixw, uint32_t off, uint32_t pitch, uint32_t sx, uint32_t sy, uint32_t dx, uint32_t dy,
+                               uint32_t w, uint32_t h, uint32_t xrev, uint32_t yrev, uint32_t sc_lr, uint32_t sc_tb)
+{
+    if (eng_wait_idle(regs)) return -1;
+    eng_wq(regs, 0x0304, 0);
+    eng_wq(regs, MACH64_Z_CNTL, 0);
+    eng_wq(regs, MACH64_SCALE_3D_CNTL, 0);
+    eng_wq(regs, RAGE_R_DST_CNTL, (xrev ? 0u : 1u) | (yrev ? 0u : 2u));
+    eng_wq(regs, MACH64_DP_PIX_WIDTH, pixw);
+    eng_wq(regs, MACH64_DP_WRITE_MASK, 0xffffffffu);
+    eng_wq(regs, MACH64_DP_MIX, MACH64_DP_MIX_DS);
+    eng_wq(regs, MACH64_DP_SRC, MACH64_DP_SRC_BLIT);
+    eng_wq(regs, MACH64_SC_LEFT_RIGHT, sc_lr);
+    eng_wq(regs, MACH64_SC_TOP_BOTTOM, sc_tb);
+    eng_wq(regs, MACH64_CLR_CMP_CNTL, 0);
+    eng_wq(regs, MACH64_SRC_OFF_PITCH, ((pitch / 8u) << 22) | (off >> 3));
+    eng_wq(regs, MACH64_DST_OFF_PITCH, ((pitch / 8u) << 22) | (off >> 3));
+    eng_wq(regs, MACH64_SRC_WIDTH1, w);
+    eng_wq(regs, MACH64_SRC_Y_X, ((xrev ? sx + w - 1u : sx) << 16) | (yrev ? sy + h - 1u : sy));
+    eng_wq(regs, MACH64_DST_Y_X, ((xrev ? dx + w - 1u : dx) << 16) | (yrev ? dy + h - 1u : dy));
+    eng_wq(regs, MACH64_DST_WIDTH_HEIGHT, (h << 16) | w);                    /* trigger */
+    return 0;
+}
+
+/* Solid fill with the destination colour-compare of the stock keyed fill: cmp = CLR_CMP_CNTL value (4 or 5, CLR_CMP_SRC = destination), cmp_clr / cmp_msk the key. */
+static inline int eng_fill_cmp(volatile uint8_t *regs, uint32_t pixw, uint32_t off, uint32_t pitch_px, uint32_t x, uint32_t y, uint32_t w, uint32_t h,
+                               uint32_t color, uint32_t sc_lr, uint32_t sc_tb, uint32_t cmp, uint32_t cmp_clr, uint32_t cmp_msk)
+{
+    if (eng_wait_idle(regs)) return -1;
+    eng_wq(regs, 0x0304, 0);
+    eng_wq(regs, MACH64_Z_CNTL, 0);
+    eng_wq(regs, MACH64_SCALE_3D_CNTL, 0);
+    eng_wq(regs, RAGE_R_DST_CNTL, 3u);
+    eng_wq(regs, MACH64_DP_PIX_WIDTH, pixw);
+    eng_wq(regs, MACH64_DP_FRGD_CLR, color);
+    eng_wq(regs, MACH64_DP_WRITE_MASK, 0xffffffffu);
+    eng_wq(regs, MACH64_DP_MIX, MACH64_DP_MIX_DS);
+    eng_wq(regs, MACH64_DP_SRC, MACH64_DP_SRC_FLAT);
+    eng_wq(regs, MACH64_SC_LEFT_RIGHT, sc_lr);
+    eng_wq(regs, MACH64_SC_TOP_BOTTOM, sc_tb);
+    eng_wq(regs, 0x0700, cmp_clr);                                           /* CLR_CMP_CLR */
+    eng_wq(regs, 0x0704, cmp_msk);                                           /* CLR_CMP_MASK */
+    eng_wq(regs, MACH64_CLR_CMP_CNTL, cmp);
+    eng_wq(regs, MACH64_DST_OFF_PITCH, ((pitch_px / 8u) << 22) | (off >> 3));
+    eng_wq(regs, MACH64_DST_X_Y, (y << 16) | x);
+    eng_wq(regs, MACH64_DST_WIDTH_HEIGHT, (h << 16) | w);                    /* trigger */
+    if (eng_wait_idle(regs)) return -1;
+    eng_wq(regs, MACH64_CLR_CMP_CNTL, 0);                                    /* leave the compare off for whatever runs next */
+    return 0;
+}
+
+/* Bresenham line as the stock plugin programs it (spec 4.4): dcntl = DST_CNTL (bit0 X_DIR, bit1 Y_DIR, bit2 Y_MAJOR, bit11 BRES_SIGN, no LAST_PEL),
+ * ERR = 2*minor-major, INC = 2*minor, DEC = 2*(minor-major), length register = major+1 (the write starts the line). */
+static inline int eng_line(volatile uint8_t *regs, uint32_t pixw, uint32_t off, uint32_t pitch_px, uint32_t x0, uint32_t y0, uint32_t dcntl, uint32_t major, uint32_t minor,
+                           uint32_t color, uint32_t sc_lr, uint32_t sc_tb)
+{
+    if (eng_wait_idle(regs)) return -1;
+    eng_wq(regs, 0x0304, 0);
+    eng_wq(regs, MACH64_Z_CNTL, 0);
+    eng_wq(regs, MACH64_SCALE_3D_CNTL, 0);
+    eng_wq(regs, RAGE_R_DST_CNTL, dcntl);
+    eng_wq(regs, MACH64_DP_PIX_WIDTH, pixw);
+    eng_wq(regs, MACH64_DP_FRGD_CLR, color);
+    eng_wq(regs, MACH64_DP_WRITE_MASK, 0xffffffffu);
+    eng_wq(regs, MACH64_DP_MIX, MACH64_DP_MIX_DS);
+    eng_wq(regs, MACH64_DP_SRC, MACH64_DP_SRC_FLAT);
+    eng_wq(regs, MACH64_SC_LEFT_RIGHT, sc_lr);
+    eng_wq(regs, MACH64_SC_TOP_BOTTOM, sc_tb);
+    eng_wq(regs, MACH64_CLR_CMP_CNTL, 0);
+    eng_wq(regs, MACH64_DST_OFF_PITCH, ((pitch_px / 8u) << 22) | (off >> 3));
+    eng_wq(regs, 0x050c, (x0 << 16) | y0);                                   /* DST_Y_X */
+    eng_wq(regs, 0x0524, 2u * minor - major);                                /* DST_BRES_ERR */
+    eng_wq(regs, 0x0528, 2u * minor);                                        /* DST_BRES_INC */
+    eng_wq(regs, 0x052c, 2u * (minor - major));                              /* DST_BRES_DEC */
+    eng_wq(regs, 0x0520, major + 1u);                                        /* DST_BRES_LNTH: trigger */
+    return 0;
+}
 #endif

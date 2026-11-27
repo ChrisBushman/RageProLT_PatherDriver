@@ -37,7 +37,16 @@ struct rage_surface {
 
 struct rage_display { uint32_t base, pitch_px, w, h, bpp, depth; };   /* live scanout as read from the CRTC (kernel-owned copy) */
 
-class RageLTDevice : public IOAccelerator
+/* The stock ATIRageProGA plugin's Start does IOObjectConformsTo(accelerator, "ATIRagePro") and fails with 0x2c7 otherwise (ga-2d-client-decode.md); that tests the CLASS chain,
+ * not the registry name, so the chain contains a class literally named ATIRagePro (it cannot coexist with the stock kext's metaclass of that name: the installer sets stock aside). */
+class ATIRagePro : public IOAccelerator
+{
+    OSDeclareAbstractStructors(ATIRagePro)
+};
+
+struct rage2d_op;
+
+class RageLTDevice : public ATIRagePro
 {
     OSDeclareDefaultStructors(RageLTDevice)
 
@@ -122,6 +131,8 @@ public:
     uint32_t     fOvlOwner, fOvlPitch, fOvlH, fOvlBpp, fOvlOff;                                                            /* owner of the enabled overlay (0 = none) and its source geometry */
     IOReturn     ovlB0(uint32_t *before, uint32_t *readback, uint32_t *after);                                     /* debug: overlay plan step B0 (the only write) */                                        /* debug, READ-ONLY fixed register list */
     IOReturn     displayInfo(struct rage_display *out, uint32_t *gen);
+    IOReturn     exec2D(const struct rage2d_op *ops, uint32_t n);                 /* B1b: validated abstract 2D ops on the scanout (RageLT2D.cpp) */
+    IOReturn     finish2D(void);                                                    /* wait until the engine is idle (type-2 client 'finish') */
     uint32_t       modeGen(void) const { return fModeGen; }
     /* mode changes (RageLTMode.cpp) */
     void         modeWillChange(void);
