@@ -282,10 +282,12 @@ metacasts are wanted.
 - IOProviderClass matching via metaCast.
 - Engine address wrap behaviour for out-of-range source rects.
 
-## Addendum (Nov 26): who consumes ATIRageProGA.plugin (read-only scan of the G4's Panther system, `ssh MDD` strings/nm/grep/perl)
+## Addendum (Nov 26) -- CORRECTED by quartz-acceleration-study.md (cad2771): CoreGraphics DOES drive the plugin, via IOKit's IOPSAllocateBlitEngine (0x905cc5b8, where the UUID is built) and MPHWFill/MPHWCopyRegion/MPHWCopy/MPHWFillRegion/MPHWSyncPixels/MPHWCopyPixels; the 'conclusion' bullet below that says Quartz never uses the 2D client is WRONG. The scan missed it because the UUID lives in IOKit, not CoreGraphics.
+
+## Addendum (Nov 26): who consumes ATIRageProGA.plugin (original text, partly superseded) (read-only scan of the G4's Panther system, `ssh MDD` strings/nm/grep/perl)
 * The plugin's type UUID ACCF0000-0000-0000-0000-000a2789904e is built from bytes in code, so it was searched as the PPC `li` immediates 0xAC, 0xCF.
   Hits: **/usr/lib/libXplugin.1.0.dylib**, **AppleVA.framework**, **IOKit.framework** (the loader side). **No hit in WindowServer, CoreGraphics, QD (QuickDraw), OpenGL, DVDPlayback.**
 * libXplugin (Apple X11 rootless) contains `xp_surface_ensure_accel`, "Can't allocate IOBlitSurface", "Can't obtain accelerator interface": it is the consumer of the plugin's blitter interface (GetBlitter: copy / copy region / fill / lines / scanlines).
 * AppleVA imports IOAccelFindAccelerator and IOCreatePlugInInterfaceForService (video acceleration; stock has ATIRage128/Radeon DVD and VA bundles but **none for Rage Pro**).
 * CoreGraphics uses only the **surface** API (IOAccelCreateSurface, Read/WriteLock, FlushSurfaceOnFramebuffers, SetSurfaceFramebufferShape/Scale), i.e. the type-0 surface client, which our kext already serves. WindowServer/CoreGraphics do not load the 2D plugin.
-* Conclusion (static, not run): **Quartz 2D never uses the type-2 2D client; stock only uses it for X11 window blits.** This agrees with the recollection that 2D is not accelerated on the Lombard desktop. Not established: whether another consumer builds the UUID differently (e.g. computed at run time), and what WindowServer requires before it uses Quartz Extreme on a given GPU.
+* [SUPERSEDED, see the correction above] Conclusion (static, not run): **Quartz 2D never uses the type-2 2D client; stock only uses it for X11 window blits.** This agrees with the recollection that 2D is not accelerated on the Lombard desktop. Not established: whether another consumer builds the UUID differently (e.g. computed at run time), and what WindowServer requires before it uses Quartz Extreme on a given GPU.
