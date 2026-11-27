@@ -8,12 +8,12 @@ rig (real Rage LT Pro, no panel, composite TV-out connector present).
 - A1 L5b screen-saver wedge: not reproduced; closed. A recurrence is filed as a new bug.
 - A3 bus-master wedge: closed unless a reason to disable bus mastering appears.
 - A4 Chess 32 bpp on the Lombard; D1 Lombard package; D2 Lombard mode-change events: out of scope.
-- B9 interrupt completion (O6): answered, chip raises no completion interrupt; nothing to do.
+- B9 interrupt completion (O6): chip raises no completion interrupt; vertical-blank interrupt researched, documented in re-notes/vblank.md (193b14f); polling stays unless a measured need appears.
 - D4 hardware cursor visual check: done; the only remainder (cursor over the overlay) is part of B4's test.
 
 ## Investigations (static first, results written to docs/re-notes)
 - A2 / L9 / O4: reconcile "byte-reversed texels on the G4 stub rig" with design 11.3 (resolved from documents). Stock binaries + docs.
-- A5 per-client 3D state is not saved per context: explain risk, then decide (see chat Nov 26).
+- A5 per-client 3D state (user decision Nov 26): build the 2D client (B1) and windowed-GL protocol (B3) WITHOUT save/restore first; measure the cost of save/restore, and test for cross-client state leaks. If they leak, save/restore is required; if the measured cost is negligible, use the robust save/restore anyway.
 - B2 sleep/wake: investigate stock hooks, propose implementation and test plan; find how far the G4 can go.
 - C3 NDRV panel leftovers: finish decode; report which behaviour is G4-testable vs unverifiable.
 - C1 O1 (classes/properties/selectors that ATIRageProGA and GLEngine look up); C2 O2 (IOAccelerator base usable by a third-party kext).
