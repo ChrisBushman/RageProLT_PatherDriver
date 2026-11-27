@@ -18,6 +18,7 @@ class RageStubFB : public IOFramebuffer
     IOPCIDevice *fPCI;
     IOMemoryMap *fRegMap;        /* last 2 KB of BAR0: the chip's register block */
     volatile UInt8 *fRegs;
+    bool fWC;                    /* B1g-5 experiment: user mapping of the aperture is write-combined (rage-wc property / stubctl wc N / Info.plist RageWriteCombine) */
     bool fNdrv;                  /* frame buffer at Apple's NDRV offset (property RageNdrvLayout, default on); off = frame buffer at VRAM 0 as the ROM leaves it */
     UInt32 fFbOff;               /* byte offset of the frame buffer in VRAM for the current mode */
     UInt32 fbOffsetFor(const struct rage_mode *m, int depth);

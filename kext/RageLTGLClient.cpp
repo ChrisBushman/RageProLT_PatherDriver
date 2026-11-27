@@ -253,12 +253,16 @@ IOReturn RageLTGLClient::selOvlFlip(uint32_t off)
     if (!fDev) return kIOReturnNotAttached;
     return fDev->ovlFlip(fOwner, off);
 }
-#if RAGE_DEBUG_ENGTEST
 IOReturn RageLTGLClient::selApertureBench(uint32_t off, uint32_t len, uint32_t mode, uint32_t *wns, uint32_t *rns)
 {
+#if RAGE_DEBUG_ENGTEST
     if (!fDev) return kIOReturnNotAttached;
     return fDev->apertureBench(fOwner, off, len, mode, wns, rns);
+#else
+    (void)off; (void)len; (void)mode; (void)wns; (void)rns; return kIOReturnUnsupported;     /* debug builds only (the selector is not even reachable: getTargetAndMethodForIndex refuses it) */
+#endif
 }
+#if RAGE_DEBUG_ENGTEST
 IOReturn RageLTGLClient::selScanoutRead(uint32_t byteOff, uint32_t addr, uint32_t len)
 {
     uint8_t *buf; IOReturn rc = kIOReturnSuccess; uint32_t done = 0;

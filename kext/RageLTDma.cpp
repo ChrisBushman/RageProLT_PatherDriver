@@ -317,7 +317,9 @@ IOReturn RageLTDevice::dmaSubmit(const struct rage_ctx *, const uint32_t *, uint
 /* Everything that touches the engine or the aperture from the CPU first calls this (caller holds fLock). */
 IOReturn RageLTDevice::idleWait(void)
 {
-    uint32_t t0 = tbl32(), t1; IOReturn rc = dmaWait();
+    uint32_t t0, t1; IOReturn rc;
+    __asm__ volatile("sync" ::: "memory");        /* B1g-5: drain any write-combined CPU stores into VRAM (e.g. WindowServer's) before the engine reads or overwrites it */
+    t0 = tbl32(); rc = dmaWait();
     t1 = tbl32(); pf_oth_dma += (t1 - t0) >> 2; pf_oth_n++;
     if (rc) return rc;
     rc = eng_wait_idle(fRegs) ? kIOReturnTimeout : kIOReturnSuccess;

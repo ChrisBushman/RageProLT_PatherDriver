@@ -36,9 +36,9 @@ static int reserve_offset0(void)
 
 int main(int argc, char **argv){
   io_service_t s = IOServiceGetMatchingService(kIOMasterPortDefault, IOServiceMatching("RageStubFB"));
-  int probe = (argc>1 && !strcmp(argv[1],"probe")), edid = (argc>1 && !strcmp(argv[1],"edid")), setmode = (argc>2 && !strcmp(argv[1],"setmode")), dsp = (argc>2 && !strcmp(argv[1],"dsp")), guard = !probe && !edid && !setmode && !dsp && !(argc>2 && !strcmp(argv[2],"noguard")), r;
-  const char *k = dsp ? "rage-dsp-apple" : setmode ? "rage-setmode" : probe ? "rage-probe" : edid ? "rage-edid" : "rage-notify";
-  CFStringRef key = CFStringCreateWithCString(NULL,k,kCFStringEncodingASCII); int one = (setmode || dsp) ? atoi(argv[2]) : 1;   /* dsp N: 1 = Apple's FIFO formula at the next mode set, 0 = default */   /* setmode N: N = mode index (0 = 640x480, 1 = 800x600, 2 = 1024x768, 3 = 1280x1024); then the stub re-sends the mode-change notifications */ CFNumberRef v = CFNumberCreate(NULL,kCFNumberIntType,&one);
+  int probe = (argc>1 && !strcmp(argv[1],"probe")), edid = (argc>1 && !strcmp(argv[1],"edid")), setmode = (argc>2 && !strcmp(argv[1],"setmode")), dsp = (argc>2 && !strcmp(argv[1],"dsp")), wc = (argc>2 && !strcmp(argv[1],"wc")), guard = !probe && !edid && !setmode && !dsp && !wc && !(argc>2 && !strcmp(argv[2],"noguard")), r;
+  const char *k = wc ? "rage-wc" : dsp ? "rage-dsp-apple" : setmode ? "rage-setmode" : probe ? "rage-probe" : edid ? "rage-edid" : "rage-notify";
+  CFStringRef key = CFStringCreateWithCString(NULL,k,kCFStringEncodingASCII); int one = (setmode || dsp || wc) ? atoi(argv[2]) : 1;   /* wc N: 1 = hand WindowServer a write-combined framebuffer mapping at its NEXT map (restart WindowServer), 0 = default cache */   /* dsp N: 1 = Apple's FIFO formula at the next mode set, 0 = default */   /* setmode N: N = mode index (0 = 640x480, 1 = 800x600, 2 = 1024x768, 3 = 1280x1024); then the stub re-sends the mode-change notifications */ CFNumberRef v = CFNumberCreate(NULL,kCFNumberIntType,&one);
   CFDictionaryRef d = CFDictionaryCreate(NULL,(const void**)&key,(const void**)&v,1,&kCFTypeDictionaryKeyCallBacks,&kCFTypeDictionaryValueCallBacks);
   if(!s){printf("no stub\n");return 1;}
   r = (int)IORegistryEntrySetCFProperties(s,d);

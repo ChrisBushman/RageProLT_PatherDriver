@@ -181,6 +181,7 @@ bool RageStubFB::start(IOService *provider)
     fPCI = OSDynamicCast(IOPCIDevice, provider);
     if (!fPCI) return false;
     fRegMap = 0; fRegs = 0; fFbOff = 0; fCurOk = fCurVis = fCurPos = false; fCurX = fCurY = 0; fCurMap = 0; fCurImg = 0; fCurLock = IOLockAlloc();
+    { OSBoolean *wc = OSDynamicCast(OSBoolean, getProperty("RageWriteCombine")); fWC = wc && wc->isTrue(); }   /* default off */
     { OSBoolean *hc = OSDynamicCast(OSBoolean, getProperty("RageHwCursor")); fHwCursorOff = !(hc && hc->isTrue()); }   /* opt-in: Info.plist RageHwCursor (a failed conversion leaves IOFramebuffer without a working software cursor: panic, Nov 26) */
     { char tmp[8]; char nm[] = "rage_hwcur0"; if (PE_parse_boot_arg(nm, tmp)) fHwCursorOff = true; }
     { OSBoolean *nl = OSDynamicCast(OSBoolean, getProperty("RageNdrvLayout")); fNdrv = !nl || nl->isTrue(); }
@@ -376,6 +377,11 @@ IOReturn RageStubFB::setProperties(OSObject *props)
         if (!n) return kIOReturnBadArgument;
         rm_dsp_apple = n->unsigned32BitValue() ? 1 : 0; IOLog("RageStubFB: display FIFO formula: %s\n", rm_dsp_apple ? "Apple's" : "default");
         return kIOReturnSuccess; }
+    if (d && d->getObject("rage-wc")) {               /* B1g-5: N = 1: the next user mapping of the aperture is write-combined (restart WindowServer to take effect), 0: default cache */
+        OSNumber *n = OSDynamicCast(OSNumber, d->getObject("rage-wc"));
+        if (!n) return kIOReturnBadArgument;
+        fWC = n->unsigned32BitValue() ? true : false; IOLog("RageStubFB: aperture user mapping: %s\n", fWC ? "write-combine" : "default cache");
+        return kIOReturnSuccess; }
     if (d && d->getObject("rage-cursor-fill"))  { fillLowBlock(); return kIOReturnSuccess; }
     return super::setProperties(props);
 }
@@ -394,6 +400,30 @@ IOReturn RageStubFB::enableController(void)
     IOLog("RageStubFB: enableController\n");
     checkDisplay(true);
     return kIOReturnSuccess;
+}
+
+
+/* B1g-5: CoreGraphics maps the framebuffer with the cache mode it derives from the pixel-information flags (default = cache-inhibited, guarded); it never asks for write-combine.
+ * IOUserClient::mapClientMemory calls memory->map(task, addr, options) on the descriptor getApertureRange returned, so a descriptor that adds kIOMapWriteCombineCache there
+ * changes the mode WindowServer's CPU stores use (measured 117 vs 31 MB/s with the debug kext, docs/re-notes/memory-to-screen-blit.md). */
+class RageWCMemory : public IOGeneralMemoryDescriptor      /* IODeviceMemory is only a typedef-like facade (its factories return IOGeneralMemoryDescriptor objects), so derive from the real class */
+{
+    OSDeclareDefaultStructors(RageWCMemory)
+public:
+    static IODeviceMemory *withSub(IODeviceMemory *of, IOByteCount length);
+    virtual IOMemoryMap *map(task_t intoTask, IOVirtualAddress atAddress, IOOptionBits options, IOByteCount offset = 0, IOByteCount length = 0);
+};
+OSDefineMetaClassAndStructors(RageWCMemory, IOGeneralMemoryDescriptor)
+IODeviceMemory *RageWCMemory::withSub(IODeviceMemory *of, IOByteCount length)
+{
+    RageWCMemory *r = new RageWCMemory;
+    if (!r) return 0;
+    if (!r->initWithPhysicalAddress(of->getPhysicalAddress(), length, kIODirectionNone)) { r->release(); return 0; }
+    return (IODeviceMemory *)r;           /* the same unchecked cast IODeviceMemory::withRange itself makes */
+}
+IOMemoryMap *RageWCMemory::map(task_t intoTask, IOVirtualAddress atAddress, IOOptionBits options, IOByteCount offset, IOByteCount length)
+{
+    return IOGeneralMemoryDescriptor::map(intoTask, atAddress, (options & ~kIOMapCacheMask) | kIOMapWriteCombineCache, offset, length);
 }
 
 extern "C" { extern task_t kernel_task; task_t current_task(void); }
@@ -421,6 +451,7 @@ IODeviceMemory *RageStubFB::getApertureRange(IOPixelAperture aperture)
     if (m && fFbOff) {        /* the frame starts fFbOff into VRAM: the aperture range starts there, the VRAM range (getVRAMRange) at 0, WindowServer places the frame at the difference */
         IODeviceMemory *s = IODeviceMemory::withSubRange(m, fFbOff, (UInt32)m->getLength() - fFbOff); m->release(); m = s;
     }
+    if (m && fWC && current_task() != kernel_task) { IODeviceMemory *w = RageWCMemory::withSub(m, m->getLength()); if (w) { m->release(); m = w; } }   /* B1g-5 */
     IOLog("RageStubFB: getApertureRange(%d) caller %p -> %s view, frame at +0x%x\n", (int)aperture, __builtin_return_address(0), current_task() == kernel_task ? "lower" : "upper", (unsigned)fFbOff);
     return m;
 }
