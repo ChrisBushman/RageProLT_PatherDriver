@@ -181,4 +181,9 @@ Measured with `ovl_gate` (640x480 drawable, 1024x768 scanout, clear + triangle +
 | 32 bpp | 16.23 ms (13.83 ms) | 6.29 ms (3.84 ms) |
 
 A first version without the copy cost 0.01 ms per present but left the target undefined after a present and broke 94 gl_suite tests (and lost the Z binding via SET_TARGET); the copy trades 3 ms for the old semantics.  Gates on the release kext: gl_suite 291/291 with the overlay and with RAGE_GL_OVERLAY=0, ovl_gate 16/16 (overlay) and 8/8 (quad) at 16 and 32 bpp scanouts; kill -9 of a client with the overlay on returns the kernel to idle; a mode change while enabled disables it.
-Trade-offs: nearest-neighbour scaling (the quad was bilinear); the software pointer is hidden under the overlay.
+Trade-offs: nearest-neighbour scaling (the quad was bilinear); (the pointer-hidden limitation no longer applies with the hardware cursor, see section 22).
+
+## 22. Pointer over the overlay (user's eyes, Nov 27, release kext, hardware cursor on)
+
+`tools/rig/pointer_over_overlay.sh`: Rage display switched to 1024x768, `ovl_flip 2 15 3000` (640x480 15 bpp buffers stretched over the scanout, bars/grid and diagonals), `cursor_walk` x3 then parked in the middle (centre, edges, corners; stub registers during the walk: GEN_TEST_CNTL 0x180, loaded 1, visible 1).
+User: arrow visible over the picture, proper shape and colour, no vanishing at edges/corners, no picture flicker or breakup when it moves. **This supersedes the earlier "pointer hidden under the overlay" limitation (Nov 25/26, software cursor): the stub's hardware cursor (default since Nov 26) is drawn above the overlay.** The cursor-over-overlay item of B4 is closed.
