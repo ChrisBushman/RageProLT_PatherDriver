@@ -161,6 +161,7 @@ IOExternalMethod *RageLT2DClient::getTargetAndMethodForIndex(IOService **target,
 
 /* Copy the buffer the client filled, validate and interpret the copy, run the ops.  A refused buffer is logged and dropped; the map itself must still succeed (the stock plugin
  * dereferences a null pointer when a map fails). */
+static unsigned gFills, gCopies, gLines, gCmpFills;   /* rig statistics: what the real WindowServer asks for */
 IOReturn RageLT2DClient::process(IOBufferMemoryDescriptor *b)
 {
     const uint32_t *src = (const uint32_t *)b->getBytesNoCopy();
@@ -171,7 +172,10 @@ IOReturn RageLT2DClient::process(IOBufferMemoryDescriptor *b)
     rc = rage2d_validate(fWords, nw, &fShadow, 0, (int32_t)d.w, (int32_t)d.h, fOps, RAGE2D_MAXOPS, &nops);
     if (rc) { fRefusedBufs++; LOG("2D: command buffer refused (%d), %u refused so far\n", rc, (unsigned)fRefusedBufs); return kIOReturnBadArgument; }
     fSubmits++;
+    { uint32_t i; for (i = 0; i < nops; i++) { if (fOps[i].type == RAGE2D_OP_FILL) { gFills++; if (fOps[i].cmp) gCmpFills++; } else if (fOps[i].type == RAGE2D_OP_COPY) gCopies++; else gLines++; } }
     if (nops) { IOReturn e = fDev->exec2D(fOps, nops); if (e) return e; fExecuted += nops; }
+    fDev->setProperty("Rage2DFills", (unsigned long long)gFills, 32); fDev->setProperty("Rage2DCopies", (unsigned long long)gCopies, 32); fDev->setProperty("Rage2DLines", (unsigned long long)gLines, 32); fDev->setProperty("Rage2DKeyedFills", (unsigned long long)gCmpFills, 32);
+    fDev->setProperty("Rage2DBufs", (unsigned long long)fSubmits, 32); fDev->setProperty("Rage2DOps", (unsigned long long)fExecuted, 32); fDev->setProperty("Rage2DRefused", (unsigned long long)fRefusedBufs, 32);   /* ioreg visibility for rig checks */
     return kIOReturnSuccess;
 }
 
