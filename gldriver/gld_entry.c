@@ -393,10 +393,8 @@ int gldModifyTexture(void *ctx, void *t, uint32_t a3)
 {
     rage_fill_descriptor((gld_context *)ctx);
     mach64_texture_bound(t);                /* this texture is now the current one */
-    if (a3 & 0x80) {                        /* image dirty: upload at next draw    */
-        mach64_texture_snapshot_invalidate(t);   /* the image was respecified: any frame copy is stale */
+    if (a3 & 0x80)                          /* image dirty: upload at next draw    */
         mach64_texture_dirtied(t);
-    }
     return 0;
 }
 int gldModifyTextureLevel(void *ctx, void *t, uint32_t a3, uint32_t lvl, uint32_t a5, uint32_t a6, uint32_t a7)
@@ -407,7 +405,6 @@ int gldModifyTextureLevel(void *ctx, void *t, uint32_t a3, uint32_t lvl, uint32_
      * mach64_upload skips it when nothing changed. */
     (void)a3; (void)lvl; (void)a5; (void)a6; (void)a7;
     rage_fill_descriptor((gld_context *)ctx);
-    mach64_texture_snapshot(t);             /* client-storage video: keep the frame as it is NOW (the decoder reuses the buffer before the draw) */
     mach64_texture_dirtied(t);
     return 0;
 }
