@@ -8,6 +8,8 @@
  */
 #include <stdlib.h>
 #include <stdio.h>
+#include <sys/types.h>
+#include <sys/sysctl.h>
 #include "gld.h"
 
 #define TEX_LOCK()
@@ -377,6 +379,21 @@ static unsigned char *tex_tighten(uint32_t src, uint32_t w, uint32_t h, uint32_t
     if (d) for (y = 0; y < h; y++) memcpy(d + (size_t)y * w * bpp, (const unsigned char *)(uintptr_t)src + (size_t)y * pitch * bpp, (size_t)w * bpp);
     return d;
 }
+/* The video frames DVD Player's AltiVec driver hands us are written by the VSP engine (UniNorth2 bus-master DMA) straight into main memory, behind the CPU's caches.  A CPU read of
+ * a frame buffer that was read before (the five buffers are reused every few frames) can therefore return stale cached lines of the buffer's previous picture: 32-byte lines (one
+ * 64-byte pair) of one scanline showing the old frame.  The AltiVec driver itself does dcbf over a frame (its helper at 0x5830) after waiting for the VSP jobs and before any CPU
+ * reader; an accelerated GL driver never reads these buffers with the CPU, so only a CPU-copy path like ours has to do the same.  dcbf flushes and invalidates the line. */
+static void tex_invalidate_rows(uint32_t src, uint32_t rowbytes, uint32_t pitchbytes, uint32_t h)
+{
+    static uint32_t line;
+    uint32_t y, a, e;
+    if (!line) { int mib[2] = { CTL_HW, HW_CACHELINE }; int v = 0; size_t n = sizeof v; line = (sysctl(mib, 2, &v, &n, 0, 0) == 0 && v >= 16 && v <= 128 && !(v & (v - 1))) ? (uint32_t)v : 32u; }
+    for (y = 0; y < h; y++) {
+        a = (src + y * pitchbytes) & ~(line - 1u); e = src + y * pitchbytes + rowbytes;
+        for (; a < e; a += line) __asm__ volatile("dcbf 0,%0" : : "r"(a) : "memory");
+    }
+    __asm__ volatile("sync" : : : "memory");
+}
 static int mach64_upload(gld_context *ctx, void *texobj)
 {
     g_tex_epoch++;
@@ -431,6 +448,7 @@ static int mach64_upload(gld_context *ctx, void *texobj)
         nlevels++;
     }
     if (!nlevels) { int k; for (k = 0; k < 12; k++) free(dec_bufs[k]); return 0; }
+    for (L = 0; L < nlevels; L++) if (ypitch[L]) tex_invalidate_rows(lvl[L].src, lvl[L].w * 2u, ypitch[L] * 2u, lvl[L].h);   /* video frames: drop cached lines of the previous picture before the CPU reads them */
     /* Unchanged re-upload of a resident texture: nothing to do. */
     {   uint32_t h1 = 0, h2 = 0, hl = 0, k; mach64_tex_slot *ex;
         {
