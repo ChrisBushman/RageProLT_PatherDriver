@@ -69,15 +69,47 @@ int main(int argc, char **argv)
         for (r = 14; r < 34; r++) { if (argc > 4) { printf("  out row %2d:", r); for (k = 12; k < 36; k++) printf(" %02x", out[r * P + k]); printf("\n"); continue; } printf("  src row %2d:", r); for (k = 12; k < 24; k++) printf(" %02x", src[r * P + k]); printf("\n  out row %2d:", r); for (k = 12; k < 24; k++) printf(" %02x", out[r * P + k]); printf("\n"); }
         ragegl_free(c, srcOff); ragegl_free(c, dstOff); return 0;
     }
+    if (argc > 1 && argv[1][0] == 'p') {                      /* palette variants 1..3: src ramp 0x00..0xff over the block columns, dst 0 */
+        int pv, i, j;
+        for (pv = 1; pv <= 3; pv++) {
+            norestore |= 2u;
+            for (j = 0; j < H; j++) for (i = 0; i < P; i++) src[j * P + i] = (unsigned char)(i * 4);
+            memset(dst0, 0, sizeof dst0);
+            ragegl_vwrite(c, srcOff, src, P * H, 0);
+            if (run(0, 16, 16, 0, pv << 8, &gui, &st)) { printf("fail pv %d\n", pv); break; }
+            printf("palette variant %d: src(16..31,16)=", pv); for (i = 16; i < 32; i += 3) printf(" %02x", src[16 * P + i]);
+            printf("\n   out="); for (i = 16; i < 32; i += 3) printf(" %02x", out[16 * P + i]); printf("  st %u\n", (unsigned)st);
+        }
+        ragegl_free(c, srcOff); ragegl_free(c, dstOff); return 0;
+    }
+    if (argc > 1 && argv[1][0] == 'd') {                      /* dump default engine registers to the kernel log */
+        uint32_t g, s; norestore |= 2u; memset(src, 0x80, sizeof src); memset(dst0, 0, sizeof dst0);
+        ragegl_vwrite(c, srcOff, src, P * H, 0); run(0, 16, 16, 0xffff, 0x8000, &g, &s); printf("dumped, st %u\n", (unsigned)s);
+        ragegl_free(c, srcOff); ragegl_free(c, dstOff); return 0;
+    }
+    if (argc > 1 && argv[1][0] == 'v') {                      /* sweep SCALE_3D_CNTL in documented-blit mode: src 0x80 / 0xff constant, dst 0 */
+        static const uint32_t cv[] = { 0x40, 0x0, 0x8240, 0x240, 0x1040, 0x2040, 0x4040, 0x8040, 0x10040, 0x20040, 0x40040, 0x80040, 0x100040, 0x200040, 0x400040, 0x800040, 0x1000040, 0x80, 0xc0, 0x100, 0x200, 0x400, 0x800 };
+        unsigned n; norestore |= 2u;
+        for (n = 0; n < sizeof cv / sizeof cv[0]; n++) {
+            int a; printf("3D_CNTL %08x:", cv[n]);
+            for (a = 0x80; a <= 0xff; a += 0x7f) {
+                memset(src, a, sizeof src); memset(dst0, 0, sizeof dst0);
+                if (ragegl_vwrite(c, srcOff, src, P * H, 0) || run(0, 16, 16, cv[n] & 0xffff, cv[n] >> 16, &gui, &st)) { printf(" fail\n"); goto vdone; }
+                printf("  s=%02x -> %02x [st%u]", a, out[16 * P + 16], (unsigned)st);
+            }
+            printf("\n");
+        }
+vdone:  ragegl_free(c, srcOff); ragegl_free(c, dstOff); return 0;
+    }
     if (argc > 1 && argv[1][0] == 'x') {                      /* "xfer": constant source x constant destination, zero vector: the transfer function of the pass */
-        static const int sv[] = { 0x00, 0x40, 0x80, 0xff }, dv[] = { 0x00, 0x80 };
+        static const int sv[] = { 0x10, 0x60, 0xa0, 0xc0, 0xe0, 0xf0, 0xf8, 0xfc, 0xff }, dv[] = { 0x00, 0x80 };
         int a, b, k; if (argc > 2 && argv[2][0] == 'd') norestore |= 2u;
         printf("rows: destination fill d, columns: source constant s; cell = output byte at (16,16) [min..max over the block]\n      ");
-        for (a = 0; a < 4; a++) printf("   s=%02x      ", sv[a]);
+        for (a = 0; a < 9; a++) printf("   s=%02x      ", sv[a]);
         printf("\n");
         for (b = 0; b < 2; b++) {
             printf("d=%02x:", dv[b]);
-            for (a = 0; a < 4; a++) {
+            for (a = 0; a < 9; a++) {
                 int mn = 255, mx = 0;
                 memset(src, sv[a], sizeof src); memset(dst0, dv[b], sizeof dst0);
                 if (ragegl_vwrite(c, srcOff, src, P * H, 0) || run(0, 16, 16, 0, 0, &gui, &st)) { ragegl_free(c, srcOff); ragegl_free(c, dstOff); return 95; }
