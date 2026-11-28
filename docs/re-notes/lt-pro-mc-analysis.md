@@ -43,3 +43,21 @@ Bit-exactness is the crux. Plan (needs agreement before any live write, per the 
 only the register writes listed above (all fully decoded; no unexplained fields), runs ONE 16x16 luma half-pel prediction of a known plane,
 reads the destination back and compares with the CPU reference in recon.c for all 4 half-pel phases and for the bidirectional average. The
 result decides whether MC can be used for exact reconstruction or only approximate (display-quality) assist.
+
+## Update: deeper Win98 trace (ATID32AE.c FUN_b00c60a0 / b00c66d0 / b00c6900, ATIMCRAE.c)
+Established (E):
+- The per-MB command stream is BM_ADDR/BM_DATA format (LT Pro guide 6.2.2): index dword with GUIREG_COUNTER in bits 23:16 (n-1 consecutive regs,
+  auto-increment), then n data dwords. So `0x7f,0x98a40` = write SCALE_3D_CNTL; `0xc00001ef,<v>` brackets (v=0x100 start/end, 0x40 + 0x192
+  writes of `0xb2 = DP_WRITE_MASK <- 0xffffffff` = padding, v = 0x10|0x2/0x4/0x5 per-MB flags from MB +2: 0x300/0x20/0xc0 bits); `0x80000000` ends a block.
+- EVERY MB (intra via FUN_b00c66d0, inter via FUN_b00c6900) ends with the residual feed: per block (6: Y0-3,U,V) repeated packets
+  `0xa00201e0, d0, d1, d2` = three dwords to register index 0x1e0 (+0x1e1,+0x1e2), taken straight from the framework's coefficient buffer
+  at ((MB+8)&0xffffff)*4, the per-block counts being MB bytes +10..+15 (= our MbRec +0x16..+0x1b), consumed 4 counts per packet, then `0x80000000`.
+  0x1e0.. are block-1 registers absent from the LT Pro guide (cf. R128 IDCT_RUNS 0x1f80/IDCT_LEVELS 0x1f84): I: IDCT run/level feed.
+- Intra MBs use SCALE_3D_CNTL=0x8240 (no blend: write mode) with trigger 0x100010 + 2x 0x80008 (Y, U, V; the first pass writes the whole MB then
+  chroma), inter use 0x98a40 (blend add). Two-way/one-way variants differ only in sources.
+- MC12 sets IDCTEngineUsed=1 at surface creation (FUN_b01041f0) and has host IDCT code ("IDCT not enabled / not supported" box at ATIMCRAE ~5819 when the
+  engine is off; INI UseIDCT=1, IDCTinAGPenable/emulate, One/TwoWayIDCT counters).
+Open (N), the decisive one for M2: does 4c49 take THIS stream (0x1e0 coefficient feed to a hardware IDCT), or does ICD family 4 / id 0x4c49 route to a host-IDCT
+mode whose result is fed some other way? ICD says "IDCT absent" for 4c49 yet MC12 families {5,6,8,9} are all emitted by the same function; the mapping HAL/ICD
+family -> MC family (DAT_b0122e50) and the meaning of ctx+0x220 byte +0x13 (selects FUN_b00c60a0's two branches) must be traced next, plus the host IDCT's output
+format at ATIMCRAE ~5790. Until then the "no hardware IDCT on LT Pro" statement is E only from the ICD capability key, not from MC register behaviour.
