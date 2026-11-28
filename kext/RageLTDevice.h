@@ -138,6 +138,7 @@ public:
     IOReturn     ovlDisableLocked(void);                                                                          /* KEY_CNTL hidden, then SCALE_CNTL 0 (fLock held) */
     bool         ovlActive(void) const { return fOvlOwner != 0; }
     uint32_t     fOvlOwner, fOvlPitch, fOvlH, fOvlBpp, fOvlOff;                                                            /* owner of the enabled overlay (0 = none) and its source geometry */
+    IOReturn     mcExp(uint32_t owner, uint32_t srcOff, uint32_t dstOff, uint32_t pitchH, uint32_t xy, uint32_t mv, uint32_t *out);   /* debug: MC experiment stage 1 */
     IOReturn     ovlB0(uint32_t *before, uint32_t *readback, uint32_t *after);                                     /* debug: overlay plan step B0 (the only write) */                                        /* debug, READ-ONLY fixed register list */
     IOReturn     displayInfo(struct rage_display *out, uint32_t *gen);
     IOReturn     exec2D(const struct rage2d_op *ops, uint32_t n);                 /* B1b: validated abstract 2D ops on the scanout (RageLT2D.cpp) */

@@ -489,6 +489,93 @@ IOReturn RageLTDevice::ovlB0(uint32_t *before, uint32_t *readback, uint32_t *aft
 }
 #endif
 
+#if RAGE_DEBUG_ENGTEST
+/* MC experiment stage 1 (docs/re-notes/mc-experiment-plan.md).  One 16x16 luma prediction through the front-end scaler pipe, forward/single source, exactly the register
+ * sequence the Win98 MC12 HAL uses (docs/re-notes/lt-pro-mc-analysis.md): init stream (ATIMCRAE FUN_b0103f60) then the per-block words of ATID32AE FUN_b00c6a40's
+ * one-way case.  Every value is either a verbatim Win98 constant or computed from the caller's geometry; the caller picks no register and no address: both planes must lie
+ * inside the caller's own VRAM blocks, the source block incl. the +1 interpolation row/column must lie inside its plane, and src and dst must not overlap.  Touched
+ * registers are saved first and restored afterwards (the other kernel paths write everything they need again, this only keeps the desktop path untouched). */
+IOReturn RageLTDevice::mcExp(uint32_t owner, uint32_t srcOff, uint32_t dstOff, uint32_t pitchH, uint32_t xy, uint32_t mv, uint32_t *out)
+{
+    static const uint16_t kSave[] = { 0x5c0, 0x778, 0x5fc, 0x550, 0x6d0, 0x530, 0x774, 0x708, 0x6c4, 0x5dc, 0x5e0, 0x5f0, 0x5f4, 0x79c, 0x7d0, 0x6a8, 0x6b4, 0x6d8, 0x6d4, 0x500, 0x788, 0x78c, 0x304, 0x54c, 0x6cc, 0x750 };
+    uint32_t sv[sizeof kSave / sizeof kSave[0]], i;
+    uint32_t pitch = pitchH & 0xffffu, h = (pitchH >> 16) & 0x3fffu, noRestore = pitchH >> 31, docMode = (pitchH >> 30) & 1u, X = xy & 0xffffu, Y = xy >> 16, size, x2, y2, ax, ay; int32_t mvx = (int16_t)(mv & 0xffffu), mvy = (int16_t)(mv >> 16), sx, sy;
+    IOReturn rc = kIOReturnSuccess;
+    uint32_t gui = 0, fifo = 0, status = 2;
+    *out = 2;
+    if ((pitch & 7u) || pitch < 16 || pitch > 1024 || h < 16 || h > 1024 || (dstOff & 7u) || X + 16 > pitch || Y + 16 > h) return kIOReturnBadArgument;
+    sx = mvx + 2 * (int32_t)X; sy = mvy + 2 * (int32_t)Y;
+    if (sx < 0 || sy < 0) return kIOReturnBadArgument;
+    x2 = (uint32_t)sx; y2 = (uint32_t)sy; ax = x2 >> 1; ay = y2 >> 1;
+    if (ax + 17 > pitch || ay + 17 > h) return kIOReturnBadArgument;                     /* the interpolation reads one more column and row */
+    size = pitch * h;
+    if (srcOff < dstOff ? srcOff + size > dstOff : dstOff + size > srcOff) return kIOReturnBadArgument;
+    IOLockLock(fLock);
+    if (!chipOK() || (fModeGen & 1u) || !fEngineLive) { IOLockUnlock(fLock); return kIOReturnNotReady; }
+    if (!rage_vram_owns(&fVram, srcOff, size, owner) || !rage_vram_owns(&fVram, dstOff, size, owner)) { IOLockUnlock(fLock); return kIOReturnNotPermitted; }
+    if (idleWait()) { IOLockUnlock(fLock); return kIOReturnTimeout; }
+    if (eng_reset(fRegs, 1)) { IOLockUnlock(fLock); return kIOReturnTimeout; }                 /* diagnosis: a pass leaves the engine so that the NEXT one hangs; start each from a reset engine */
+    for (i = 0; i < sizeof kSave / sizeof kSave[0]; i++) sv[i] = eng_rd(fRegs, kSave[i]);
+    /* the kernel's standard engine state (what every kernel op writes first; eng_fill): plain integer setup, no Z, all planes writable.  The Win98 stream assumes the 3D driver left these. */
+    eng_wq(fRegs, 0x304, 0); eng_wq(fRegs, MACH64_Z_CNTL, 0); eng_wq(fRegs, 0x6cc, 0xffffffffu);
+    if (docMode) {                                   /* diagnosis: the DOCUMENTED front-end-scaler blt (RAGE PRO Programmer's Guide 8.9.2), whole 16x16 block copied from the source at the same position, no blend, no MC registers */
+        eng_wq(fRegs, 0x550, 0); eng_wq(fRegs, 0x774, 0);                              /* ALPHA_TST_CNTL = 0, TEX_CNTL = 0 */
+        eng_wq(fRegs, 0x5fc, 0x40u);                                                   /* SCALE_3D_CNTL: function = scale */
+        eng_wq(fRegs, 0x5c0, srcOff + Y * pitch + X);                                  /* SCALE_OFF: the block's first byte */
+        eng_wq(fRegs, 0x750, pitch);                                                   /* SCALE_PITCH (index 0xd4), pixels */
+        eng_wq(fRegs, 0x5dc, 16); eng_wq(fRegs, 0x5e0, 16);                            /* SCALE_WIDTH, SCALE_HEIGHT */
+        eng_wq(fRegs, 0x5f0, 0x10000u); eng_wq(fRegs, 0x5f4, 0x10000u);                /* SCALE_X_INC / Y_INC: Win98's 1.0 */
+        eng_wq(fRegs, 0x6d0, 0x80080888u); eng_wq(fRegs, 0x6d8, 0x505u); eng_wq(fRegs, 0x6d4, 0x70003u); eng_wq(fRegs, 0x530, 0x23u);
+        eng_wq(fRegs, 0x6a8, pitch << 16); eng_wq(fRegs, 0x6b4, h << 16);
+        eng_wq(fRegs, 0x500, (pitch << 19) | (dstOff >> 3));
+        eng_wq(fRegs, MACH64_DST_X_Y, (Y << 16) | X);                                 /* X low, Y high (as eng_fill) */
+        eng_wq(fRegs, MACH64_DST_WIDTH_HEIGHT, (16u << 16) | 16u);                    /* trigger, as eng_fill */
+        goto done;
+    }
+    /* init stream (FUN_b0103f60), register index * 4 + 0x400 */
+    eng_wq(fRegs, 0x5c0, 0);                    /* SCALE_OFF */
+    eng_wq(fRegs, 0x778, 0);                    /* SECONDARY_SCALE_OFF */
+    eng_wq(fRegs, 0x5fc, 0x98a40u);             /* SCALE_3D_CNTL */
+    eng_wq(fRegs, 0x550, 0x8000u);              /* ALPHA_TST_CNTL */
+    eng_wq(fRegs, 0x6d0, 0x80080888u);          /* DP_PIX_WIDTH (8 bpp) */
+    eng_wq(fRegs, 0x530, 0x8e023u);             /* DST_CNTL */
+    eng_wq(fRegs, 0x774, 0x40800180u);          /* TEX_CNTL */
+    eng_wq(fRegs, 0x708, 0);                    /* CLR_CMP_CNTL */
+    eng_wq(fRegs, 0x6c4, 0);                    /* DP_FOG_CLR */
+    eng_wq(fRegs, 0x5dc, pitch);                /* index 0x77 (Win98: 2 * its width parameter): plane width */
+    eng_wq(fRegs, 0x5e0, h);                    /* SCALE_HEIGHT */
+    eng_wq(fRegs, 0x5f0, 0x10000u);             /* SCALE_X_INC  1.0 */
+    eng_wq(fRegs, 0x5f4, 0x10000u);             /* SCALE_Y_INC  1.0 (index 0x7d) */
+    eng_wq(fRegs, 0x79c, 0x10000u);             /* SECONDARY_SCALE_X_INC */
+    eng_wq(fRegs, 0x7d0, 0x10000u);             /* SECONDARY_SCALE_Y_INC */
+    eng_wq(fRegs, 0x6d8, 0x505u);               /* DP_SRC */
+    eng_wq(fRegs, 0x6d4, 0x70003u);             /* DP_MIX */
+    eng_wq(fRegs, 0x6a8, pitch << 16);          /* SC_LEFT_RIGHT */
+    eng_wq(fRegs, 0x6b4, h << 16);              /* SC_TOP_BOTTOM */
+    /* per block (one-way, frame, luma 16x16) */
+    eng_wq(fRegs, 0x5fc, 0x98a40u);
+    eng_wq(fRegs, 0x780, (pitch << 16) | pitch);                                   /* SCALE_PITCH_BOTH */
+    eng_wq(fRegs, 0x500, (pitch << 19) | (dstOff >> 3));                           /* DST_OFF_PITCH */
+    eng_wq(fRegs, 0x788, (ay * pitch + ax + srcOff) | ((((y2 & 1u) << 2) | (x2 & 1u)) << 28));   /* SCALE_OFF_ACC: address, half-pel flags in bits 30:28 */
+    eng_wq(fRegs, 0x78c, (X << 16) | Y);                                           /* SCALE_DST_Y_X */
+    eng_wq(fRegs, 0x790, 0x100010u);                                               /* trigger: 16 x 16 */
+done:
+    if (eng_wait_idle(fRegs)) {                  /* diagnosis: sample the status registers 4096 times: busy bit and FIFO-not-empty counts */
+        uint32_t k, nb = 0, nf = 0, g, f; status = 1;
+        for (k = 0; k < 4096; k++) { g = eng_rd(fRegs, MACH64_GUI_STAT); f = eng_rd(fRegs, MACH64_FIFO_STAT); nb += g & 1u; nf += (f & 0xffffu) ? 1u : 0u; gui = g; fifo = f; }
+        fifo = nb; gui = (nf >> 4) << 16;                                   /* reported: busy count in the FIFO field, FIFO-nonempty count / 16 in GUI[23:16] */
+        (void)eng_reset(fRegs, 1);
+    }
+                 /* reported through the status byte (rc stays success so the caller sees GUI_STAT) */
+    else { status = 0; gui = eng_rd(fRegs, MACH64_GUI_STAT); fifo = eng_rd(fRegs, MACH64_FIFO_STAT); }
+    if (!noRestore) for (i = 0; i < sizeof kSave / sizeof kSave[0]; i++) eng_wq(fRegs, kSave[i], sv[i]);      /* bit 31 of pitchH (diagnosis): leave the registers as the sequence set them */
+    (void)eng_wait_idle(fRegs);
+    IOLockUnlock(fLock);
+    *out = status | ((fifo & 0xffffu) << 8) | ((gui >> 16) << 24);              /* status | FIFO_STAT[15:0] << 8 | GUI_STAT[23:16] << 24 */
+    return rc;
+}
+#endif
+
 IOReturn RageLTDevice::scanoutCopyOut(uint32_t byteOff, uint8_t *dst, uint32_t len)
 {
     volatile uint8_t *vram = (volatile uint8_t *)fMap->getVirtualAddress(); uint32_t i; IOReturn rc = kIOReturnBadArgument;

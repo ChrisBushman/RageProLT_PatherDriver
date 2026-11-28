@@ -1,0 +1,29 @@
+# LT Pro motion-compensation experiment (M2 prerequisite) - plan and stages
+
+Basis: docs/re-notes/lt-pro-mc-analysis.md (Win98 MC12 HAL, static).  Rules: no register or value that is not established from the Win98 code or the register guide; the kernel
+builds the sequence (the caller picks geometry only); debug kext only (RAGE_DEBUG_ENGTEST, selector RAGE_GL_MC_EXP); engine state saved and restored; first run on a calibration that
+needs no interpretation of the result.
+
+## Stage 1 (this document's first run): prediction only, luma, one source
+Question answered: does the LT Pro scaler pipe, driven with the Win98 sequence, reproduce MPEG-2 half-pel prediction bit-exactly (rounding of (a+b+1)>>1 and (a+b+c+d+2)>>2)?
+- Planes: two 64x64 8-bit planes in the caller's own VRAM blocks; source = pseudo-random bytes (maximum sensitivity to rounding), destination pre-filled 0xA5.
+- Calibration (no interpretation): integer-pel shifts (0,0), (+1,0), (0,+1) must give an exact copy; run for the four aperture swap modes (VRAM_WRITE/READ flags 0..3), the first that is exact
+  is used afterwards.  If none is exact the experiment stops (wrong register semantics or addressing) and nothing further is sent.
+- Measurement: 4 half-pel phases (full, h, v, hv) x 4 positions (odd and even X/Y, positive and negative integer part of the vector); per phase: number of differing pixels versus MPEG-2
+  rounding and versus truncation, and the histogram of (hardware - MPEG-2).  Also counts bytes changed outside the 16x16 destination block (must be 0).
+- Registers (all values from the Win98 init stream FUN_b0103f60 / one-way frame case of FUN_b00c6a40): see kext/RageLTMode.cpp RageLTDevice::mcExp.
+- Failure handling: engine not idle within the bound -> eng_reset, status 1, tool aborts.  Crash/hang is acceptable investigation cost (G4, reboot 2-3 min).
+Outputs decide: exact -> hardware prediction is usable for exact reconstruction; off-by-one pattern -> characterise (possible compensation); not exact and not characterisable -> approximate-only.
+
+## Later stages (each needs its own go)
+2. chroma (8x8, half-pel on half-chroma grid), 3. two-way average (SECONDARY source, ONE/ONE blend) rounding, 4. residual: the 0x1e0 feed (3-dword layout variants), 5. completion/fence behaviour, 6. field/16x8 cases.
+
+## Stage 1 live results (G4 MDD, 2026-11-27)
+
+Debug selector RAGE_GL_MC_EXP (RAGE_DEBUG_ENGTEST only); tool `tools/ragegl/mc_exp` (`cal`, `one`, `x` = constant-source x constant-destination transfer table).
+
+* Panther IOConnectMethodScalarIScalarO allows 6 arguments in total. A 6-in/2-out selector crashed the kernel (nothing was written to the engine).
+* Win98 init stream plus per-block MC registers, zero vector: the output is the destination plus ~+-3 of dither-like noise. The source plane is NOT copied. Nothing is written outside the 16x16 block. The source plane reads back intact.
+* The documented front-end-scaler blit (Programmer's Guide 8.9.2 values, `doc` mode) gives the same result. Constant-source table: d=00 -> 00, d=80 -> 80 for s=00/40/80; s=ff -> +3. The pass behaves as dst + roughly src/85 or src read as a low-weight channel.
+* So the 0xe0..0xe4 sequence itself works (it touches exactly the block) but the SOURCE FETCH or PIXEL FORMAT/weight is wrong. Suspects: SCALE_3D_CNTL colour-source/format bits, DP_PIX_WIDTH scale field, TEX_CNTL, the SCALE_OFF address units.
+* Engine hang: about every second run the pass never idles (FIFO_STAT 0x1000, GUI_ACTIVE set); eng_reset recovers. Resetting before each run does not prevent it.

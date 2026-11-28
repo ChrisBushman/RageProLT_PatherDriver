@@ -58,6 +58,7 @@ bool RageLTGLClient::start(IOService *provider)
     M(RAGE_GL_OVL_OFF,     selOvlOff,     kIOUCScalarIScalarO, 0, 0);
     M(RAGE_GL_OVL_FLIP,    selOvlFlip,    kIOUCScalarIScalarO, 1, 0);
     M(RAGE_GL_APERTURE_BENCH, selApertureBench, kIOUCScalarIScalarO, 3, 2);
+    M(RAGE_GL_MC_EXP,      selMcExp,      kIOUCScalarIScalarO, 5, 1);
 #undef M
     fDev->logEvent(RAGE_EV_CLIENT_OPEN, fOwner, RAGE_CLIENT_GL, 0, 0, 0, 0);
     return true;
@@ -66,7 +67,7 @@ bool RageLTGLClient::start(IOService *provider)
 IOExternalMethod *RageLTGLClient::getTargetAndMethodForIndex(IOService **target, UInt32 index)
 {
     if (!fDev || index >= RAGE_GL_SEL_COUNT) return 0;
-    if ((index == RAGE_GL_SCANOUT_READ || index == RAGE_GL_REG_DUMP || index == RAGE_GL_OVL_B0 || index == RAGE_GL_APERTURE_BENCH) && !RAGE_DEBUG_ENGTEST) return 0;
+    if ((index == RAGE_GL_SCANOUT_READ || index == RAGE_GL_REG_DUMP || index == RAGE_GL_OVL_B0 || index == RAGE_GL_APERTURE_BENCH || index == RAGE_GL_MC_EXP) && !RAGE_DEBUG_ENGTEST) return 0;
     *target = this;
     return &fMethods[index];
 }
@@ -296,6 +297,15 @@ IOReturn RageLTGLClient::clientMemoryForType(UInt32 type, IOOptionBits *options,
     if (type == 200 && fDev && fBenchLen) { *options = 0; *memory = fDev->apertureMemory(fOwner, fBenchOff, fBenchLen); return *memory ? kIOReturnSuccess : kIOReturnBadArgument; }
 #endif
     (void)options; (void)memory; return kIOReturnUnsupported;
+}
+IOReturn RageLTGLClient::selMcExp(uint32_t src, uint32_t dst, uint32_t ph, uint32_t xy, uint32_t mv, uint32_t *out)
+{
+#if RAGE_DEBUG_ENGTEST
+    if (!fDev) return kIOReturnNotAttached;
+    return fDev->mcExp(fOwner, src, dst, ph, xy, mv, out);
+#else
+    (void)src; (void)dst; (void)ph; (void)xy; (void)mv; (void)out; return kIOReturnUnsupported;
+#endif
 }
 IOReturn RageLTGLClient::selApertureBench(uint32_t off, uint32_t len, uint32_t mode, uint32_t *wns, uint32_t *rns)
 {

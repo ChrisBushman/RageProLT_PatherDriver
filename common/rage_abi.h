@@ -44,7 +44,10 @@ enum {
     RAGE_GL_VRAM_WRITE_ROWS = 26, /* in 6 {offset, user address, rowbytes | nrows << 16, source pitch (bytes), destination pitch (bytes), flags}: copy nrows rows of rowbytes from the user buffer to VRAM at the destination pitch
                                    * (rows need not be contiguous in either place).  rowbytes a multiple of 4, <= 4096; nrows 1..1024; flags bits 0-1 = swap as VRAM_WRITE, bits 8-12 = bytes (0, 4, 8, 12, 16) to replicate
                                    * after every row from its own last bytes, bits 16-17 = extra rows (0..3) replicated from the last row.  The whole destination span must belong to the caller. */
-    RAGE_GL_SEL_COUNT = 27
+    RAGE_GL_MC_EXP = 27,       /* debug builds only (RAGE_DEBUG_ENGTEST): LT Pro motion-compensation experiment, stage 1 (docs/re-notes/mc-experiment-plan.md): ONE 16x16 luma prediction through the scaler pipe, kernel-built register sequence (Win98 values), caller's own 8-bit planes.
+                                * in 5 {source offset, destination offset, pitch | height << 16, X | Y << 16 (destination block), mvx & 0xffff | mvy << 16 (half-pel, signed)}; out 1 {GUI_STAT afterwards with the low byte replaced by the status: 0 ok / 1 engine did not settle (reset) / 2 refused}.
+                                * (IOConnectMethodScalarIScalarO takes at most 6 arguments IN TOTAL on Panther: the first version declared 6 + 2 and the kernel read garbage output pointers: panic Nov 28 22:35.) */
+    RAGE_GL_SEL_COUNT = 28
 };
 #define RAGE_XFER_SWAP16 1u      /* VRAM_WRITE/READ flag: swap bytes inside every 16-bit unit */
 #define RAGE_XFER_SWAP32 2u      /* ... inside every 32-bit unit */
