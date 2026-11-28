@@ -489,6 +489,74 @@ IOReturn RageLTDevice::ovlB0(uint32_t *before, uint32_t *readback, uint32_t *aft
 }
 #endif
 
+#if RAGE_FEAT_DVD
+/* RAGE_GL_MC_BATCH: MPEG-2 motion compensation through the scaler pipe (register semantics and measurements: docs/re-notes/mc-experiment-plan.md). */
+static bool mcLinesDisjoint(uint32_t a, uint32_t b, uint32_t stride, uint32_t width, uint32_t lines)
+{
+    /* two blocks of `lines` lines of `width` bytes at stride `stride` starting at a and b never touch the same byte */
+    uint32_t lo = a < b ? a : b, hi = a < b ? b : a, span = stride * lines;
+    if (lo + span <= hi) return true;                                  /* separate intervals */
+    { uint32_t d = (hi - lo) % stride; return d >= width && d + width <= stride; }   /* same plane, interleaved lines (the two fields of one frame) */
+}
+IOReturn RageLTDevice::mcBatch(uint32_t owner, const RageMcCmd *cmds, uint32_t n)
+{
+    static const uint32_t bwT[4] = { 16, 16, 8, 8 }, bhT[4] = { 16, 8, 8, 4 }, trigT[4] = { 0x100010u, 0x100008u, 0x80008u, 0x80004u };
+    static const uint16_t kSave[] = { 0x5c0, 0x778, 0x5fc, 0x550, 0x6d0, 0x530, 0x774, 0x708, 0x6c4, 0x5dc, 0x5e0, 0x5f0, 0x5f4, 0x79c, 0x7d0, 0x6a8, 0x6b4, 0x6d8, 0x6d4, 0x500,
+                                       0x780, 0x784, 0x788, 0x78c, 0x304, 0x54c, 0x6c8, 0x6cc };
+    uint32_t sv[sizeof kSave / sizeof kSave[0]], i; IOReturn rc = kIOReturnSuccess;
+    if (!n || n > RAGE_MC_MAX_CMDS) return kIOReturnBadArgument;
+    for (i = 0; i < n; i++) {                                           /* validate everything first: no register is touched for a bad batch */
+        const RageMcCmd *c = &cmds[i];
+        uint32_t szc = c->size, bw, bh, stride = c->stride, width = c->width, rows = c->rows, k, nref = (c->flags & RAGE_MC_TWOWAY) ? 2u : 1u;
+        if (szc > 3 || (c->flags & ~RAGE_MC_TWOWAY)) return kIOReturnBadArgument;
+        bw = bwT[szc]; bh = bhT[szc];
+        if ((stride & 7u) || stride < 8 || stride > 4096 || width < bw || width > stride || rows < bh || rows > 2048 || (c->dstOff & 7u)) return kIOReturnBadArgument;
+        if (c->x < 0 || c->y < 0 || (uint32_t)c->x + bw > width || (uint32_t)c->y + bh > rows) return kIOReturnBadArgument;
+        if (!rage_vram_owns(&fVram, c->dstOff, stride * rows, owner)) return kIOReturnNotPermitted;
+        for (k = 0; k < nref; k++) {
+            uint32_t off = k ? c->srcOff2 : c->srcOff; int32_t sx = (k ? c->mv2x : c->mvx) + 2 * (int32_t)c->x, sy = (k ? c->mv2y : c->mvy) + 2 * (int32_t)c->y;
+            if (sx < 0 || sy < 0) return kIOReturnBadArgument;                                       /* the stream may not point outside the picture */
+            if (((uint32_t)sx >> 1) + bw + ((uint32_t)sx & 1u) > width || ((uint32_t)sy >> 1) + bh + ((uint32_t)sy & 1u) > rows) return kIOReturnBadArgument;
+            /* the engine may fetch one line/column more than it uses: the caller pads planes by two lines, ownership covers rows + 1 lines */
+            if (!rage_vram_owns(&fVram, off, stride * (rows + 1), owner)) return kIOReturnNotPermitted;
+            if (!mcLinesDisjoint(off, c->dstOff, stride, width, rows + 1)) return kIOReturnBadArgument;   /* never read what is being written */
+        }
+    }
+    IOLockLock(fLock);
+    if (!chipOK() || (fModeGen & 1u) || !fEngineLive) { IOLockUnlock(fLock); return kIOReturnNotReady; }
+    if (idleWait()) { IOLockUnlock(fLock); return kIOReturnTimeout; }
+    for (i = 0; i < sizeof kSave / sizeof kSave[0]; i++) sv[i] = eng_rd(fRegs, kSave[i]);
+    /* common state (Win98 init stream FUN_b0103f60 + what the kernel's own operations set): DP_WRITE_MASK must be written: the 3D driver leaves it at a partial value. */
+    eng_wq(fRegs, 0x304, 0); eng_wq(fRegs, MACH64_Z_CNTL, 0); eng_wq(fRegs, 0x6cc, 0xffffffffu); eng_wq(fRegs, 0x6c8, 0xffffffffu);
+    eng_wq(fRegs, 0x5c0, 0); eng_wq(fRegs, 0x778, 0);
+    eng_wq(fRegs, 0x5fc, 0x98a40u); eng_wq(fRegs, 0x550, 0x8000u); eng_wq(fRegs, 0x6d0, 0x80080888u); eng_wq(fRegs, 0x530, 0x8e023u);
+    eng_wq(fRegs, 0x774, 0x40800180u); eng_wq(fRegs, 0x708, 0); eng_wq(fRegs, 0x6c4, 0);
+    eng_wq(fRegs, 0x5dc, cmds[0].width); eng_wq(fRegs, 0x5e0, cmds[0].rows);
+    eng_wq(fRegs, 0x5f0, 0x10000u); eng_wq(fRegs, 0x5f4, 0x10000u); eng_wq(fRegs, 0x79c, 0x10000u); eng_wq(fRegs, 0x7d0, 0x10000u);
+    eng_wq(fRegs, 0x6d8, 0x505u); eng_wq(fRegs, 0x6d4, 0x70003u);
+    eng_wq(fRegs, 0x6a8, 0x1fffu << 16); eng_wq(fRegs, 0x6b4, 0x1fffu << 16);                       /* scissor wide open: every block was validated above */
+    for (i = 0; i < n; i++) {
+        const RageMcCmd *c = &cmds[i];
+        uint32_t sx = (uint32_t)(c->mvx + 2 * (int32_t)c->x), sy = (uint32_t)(c->mvy + 2 * (int32_t)c->y);
+        eng_wq(fRegs, 0x780, ((uint32_t)c->stride << 16) | c->stride);                                 /* SCALE_PITCH_BOTH */
+        eng_wq(fRegs, 0x500, ((uint32_t)c->stride << 19) | (c->dstOff >> 3));                          /* DST_OFF_PITCH */
+        if (c->flags & RAGE_MC_TWOWAY) {
+            uint32_t sx2 = (uint32_t)(c->mv2x + 2 * (int32_t)c->x), sy2 = (uint32_t)(c->mv2y + 2 * (int32_t)c->y);
+            eng_wq(fRegs, 0x784, ((sy2 >> 1) * c->stride + (sx2 >> 1) + c->srcOff2) | ((((sy2 & 1u) << 2) | (sx2 & 1u)) << 28));   /* SECONDARY_SCALE_OFF_ACC */
+            eng_wq(fRegs, 0x788, ((sy >> 1) * c->stride + (sx >> 1) + c->srcOff) | ((((sy & 1u) << 2) | (sx & 1u)) << 28) | 0x80000000u);   /* bit 31 enables the second reference */
+        } else
+            eng_wq(fRegs, 0x788, ((sy >> 1) * c->stride + (sx >> 1) + c->srcOff) | ((((sy & 1u) << 2) | (sx & 1u)) << 28));
+        eng_wq(fRegs, 0x78c, ((uint32_t)c->x << 16) | (uint32_t)c->y);                                  /* SCALE_DST_Y_X */
+        eng_wq(fRegs, 0x790, trigT[c->size]);                                                           /* trigger: width << 16 | height */
+    }
+    if (eng_wait_idle(fRegs)) { (void)eng_reset(fRegs, 1); rc = kIOReturnTimeout; }
+    for (i = 0; i < sizeof kSave / sizeof kSave[0]; i++) eng_wq(fRegs, kSave[i], sv[i]);
+    (void)eng_wait_idle(fRegs);
+    IOLockUnlock(fLock);
+    return rc;
+}
+#endif
+
 #if RAGE_DEBUG_ENGTEST
 /* MC experiment stage 1 (docs/re-notes/mc-experiment-plan.md).  One 16x16 luma prediction through the front-end scaler pipe, forward/single source, exactly the register
  * sequence the Win98 MC12 HAL uses (docs/re-notes/lt-pro-mc-analysis.md): init stream (ATIMCRAE FUN_b0103f60) then the per-block words of ATID32AE FUN_b00c6a40's
@@ -571,7 +639,7 @@ IOReturn RageLTDevice::mcExp(uint32_t owner, uint32_t srcOff, uint32_t dstOff, u
     eng_wq(fRegs, 0x6a8, pitch << 16);          /* SC_LEFT_RIGHT */
     eng_wq(fRegs, 0x6b4, h << 16);              /* SC_TOP_BOTTOM */
     /* per block (one-way, frame, luma 16x16) */
-    eng_wq(fRegs, 0x5fc, 0x98a40u);
+    eng_wq(fRegs, 0x5fc, texVar >= 16 ? ((0x98a40u & ~0x3fu) | (texVar - 16)) : 0x98a40u);   /* diagnosis: texVar 16..79 = low 6 bits of SCALE_3D_CNTL */
     eng_wq(fRegs, 0x780, (pitch << 16) | pitch);                                   /* SCALE_PITCH_BOTH */
     eng_wq(fRegs, 0x500, (pitch << 19) | (dstOff >> 3));                           /* DST_OFF_PITCH */
     if (twoWay) eng_wq(fRegs, 0x784, blkSec);                                      /* SECONDARY_SCALE_OFF_ACC: second reference, same flag layout */

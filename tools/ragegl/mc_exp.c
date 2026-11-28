@@ -73,7 +73,7 @@ int main(int argc, char **argv)
     if (argc > 1 && argv[1][0] == 'z') {                      /* block sizes: all 4 size codes x 4 phases x positions; one-way, vs MPEG-2 (hv expected chained) */
         int z, ph, n, bad = 0, badhv = 0, tot = 0, tothv = 0, outside = 0;
         for (z = 0; z < 4; z++) for (ph = 0; ph < 4; ph++) {
-            int mvx = ph & 1 ? 2 : 0, mvy = ph & 2 ? 2 : 0; bad = 0; tot = 0; outside = 0;
+            int mvx = ph & 1 ? 1 : 0, mvy = ph & 2 ? 1 : 0; bad = 0; tot = 0; outside = 0;
             for (n = 0; n < 8; n++) {
                 int X = 8 + 4 * n, Y = 8 + 5 * (n & 3), i, j; unsigned char r0[256], r1[256];
                 szcode = z; norestore = 0;
@@ -87,6 +87,44 @@ int main(int argc, char **argv)
             printf("size %dx%d phase %d (%s): %d of %d differ from %s; %d bytes outside the block\n", BW[z], BH[z], ph, ph == 0 ? "full" : ph == 1 ? "h" : ph == 2 ? "v" : "hv", bad, tot, ph == 3 ? "chained rounding" : "MPEG-2", outside);
         }
 zdone:  szcode = 0; ragegl_free(c, srcOff); ragegl_free(c, dstOff); return 0;
+    }
+    if (argc > 1 && argv[1][0] == 'h') {                      /* hv half-pel vs SCALE_3D_CNTL low 6 bits: mismatches against MPEG-2 exact and chained model */
+        int b, n;
+        for (b = 0; b < 64; b++) {
+            int bad0 = 0, bad1 = 0, tot = 0;
+            for (n = 0; n < 4; n++) {
+                int X = 10 + 5 * n, Y = 12 + 4 * n, i, j; unsigned char r0[256], r1[256];
+                szcode = 0; twoway = 0; norestore = 0; texvar = 16 + b;
+                for (i = 0; i < P * H; i++) { src[i] = (unsigned char)rnd(); dst0[i] = 0; }
+                ragegl_vwrite(c, srcOff, src, P * H, 0);
+                if (run(0, X, Y, 1, 1, &gui, &st) || st) { printf("fail b=%d\n", b); goto hdone; }
+                ref(X, Y, 1, 1, 0, r0); ref(X, Y, 1, 1, 1, r1);
+                for (j = 0; j < 16; j++) for (i = 0; i < 16; i++) { int o = out[(Y + j) * P + X + i]; tot++; if (o != r0[j * 16 + i]) bad0++; if (o != r1[j * 16 + i]) bad1++; }
+            }
+            if (bad0 == 0 || bad1 != 0 || b == 0x00) printf("3D_CNTL low6 %02x: %d of %d differ from MPEG-2 exact, %d from chained\n", b, bad0, tot, bad1);
+        }
+hdone:  texvar = 0; ragegl_free(c, srcOff); ragegl_free(c, dstOff); return 0;
+    }
+    if (argc > 1 && argv[1][0] == 'r') {                      /* residual: dst pre-loaded with signed residual (two's complement), MC pass adds the prediction; expect clip(pred + res) */
+        int ph, n, bad, tot, edge;
+        for (ph = 0; ph < 3; ph++) {
+            int mvx = ph == 1 ? 1 : 0, mvy = ph == 2 ? 1 : 0; bad = tot = edge = 0;
+            for (n = 0; n < 8; n++) {
+                int X = 8 + 4 * n, Y = 12 + 3 * n, i, j; unsigned char r0[256];
+                szcode = 0; twoway = 0; norestore = 0;
+                for (i = 0; i < P * H; i++) { src[i] = (unsigned char)rnd(); dst0[i] = (unsigned char)((int)(rnd() % 256) - 128 + 128 == 0 ? 0 : (rnd() % 256)); }
+                ragegl_vwrite(c, srcOff, src, P * H, 0);
+                if (run(0, X, Y, mvx, mvy, &gui, &st) || st) { printf("fail st%u\n", (unsigned)st); goto rdone; }
+                ref(X, Y, mvx, mvy, 0, r0);
+                for (j = 0; j < 16; j++) for (i = 0; i < 16; i++) {
+                    int res = (signed char)dst0[(Y + j) * P + X + i], e = r0[j * 16 + i] + res, o = out[(Y + j) * P + X + i];
+                    if (e < 0) { e = 0; edge++; } if (e > 255) { e = 255; edge++; }
+                    tot++; if (o != e) bad++;
+                }
+            }
+            printf("residual+pred phase %d: %d of %d differ from clip(pred+res) (%d clipped samples)\n", ph, bad, tot, edge);
+        }
+rdone:  ragegl_free(c, srcOff); ragegl_free(c, dstOff); return 0;
     }
     if (argc > 1 && argv[1][0] == 'u') {                      /* secondary probe: left half 0x20, right half 0x60; primary at left, secondary 30 px to the right */
         int i, j, k;
@@ -106,7 +144,7 @@ zdone:  szcode = 0; ragegl_free(c, srcOff); ragegl_free(c, dstOff); return 0;
         for (z = 0; z < 2; z++) for (p1 = 0; p1 < 4; p1++) for (p2 = 0; p2 < 4; p2++) {
             int bad = 0, tot = 0, hist[3] = { 0, 0, 0 }, outside = 0;
             for (n = 0; n < 6; n++) {
-                int X = 10 + 4 * n, Y = 10 + 3 * n, i, j, m1x = p1 & 1 ? 2 : 0, m1y = p1 & 2 ? 2 : 0, m2x = (p2 & 1 ? 2 : 0) + 6, m2y = (p2 & 2 ? 2 : 0) - 4; unsigned char a[256], b[256];
+                int X = 10 + 4 * n, Y = 10 + 3 * n, i, j, m1x = p1 & 1 ? 1 : 0, m1y = p1 & 2 ? 1 : 0, m2x = (p2 & 1 ? 1 : 0) + 6, m2y = (p2 & 2 ? 1 : 0) - 4; unsigned char a[256], b[256];
                 szcode = zs[z]; twoway = 1; norestore = 0;
                 for (i = 0; i < P * H; i++) src[i] = (unsigned char)rnd();
                 memset(dst0, 0, sizeof dst0);

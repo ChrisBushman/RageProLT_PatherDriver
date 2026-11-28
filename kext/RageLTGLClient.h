@@ -50,6 +50,7 @@ public:
     uint32_t fBenchOff, fBenchLen;                       /* RAGE_DEBUG_ENGTEST: block the last aperture benchmark used; map type 200 maps exactly that block */
     virtual IOReturn clientMemoryForType(UInt32 type, IOOptionBits *options, IOMemoryDescriptor **memory);   /* debug only: type 200 */
     IOReturn selApertureBench(uint32_t off, uint32_t len, uint32_t mode, uint32_t *wns, uint32_t *rns);   /* RAGE_DEBUG_ENGTEST only */
+    IOReturn selMcBatch(uint32_t addr, uint32_t n);                                                    /* RAGE_FEAT_DVD */
     IOReturn selMcExp(uint32_t src, uint32_t dst, uint32_t ph, uint32_t xy, uint32_t mv, uint32_t *out);   /* RAGE_DEBUG_ENGTEST only */
     IOReturn selRegDump(uint32_t addr, uint32_t len);       /* debug builds only, read-only */
     IOReturn selOvlOn(uint32_t off, uint32_t pitch, uint32_t src, uint32_t dst, uint32_t dsz, uint32_t bpp);   /* RAGE_FEAT_OVERLAY */

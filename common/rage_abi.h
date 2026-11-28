@@ -47,10 +47,31 @@ enum {
     RAGE_GL_MC_EXP = 27,       /* debug builds only (RAGE_DEBUG_ENGTEST): LT Pro motion-compensation experiment, stage 1 (docs/re-notes/mc-experiment-plan.md): ONE 16x16 luma prediction through the scaler pipe, kernel-built register sequence (Win98 values), caller's own 8-bit planes.
                                 * in 5 {source offset, destination offset, pitch | height << 16, X | Y << 16 (destination block), mvx & 0xffff | mvy << 16 (half-pel, signed)}; out 1 {GUI_STAT afterwards with the low byte replaced by the status: 0 ok / 1 engine did not settle (reset) / 2 refused}.
                                 * (IOConnectMethodScalarIScalarO takes at most 6 arguments IN TOTAL on Panther: the first version declared 6 + 2 and the kernel read garbage output pointers: panic Nov 28 22:35.) */
-    RAGE_GL_SEL_COUNT = 28
+    RAGE_GL_MC_BATCH = 28,     /* RAGE_FEAT_DVD: MPEG-2 motion compensation through the LT Pro scaler pipe (docs/re-notes/mc-experiment-plan.md): in 2 {user address of RageMcCmd[], count (1..RAGE_MC_MAX_CMDS)}.
+                                * Every command adds (ONE/ONE blend, signed destination clamp) a bilinear half-pel prediction block to the bytes already in the destination, so the caller first writes the
+                                * residual there (signed bytes, two's complement, -128..127) or zero.  All blocks of a batch are validated before the first register is written; planes must belong to the caller.
+                                * Measured on hardware: integer, h and v half-pel are bit-exact MPEG-2; hv half-pel rounds twice (+1 on ~35% of samples); two-reference blocks average with (a+b+1)>>1. */
+    RAGE_GL_SEL_COUNT = 29
 };
 #define RAGE_XFER_SWAP16 1u      /* VRAM_WRITE/READ flag: swap bytes inside every 16-bit unit */
 #define RAGE_XFER_SWAP32 2u      /* ... inside every 32-bit unit */
+
+/* one block of RAGE_GL_MC_BATCH (32 bytes) */
+#define RAGE_MC_MAX_CMDS 4096
+#define RAGE_MC_TWOWAY   1u              /* flags: second reference srcOff2/mv2 averaged with the first */
+typedef struct {
+    uint32_t srcOff;        /* VRAM byte offset of line 0 of the reference plane in the coordinate system used (a field: first line of that parity) */
+    uint32_t srcOff2;       /* second reference (RAGE_MC_TWOWAY), same stride/rows */
+    uint32_t dstOff;        /* VRAM byte offset of destination line 0 of the system, multiple of 8 */
+    uint16_t stride;        /* bytes between lines of the system (frame: plane pitch; field: 2 x pitch), multiple of 8 */
+    uint16_t width;         /* valid pixels per line (<= stride) */
+    uint16_t rows;          /* valid lines of the system */
+    uint8_t  size;          /* 0 = 16x16, 1 = 16x8, 2 = 8x8, 3 = 8x4 (width x height) */
+    uint8_t  flags;
+    int16_t  x, y;          /* destination block origin in the system */
+    int16_t  mvx, mvy;      /* half-sample vector of the first reference */
+    int16_t  mv2x, mv2y;    /* second reference */
+} RageMcCmd;
 
 /* RAGE_GL_INFO flags (4th output) */
 #define RAGE_INFO_ENGINE  1u     /* engine live */

@@ -59,6 +59,9 @@ bool RageLTGLClient::start(IOService *provider)
     M(RAGE_GL_OVL_FLIP,    selOvlFlip,    kIOUCScalarIScalarO, 1, 0);
     M(RAGE_GL_APERTURE_BENCH, selApertureBench, kIOUCScalarIScalarO, 3, 2);
     M(RAGE_GL_MC_EXP,      selMcExp,      kIOUCScalarIScalarO, 5, 1);
+#if RAGE_FEAT_DVD
+    M(RAGE_GL_MC_BATCH,    selMcBatch,    kIOUCScalarIScalarO, 2, 0);
+#endif
 #undef M
     fDev->logEvent(RAGE_EV_CLIENT_OPEN, fOwner, RAGE_CLIENT_GL, 0, 0, 0, 0);
     return true;
@@ -298,6 +301,22 @@ IOReturn RageLTGLClient::clientMemoryForType(UInt32 type, IOOptionBits *options,
 #endif
     (void)options; (void)memory; return kIOReturnUnsupported;
 }
+#if RAGE_FEAT_DVD
+IOReturn RageLTGLClient::selMcBatch(uint32_t addr, uint32_t n)
+{
+    RageMcCmd *buf; uint32_t bytes; IOReturn rc;
+    if (!fDev) return kIOReturnNotAttached;
+    if (!n || n > RAGE_MC_MAX_CMDS) return kIOReturnBadArgument;
+    bytes = n * (uint32_t)sizeof(RageMcCmd);
+    buf = (RageMcCmd *)IOMalloc(bytes);
+    if (!buf) return kIOReturnNoMemory;
+    rc = userIn(addr, (uint8_t *)buf, bytes);
+    if (rc == kIOReturnSuccess) rc = fDev->mcBatch(fOwner, buf, n);
+    IOFree(buf, bytes);
+    return rc;
+}
+#endif
+
 IOReturn RageLTGLClient::selMcExp(uint32_t src, uint32_t dst, uint32_t ph, uint32_t xy, uint32_t mv, uint32_t *out)
 {
 #if RAGE_DEBUG_ENGTEST
