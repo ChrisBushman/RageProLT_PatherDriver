@@ -369,6 +369,7 @@ IOReturn RageLTDevice::ovlDisableLocked(void)
     if (!chipLive()) return kIOReturnNotReady;         /* asleep: the overlay was disabled before the chip suspended; never write a suspended chip */
     ovlw(fRegs, 0x018, 0x110u);          /* OVERLAY_KEY_CNTL: video never shown */
     ovlw(fRegs, 0x024, 0u);              /* OVERLAY_SCALE_CNTL: scaler and overlay off */
+    fOvlYuv = 0;
     return kIOReturnSuccess;
 }
 IOReturn RageLTDevice::ovlOff(uint32_t owner)
@@ -428,13 +429,72 @@ IOReturn RageLTDevice::ovlOn(uint32_t owner, uint32_t off, uint32_t pitch_px, ui
     return rc;
 }
 
+
+/* Planar YUV 4:2:0 overlay.  Registers beyond the RGB list (docs/re-notes/overlay-yuv-plan.md): SCALER_BUF0/1_OFFSET_U/V = block-1 idx 0x75-0x78 (window offset 0x1d4-0x1e0), VIDEO_FORMAT.SCALER_IN = 0xa (YUV12).
+ * Layout as the Win98 HAL programs it for YV12: BUF_PITCH = luma pitch in BYTES, chroma pitch implied pitch/2, offsets in bytes. */
+IOReturn RageLTDevice::ovlOnYuv(uint32_t owner, const RageOvlYuv *a)
+{
+    IOReturn rc = kIOReturnBadArgument; uint32_t hinc, vinc, fmt, sw = a->srcW, sh = a->srcH;
+    if (!owner || a->flags || a->reserved || !sw || !sh || (sw & 1u) || (sh & 1u) || sw > 720u || !a->dstW || !a->dstH || (a->pitchY & 15u) || a->pitchY < sw ||
+        ((a->offY | a->offU | a->offV) & 7u)) return kIOReturnBadArgument;
+    IOLockLock(fLock);
+    if (!chipOK()) { IOLockUnlock(fLock); return kIOReturnNotReady; }
+    if (fOvlOwner) rc = kIOReturnBusy;
+    else if (OSReadLittleInt32((volatile void *)fRegs, 0x024) != 0 ||
+             (OSReadLittleInt32((volatile void *)fRegs, 0x018) != 0 && OSReadLittleInt32((volatile void *)fRegs, 0x018) != 0x110u)) rc = kIOReturnNotPermitted;
+    else if (!fDispReserved || (uint32_t)a->dstX + a->dstW > fDisp.w || (uint32_t)a->dstY + a->dstH > fDisp.h) rc = kIOReturnBadArgument;
+    else if (!rage_vram_owns(&fVram, a->offY, (uint64_t)a->pitchY * sh, owner) || !rage_vram_owns(&fVram, a->offU, (uint64_t)(a->pitchY >> 1) * (sh >> 1), owner) ||
+             !rage_vram_owns(&fVram, a->offV, (uint64_t)(a->pitchY >> 1) * (sh >> 1), owner)) rc = kIOReturnNotPermitted;
+    else {
+        hinc = (sw << 12) / a->dstW; vinc = (sh << 12) / a->dstH;
+        if (hinc == 0 || vinc == 0 || hinc > 0xffffu || vinc > 0xffffu) rc = kIOReturnBadArgument;
+        else {
+            ovlw(fRegs, 0x018, 0x110u);                                          /* hide while programming */
+            ovlw(fRegs, 0x000, ((uint32_t)a->dstX << 16) | a->dstY);
+            ovlw(fRegs, 0x004, (((uint32_t)a->dstX + a->dstW - 1u) << 16) | ((uint32_t)a->dstY + a->dstH - 1u));
+            ovlw(fRegs, 0x008, 0u); ovlw(fRegs, 0x00c, 0u); ovlw(fRegs, 0x010, 0u); ovlw(fRegs, 0x014, 0u);
+            ovlw(fRegs, 0x020, (hinc << 16) | vinc);
+            ovlw(fRegs, 0x028, (sw << 16) | sh);
+            ovlw(fRegs, 0x034, a->offY); ovlw(fRegs, 0x038, a->offY); ovlw(fRegs, 0x03c, a->pitchY);          /* BUF0/BUF1 offset, BUF_PITCH (bytes for planar) */
+            ovlw(fRegs, 0x1d4, a->offU); ovlw(fRegs, 0x1d8, a->offV); ovlw(fRegs, 0x1dc, a->offU); ovlw(fRegs, 0x1e0, a->offV);   /* BUF0_U, BUF0_V, BUF1_U, BUF1_V */
+            fmt = OSReadLittleInt32((volatile void *)fRegs, 0x048);
+            ovlw(fRegs, 0x048, (fmt & ~0x000f0000u) | 0x000a0000u);              /* SCALER_IN = YUV12 */
+            ovlw(fRegs, 0x150, 0x00101000u);
+            ovlw(fRegs, 0x154, 0x00002000u); ovlw(fRegs, 0x158, 0x0d06200du); ovlw(fRegs, 0x15c, 0x0d0a1c0du); ovlw(fRegs, 0x160, 0x0c0e1a0cu); ovlw(fRegs, 0x164, 0x0c14140cu);
+            ovlw(fRegs, 0x018, 0x011u);
+            ovlw(fRegs, 0x024, 0xc0000000u);
+            fOvlOwner = owner; fOvlPitch = a->pitchY; fOvlH = sh; fOvlBpp = 1; fOvlOff = a->offY; fOvlU = a->offU; fOvlV = a->offV; fOvlYuv = 1; rc = kIOReturnSuccess;
+        }
+    }
+    IOLockUnlock(fLock);
+    return rc;
+}
+
+IOReturn RageLTDevice::ovlFlipYuv(uint32_t owner, uint32_t offY, uint32_t offU, uint32_t offV)
+{
+    IOReturn rc = kIOReturnNotPermitted;
+    if ((offY | offU | offV) & 7u) return kIOReturnBadArgument;
+    IOLockLock(fLock);
+    if (!chipOK()) { IOLockUnlock(fLock); return kIOReturnNotReady; }
+    if (fOvlOwner && fOvlOwner == owner && fOvlYuv) {
+        if (!rage_vram_owns(&fVram, offY, (uint64_t)fOvlPitch * fOvlH, owner) || !rage_vram_owns(&fVram, offU, (uint64_t)(fOvlPitch >> 1) * (fOvlH >> 1), owner) ||
+            !rage_vram_owns(&fVram, offV, (uint64_t)(fOvlPitch >> 1) * (fOvlH >> 1), owner)) rc = kIOReturnBadArgument;
+        else {
+            ovlw(fRegs, 0x034, offY); ovlw(fRegs, 0x038, offY); ovlw(fRegs, 0x1d4, offU); ovlw(fRegs, 0x1d8, offV); ovlw(fRegs, 0x1dc, offU); ovlw(fRegs, 0x1e0, offV);
+            fOvlOff = offY; fOvlU = offU; fOvlV = offV; rc = kIOReturnSuccess;
+        }
+    }
+    IOLockUnlock(fLock);
+    return rc;
+}
+
 IOReturn RageLTDevice::ovlFlip(uint32_t owner, uint32_t off)
 {
     IOReturn rc = kIOReturnNotPermitted;
     if (off & 7u) return kIOReturnBadArgument;
     IOLockLock(fLock);
     if (!chipOK()) { IOLockUnlock(fLock); return kIOReturnNotReady; }
-    if (fOvlOwner && fOvlOwner == owner) {
+    if (fOvlOwner && fOvlOwner == owner && !fOvlYuv) {
         if (!rage_vram_owns(&fVram, off, (uint64_t)fOvlPitch * fOvlBpp * fOvlH, owner)) rc = kIOReturnBadArgument;
         else { ovlw(fRegs, 0x034, off); ovlw(fRegs, 0x038, off); fOvlOff = off; rc = kIOReturnSuccess; }          /* SCALER_BUF0/BUF1_OFFSET */
     }
@@ -446,6 +506,8 @@ IOReturn RageLTDevice::ovlDisableLocked(void) { return kIOReturnUnsupported; }
 IOReturn RageLTDevice::ovlOff(uint32_t) { return kIOReturnUnsupported; }
 IOReturn RageLTDevice::ovlOn(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t) { return kIOReturnUnsupported; }
 IOReturn RageLTDevice::ovlFlip(uint32_t, uint32_t) { return kIOReturnUnsupported; }
+IOReturn RageLTDevice::ovlOnYuv(uint32_t, const RageOvlYuv *) { return kIOReturnUnsupported; }
+IOReturn RageLTDevice::ovlFlipYuv(uint32_t, uint32_t, uint32_t, uint32_t) { return kIOReturnUnsupported; }
 #endif
 
 #if RAGE_DEBUG_ENGTEST

@@ -133,11 +133,13 @@ public:
     IOReturn     scanoutCopyOut(uint32_t byteOff, uint8_t *dst, uint32_t len);                                    /* debug */
     IOReturn     regDump(uint32_t *pairs, uint32_t maxPairs, uint32_t *n);
     IOReturn     ovlOn(uint32_t owner, uint32_t off, uint32_t pitch_px, uint32_t sw, uint32_t sh, uint32_t dx, uint32_t dy, uint32_t dw, uint32_t dh, uint32_t bpp, uint32_t flags);   /* RAGE_FEAT_OVERLAY; flags: bit0 = SCALE_HORZ_MODE, bit1 = SCALE_VERT_MODE (debug builds only, hypothesis test) */
+    IOReturn     ovlOnYuv(uint32_t owner, const RageOvlYuv *a);                                                     /* planar YUV 4:2:0 source (docs/re-notes/overlay-yuv-plan.md) */
+    IOReturn     ovlFlipYuv(uint32_t owner, uint32_t offY, uint32_t offU, uint32_t offV);
     IOReturn     ovlOff(uint32_t owner);
     IOReturn     ovlFlip(uint32_t owner, uint32_t off);
     IOReturn     ovlDisableLocked(void);                                                                          /* KEY_CNTL hidden, then SCALE_CNTL 0 (fLock held) */
     bool         ovlActive(void) const { return fOvlOwner != 0; }
-    uint32_t     fOvlOwner, fOvlPitch, fOvlH, fOvlBpp, fOvlOff;                                                            /* owner of the enabled overlay (0 = none) and its source geometry */
+    uint32_t     fOvlOwner, fOvlPitch, fOvlH, fOvlBpp, fOvlOff, fOvlU, fOvlV, fOvlYuv;                                                            /* owner of the enabled overlay (0 = none) and its source geometry */
     IOReturn     mcBatch(uint32_t owner, const RageMcCmd *cmds, uint32_t n);                           /* RAGE_GL_MC_BATCH */
     IOReturn     mcExp(uint32_t owner, uint32_t srcOff, uint32_t dstOff, uint32_t pitchH, uint32_t xy, uint32_t mv, uint32_t *out);   /* debug: MC experiment stage 1 */
     IOReturn     ovlB0(uint32_t *before, uint32_t *readback, uint32_t *after);                                     /* debug: overlay plan step B0 (the only write) */                                        /* debug, READ-ONLY fixed register list */

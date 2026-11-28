@@ -54,6 +54,8 @@ public:
     IOReturn selMcExp(uint32_t src, uint32_t dst, uint32_t ph, uint32_t xy, uint32_t mv, uint32_t *out);   /* RAGE_DEBUG_ENGTEST only */
     IOReturn selRegDump(uint32_t addr, uint32_t len);       /* debug builds only, read-only */
     IOReturn selOvlOn(uint32_t off, uint32_t pitch, uint32_t src, uint32_t dst, uint32_t dsz, uint32_t bpp);   /* RAGE_FEAT_OVERLAY */
+    IOReturn selOvlOnYuv(uint32_t addr);                                                              /* RAGE_FEAT_OVERLAY */
+    IOReturn selOvlFlipYuv(uint32_t offY, uint32_t offU, uint32_t offV);
     IOReturn selOvlOff(void);
     IOReturn selOvlFlip(uint32_t off);
     IOReturn selOvlB0(uint32_t *before, uint32_t *readback, uint32_t *after);   /* debug builds only: overlay step B0 */

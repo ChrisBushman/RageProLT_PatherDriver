@@ -55,6 +55,8 @@ bool RageLTGLClient::start(IOService *provider)
     M(RAGE_GL_REG_DUMP,    selRegDump,    kIOUCScalarIScalarO, 2, 0);
     M(RAGE_GL_OVL_B0,      selOvlB0,      kIOUCScalarIScalarO, 0, 3);
     M(RAGE_GL_OVL_ON,      selOvlOn,      kIOUCScalarIScalarO, 6, 0);
+    M(RAGE_GL_OVL_ON_YUV,  selOvlOnYuv,   kIOUCScalarIScalarO, 1, 0);
+    M(RAGE_GL_OVL_FLIP_YUV, selOvlFlipYuv, kIOUCScalarIScalarO, 3, 0);
     M(RAGE_GL_OVL_OFF,     selOvlOff,     kIOUCScalarIScalarO, 0, 0);
     M(RAGE_GL_OVL_FLIP,    selOvlFlip,    kIOUCScalarIScalarO, 1, 0);
     M(RAGE_GL_APERTURE_BENCH, selApertureBench, kIOUCScalarIScalarO, 3, 2);
@@ -283,6 +285,18 @@ IOReturn RageLTGLClient::selOvlOn(uint32_t off, uint32_t pitch, uint32_t src, ui
 {
     if (!fDev) return kIOReturnNotAttached;
     return fDev->ovlOn(fOwner, off, pitch, src & 0xffffu, src >> 16, dst & 0xffffu, dst >> 16, dsz & 0xffffu, dsz >> 16, bpp & 0xffu, bpp >> 8);
+}
+IOReturn RageLTGLClient::selOvlOnYuv(uint32_t addr)
+{
+    RageOvlYuv a; IOReturn rc;
+    if (!fDev) return kIOReturnNotAttached;
+    rc = userIn(addr, (uint8_t *)&a, (uint32_t)sizeof a);
+    return rc == kIOReturnSuccess ? fDev->ovlOnYuv(fOwner, &a) : rc;
+}
+IOReturn RageLTGLClient::selOvlFlipYuv(uint32_t offY, uint32_t offU, uint32_t offV)
+{
+    if (!fDev) return kIOReturnNotAttached;
+    return fDev->ovlFlipYuv(fOwner, offY, offU, offV);
 }
 IOReturn RageLTGLClient::selOvlOff(void)
 {

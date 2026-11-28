@@ -51,7 +51,10 @@ enum {
                                 * Every command adds (ONE/ONE blend, signed destination clamp) a bilinear half-pel prediction block to the bytes already in the destination, so the caller first writes the
                                 * residual there (signed bytes, two's complement, -128..127) or zero.  All blocks of a batch are validated before the first register is written; planes must belong to the caller.
                                 * Measured on hardware: integer, h and v half-pel are bit-exact MPEG-2; hv half-pel rounds twice (+1 on ~35% of samples); two-reference blocks average with (a+b+1)>>1. */
-    RAGE_GL_SEL_COUNT = 29
+    RAGE_GL_OVL_ON_YUV = 29,   /* RAGE_FEAT_OVERLAY (+ RAGE_FEAT_DVD): show planar YUV 4:2:0 (YV12 layout, three separate 8-bit planes) through the hardware scaler, no conversion by the CPU or the 3D engine:
+                                * in 1 {user address of one RageOvlYuv}.  The Y, U and V blocks must belong to the caller; one overlay, one owner (the same one as OVL_ON); OVL_OFF turns it off. */
+    RAGE_GL_OVL_FLIP_YUV = 30, /* in 3 {Y offset, U offset, V offset}: point the YUV overlay at another set of planes of the same geometry (owner only) */
+    RAGE_GL_SEL_COUNT = 31
 };
 #define RAGE_XFER_SWAP16 1u      /* VRAM_WRITE/READ flag: swap bytes inside every 16-bit unit */
 #define RAGE_XFER_SWAP32 2u      /* ... inside every 32-bit unit */
@@ -106,5 +109,14 @@ struct rage_log_read_out {                       /* exactly 1024 bytes */
 #define RAGE_FBIT_SCALER    0x20u
 #define RAGE_FBIT_DVD       0x40u
 #define RAGE_FBIT_FS_SCALE  0x80u
+
+/* RAGE_GL_OVL_ON_YUV argument (48 bytes).  Chroma planes are half the width and height of luma with a chroma pitch of exactly pitchY / 2 (what the scaler assumes: Win98 layout). */
+typedef struct {
+    uint32_t offY, offU, offV;   /* VRAM byte offsets of the planes, multiples of 8 */
+    uint32_t pitchY;             /* luma line pitch in bytes, multiple of 16 */
+    uint16_t srcW, srcH;         /* source size in luma pixels: even, srcW <= 720 */
+    uint16_t dstX, dstY, dstW, dstH;   /* destination rectangle on the scanout */
+    uint32_t flags, reserved;    /* 0 */
+} RageOvlYuv;
 
 #endif
