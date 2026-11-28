@@ -497,7 +497,7 @@ IOReturn RageLTDevice::ovlB0(uint32_t *before, uint32_t *readback, uint32_t *aft
  * registers are saved first and restored afterwards (the other kernel paths write everything they need again, this only keeps the desktop path untouched). */
 IOReturn RageLTDevice::mcExp(uint32_t owner, uint32_t srcOff, uint32_t dstOff, uint32_t pitchH, uint32_t xy, uint32_t mv, uint32_t *out)
 {
-    static const uint16_t kSave[] = { 0x5c0, 0x778, 0x5fc, 0x550, 0x6d0, 0x530, 0x774, 0x708, 0x6c4, 0x5dc, 0x5e0, 0x5f0, 0x5f4, 0x79c, 0x7d0, 0x6a8, 0x6b4, 0x6d8, 0x6d4, 0x500, 0x788, 0x78c, 0x304, 0x54c, 0x6cc, 0x750, 0x740 };
+    static const uint16_t kSave[] = { 0x5c0, 0x778, 0x5fc, 0x550, 0x6d0, 0x530, 0x774, 0x708, 0x6c4, 0x5dc, 0x5e0, 0x5f0, 0x5f4, 0x79c, 0x7d0, 0x6a8, 0x6b4, 0x6d8, 0x6d4, 0x500, 0x788, 0x78c, 0x304, 0x54c, 0x6cc, 0x750, 0x740, 0x6c8 };
     uint32_t sv[sizeof kSave / sizeof kSave[0]], i;
     uint32_t mv_in = mv, pitch = pitchH & 0xffffu, h = (pitchH >> 16) & 0x3fffu, noRestore = pitchH >> 31, docMode = (pitchH >> 30) & 1u, X = xy & 0xffffu, Y = xy >> 16, size, x2, y2, ax, ay; int32_t mvx = (int16_t)(mv & 0xffffu), mvy = (int16_t)(mv >> 16), sx, sy;
     IOReturn rc = kIOReturnSuccess;
@@ -522,17 +522,20 @@ IOReturn RageLTDevice::mcExp(uint32_t owner, uint32_t srcOff, uint32_t dstOff, u
     if (eng_reset(fRegs, 1)) { IOLockUnlock(fLock); return kIOReturnTimeout; }                 /* diagnosis: a pass leaves the engine so that the NEXT one hangs; start each from a reset engine */
     for (i = 0; i < sizeof kSave / sizeof kSave[0]; i++) sv[i] = eng_rd(fRegs, kSave[i]);
     /* the kernel's standard engine state (what every kernel op writes first; eng_fill): plain integer setup, no Z, all planes writable.  The Win98 stream assumes the 3D driver left these. */
-    eng_wq(fRegs, 0x304, 0); eng_wq(fRegs, MACH64_Z_CNTL, 0); eng_wq(fRegs, 0x6cc, 0xffffffffu);
+    eng_wq(fRegs, 0x304, 0); eng_wq(fRegs, MACH64_Z_CNTL, 0); eng_wq(fRegs, 0x6cc, 0xffffffffu); eng_wq(fRegs, 0x6c8, 0xffffffffu);   /* DP_WRITE_MASK: left at 0x97385b03 by the 3D driver = only the low 2 bits written */
+    uint32_t ushift = (mv_in >> 26) & 7u, pwOvr = (mv_in >> 24) & 1u, pwScale = (mv_in >> 20) & 15u, pwDst = (mv_in >> 16) & 15u; mv_in &= 0xffffu;
     if (docMode) {                                   /* diagnosis: the DOCUMENTED front-end-scaler blt (RAGE PRO Programmer's Guide 8.9.2), whole 16x16 block copied from the source at the same position, no blend, no MC registers */
-        { uint32_t pi, pv = (mv_in >> 24) & 3u;               /* diagnosis: texture palette ramp (variant 1: i*0x010101, 2: i, 3: i<<8) in case the Y8 source is read as a palette index */
-          if (pv) { for (pi = 0; pi < 256; pi++) { eng_wq(fRegs, 0x740, pi); eng_wq(fRegs, 0x77c, pv == 1 ? pi * 0x010101u : pv == 2 ? pi : pi << 8); } mv_in &= 0x00ffffffu; } }
         eng_wq(fRegs, 0x550, 0); eng_wq(fRegs, 0x774, 0);                              /* ALPHA_TST_CNTL = 0, TEX_CNTL = 0 */
         eng_wq(fRegs, 0x5fc, mv_in ? mv_in : 0x40u);                                        /* SCALE_3D_CNTL: function = scale (diagnosis: mv overrides) */
-        eng_wq(fRegs, 0x5c0, srcOff + Y * pitch + X);                                  /* SCALE_OFF: the block's first byte */
+        eng_wq(fRegs, 0x5c0, (srcOff + Y * pitch + X) >> ushift);                                  /* SCALE_OFF: the block's first byte */
         eng_wq(fRegs, 0x750, pitch);                                                   /* SCALE_PITCH (index 0xd4), pixels */
+        eng_wq(fRegs, 0x5ec, pitch); eng_wq(fRegs, 0x5f8, 0);                          /* SCALE_PITCH alias (index 0x7b), SCALE_VACC = 0 */
+        eng_wq(fRegs, 0x780, (pitch << 16) | pitch);                                   /* SCALE_PITCH_BOTH */
+        eng_wq(fRegs, 0x788, (srcOff + Y * pitch + X) >> ushift); eng_wq(fRegs, 0x784, (srcOff + Y * pitch + X) >> ushift); /* SCALE_OFF_ACC / SECONDARY_SCALE_OFF_ACC */
+        eng_wq(fRegs, 0x778, (srcOff + Y * pitch + X) >> ushift);                                  /* SECONDARY_SCALE_OFF */
         eng_wq(fRegs, 0x5dc, 16); eng_wq(fRegs, 0x5e0, 16);                            /* SCALE_WIDTH, SCALE_HEIGHT */
         eng_wq(fRegs, 0x5f0, 0x10000u); eng_wq(fRegs, 0x5f4, 0x10000u);                /* SCALE_X_INC / Y_INC: Win98's 1.0 */
-        eng_wq(fRegs, 0x6d0, 0x80080888u); eng_wq(fRegs, 0x6d8, 0x505u); eng_wq(fRegs, 0x6d4, 0x70003u); eng_wq(fRegs, 0x530, 0x23u);
+        eng_wq(fRegs, 0x6d0, pwOvr ? ((pwScale << 28) | 0x00080888u & ~0xfu | pwDst) : 0x80080888u); eng_wq(fRegs, 0x6d8, 0x505u); eng_wq(fRegs, 0x6d4, 0x70003u); eng_wq(fRegs, 0x530, 0x23u);
         eng_wq(fRegs, 0x6a8, pitch << 16); eng_wq(fRegs, 0x6b4, h << 16);
         eng_wq(fRegs, 0x500, (pitch << 19) | (dstOff >> 3));
         eng_wq(fRegs, MACH64_DST_X_Y, (Y << 16) | X);                                 /* X low, Y high (as eng_fill) */

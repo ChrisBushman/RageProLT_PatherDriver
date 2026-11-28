@@ -56,7 +56,7 @@ int main(int argc, char **argv)
     uint32_t gui, st, gen, feat, end, fl; int i, swap, goodswap = -1, onlycal = argc > 1 && argv[1][0] == 'c';
     if (ragegl_open(&c)) { printf("cannot open the GL client\n"); return 99; }
     if (ragegl_info(c, &gen, &feat, &end, &fl)) { printf("info failed\n"); return 98; }
-    for (i = 0; i < P * H; i++) { src[i] = (unsigned char)rnd(); dst0[i] = 0xA5; }
+    for (i = 0; i < P * H; i++) { src[i] = (unsigned char)rnd(); dst0[i] = (unsigned char)(getenv("FILL") ? strtol(getenv("FILL"), 0, 0) : 0xA5); }
     if (ragegl_alloc(c, P * H, 64, &srcOff) || ragegl_alloc(c, P * H, 64, &dstOff)) { printf("alloc failed\n"); return 97; }
     printf("planes: src 0x%x dst 0x%x, %dx%d 8 bpp\n", srcOff, dstOff, P, H);
     if (argc > 1 && argv[1][0] == 'o') {                      /* "one": a single zero-vector run, print what arrived (diagnosis) */
@@ -64,9 +64,36 @@ int main(int argc, char **argv)
         if (ragegl_vwrite(c, srcOff, src, P * H, sw)) return 96;
         if (run(sw, 16, 16, 0, 0, &gui, &st)) { ragegl_free(c, srcOff); ragegl_free(c, dstOff); return 95; }
         { unsigned char chk[P * H]; int bad = 0; if (ragegl_vread(c, srcOff, chk, P * H, sw)) printf("src readback failed\n"); else { for (k = 0; k < P * H; k++) if (chk[k] != src[k]) bad++; printf("source plane read back: %d of %d bytes differ from what was written\n", bad, P * H); } }
-        for (k = 0; k < P * H; k++) if (out[k] != 0xA5) changed++;
+        for (k = 0; k < P * H; k++) if (out[k] != dst0[k]) changed++;
         printf("swap %d: GUI_STAT 0x%08x status %u, %d of %d bytes differ from the 0xA5 fill\n", sw, (unsigned)gui, (unsigned)st, changed, P * H);
         for (r = 14; r < 34; r++) { if (argc > 4) { printf("  out row %2d:", r); for (k = 12; k < 36; k++) printf(" %02x", out[r * P + k]); printf("\n"); continue; } printf("  src row %2d:", r); for (k = 12; k < 24; k++) printf(" %02x", src[r * P + k]); printf("\n  out row %2d:", r); for (k = 12; k < 24; k++) printf(" %02x", out[r * P + k]); printf("\n"); }
+        ragegl_free(c, srcOff); ragegl_free(c, dstOff); return 0;
+    }
+    if (argc > 1 && argv[1][0] == 'w') {                      /* DP_PIX_WIDTH scale nibble x dst nibble: out(16,16) for src 0xff / 0x80, dst 0 */
+        static const int sn[] = { 2, 3, 4, 6, 7, 8, 9, 11, 14, 15 }, dn[] = { 2, 3, 4, 6, 7, 8 };
+        int i, j, a;
+        norestore |= 2u;
+        for (i = 0; i < 10; i++) { printf("scale nib %2d:", sn[i]);
+            for (j = 0; j < 6; j++) { printf("  dst%d", dn[j]);
+                for (a = 0x80; a <= 0xff; a += 0x7f) {
+                    memset(src, a, sizeof src); memset(dst0, 0, sizeof dst0);
+                    ragegl_vwrite(c, srcOff, src, P * H, 0);
+                    if (run(0, 16, 16, 0, (sn[i] << 4 | dn[j]) | 0x100, &gui, &st)) { printf(" fail\n"); goto wdone; }
+                    printf(":%02x", out[16 * P + 16]);
+                }
+            }
+            printf("\n");
+        }
+wdone:  ragegl_free(c, srcOff); ragegl_free(c, dstOff); return 0;
+    }
+    if (argc > 1 && argv[1][0] == 's') {                      /* address-unit test: SCALE_OFF = addr >> shift, src 0xff constant, dst 0 */
+        int sh;
+        for (sh = 0; sh <= 4; sh++) {
+            norestore |= 2u; memset(src, 0xff, sizeof src); memset(dst0, 0, sizeof dst0);
+            ragegl_vwrite(c, srcOff, src, P * H, 0);
+            if (run(0, 16, 16, 0, sh << 10, &gui, &st)) { printf("fail sh %d\n", sh); break; }
+            printf("shift %d: out(16,16)=%02x (block min/max below)\n", sh, out[16 * P + 16]);
+        }
         ragegl_free(c, srcOff); ragegl_free(c, dstOff); return 0;
     }
     if (argc > 1 && argv[1][0] == 'p') {                      /* palette variants 1..3: src ramp 0x00..0xff over the block columns, dst 0 */

@@ -33,3 +33,14 @@ Debug selector RAGE_GL_MC_EXP (RAGE_DEBUG_ENGTEST only); tool `tools/ragegl/mc_e
 * Finer source-constant table (`mc_exp x doc`): sources 0x10..0xfc add 0; only 0xff adds 3. A 0x00..0xff ramp source adds 0 everywhere. A texture-palette ramp (TEX_PALETTE_INDEX 0x740 / TEX_PALETTE 0x77c, three encodings) changes nothing. So the pass is not seeing the source plane at all (the "+3 at 0xff" is a saturation artefact, not a transfer function).
 * Register dump of the engine before the pass (`mc_exp d`, `MCDUMP` lines in the kernel log): many 3D/scaler registers hold leftover 0x..0d9f0d-style values, so the 3D/scaler block is not in a defined state after eng_reset; 0x5dc/0x5e0/0x5ec/0x750/0x768 = 0x40 (probably our own earlier run, restored).
 * Open hypotheses: (1) source fetch address/pitch go through TEX_SIZE_PITCH (0x770) / TEX_0_OFF, not the registers written; (2) the scaler needs a full 3D context (Win98 loads it via the bus-master stream, not MMIO); (3) the pipe's source comes from the SECONDARY unit only.
+
+### Stage 1 RESULT (root cause found, same day)
+**Cause of "source not fetched": DP_WRITE_MASK (0x6c8) was left at 0x97385b03 by the 3D driver, so only the low 2 bits of every written byte changed** (all earlier "+3 max" outputs). The kernel now writes DP_WRITE_MASK=0xffffffff before the pass (and restores it). The wrong-register 0x6cc write is harmless. The earlier SCALE_3D_CNTL/palette/unit sweeps were all masked by this. TEX_PALETTE (0x77c) is read-only.
+
+With the mask fixed (destination pre-filled with 0, because the Win98 inter setup ADDS source to destination: blend ONE/ONE):
+* integer-pel (swap mode 0): exact copy of all 256 bytes, nothing outside the block. Swap modes 1-3 break half-pel only; use mode 0.
+* horizontal half-pel (2,0): 0 of 1024 samples differ from MPEG-2 `(a+b+1)>>1`.
+* vertical half-pel (0,2): 0 of 1024 differ from MPEG-2.
+* **diagonal half-pel (2,2): 362 of 1024 are +1 above MPEG-2 `(a+b+c+d+2)>>2`** (hardware does two chained rounded bilinear stages). Needs a host correction or a different decomposition for hv blocks (about 35% of their samples).
+* Zero bytes changed outside the block in all runs.
+Remaining stage-1 gaps: engine hang every ~2nd run (eng_reset path), run on 16x8 and chroma sizes (stage 2).
