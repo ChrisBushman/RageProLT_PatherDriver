@@ -91,7 +91,7 @@ int DVDDriverOpenDevice(Ctx **out, u32 *maxSize, CGDirectDisplayID disp, u32 a4,
     LOG("OpenDevice: reconstruction mode %s\n", c->cpu_mode ? "CPU (exact)" : "Rage MC");
     c->disp = disp; c->a4 = a4; c->a5 = a5; c->a6 = a6;
     c->flags = 0x4020 | (CGDisplayBitsPerPixel(disp) == 16 ? 3 : 4);
-    if (G.cb4 && G.cb4(a4, a5, a6, c->flags & 0x803f, disp) != 0) { LOG("OpenDevice: cb4 failed\n"); free(c); return -5; }
+    if (G.cb4) { int cr = G.cb4(a4, a5, a6, c->flags & 0x803f, disp); if (cr != 0) { LOG("OpenDevice: cb4 failed (%d = 0x%x) flags %lx\n", cr, (unsigned)cr, (u32)(c->flags & 0x803f)); free(c); return -5; } }
     c->w = 0x300; c->pitch = 0x300; c->h = 0x1e0;
     if (nMP) *nMP = 5;
     if (nSP) *nSP = 8;
@@ -105,6 +105,7 @@ int DVDDriverCloseDevice(Ctx *c) { LOG("CloseDevice %lx\n", (u32)c);
     if (c && c->rc_ok) LOG("stats: decodes=%lu mbs=%lu types[0..7]=%lu %lu %lu %lu %lu %lu %lu %lu fieldDCT=%lu unknown=%lu\n", c->ndec, c->rc.stat_mb,
         c->rc.stat_type[0], c->rc.stat_type[1], c->rc.stat_type[2], c->rc.stat_type[3], c->rc.stat_type[4], c->rc.stat_type[5], c->rc.stat_type[6], c->rc.stat_type[7], c->rc.stat_fielddct, c->rc.stat_unknown_type); if (!c) return (int)0xe00002c2;
     if (c->both && c->cmp_n) LOG("BOTH summary: %lu decodes compared HW vs CPU: %lu identical, %lu with max diff <= 1, %lu with max diff <= 3, %lu with samples off by more than 8, worst max diff %lu\n", c->cmp_n, c->cmp_exact, c->cmp_le1, c->cmp_le3, c->cmp_big, c->cmp_worst);
+    if (c->rc_ok && !c->rc.hw) rch_free(&c->rc);
     if (c->rc_ok && c->rc.hw) { unsigned long s[12]; rch_stats(&c->rc, s); LOG("rage MC: batches=%lu cmds=%lu residual-excess samples=%lu blocks with vectors outside picture (host edge clamp)=%lu uploads=%lu unsupported MBs=%lu fixed-up blocks=%lu\n", s[0], s[1], s[2], s[3], s[4], s[5], s[6]);
         LOG("rage MC time (ms): host IDCT+staging %lu, upload %lu, engine batches %lu, fix-ups %lu, readback for dumps %lu\n", s[7] / 1000, s[8] / 1000, s[9] / 1000, s[10] / 1000, s[11] / 1000); rch_free(&c->rc); }
     free(c); return 0; }
@@ -141,7 +142,11 @@ static void dump_frame(Ctx *c, int idx)
 int DVDDriverShowMPBuffer(Ctx *c, int idx, unsigned short *mode)
 {
     LOG("ShowMPBuffer idx=%d mode=%d\n", idx, mode ? *mode : 2);
-    if (c) { c->nshow++; if (!getenv("DVDSTUB_DUMPDEC")) dump_frame(c, idx); }
+    if (c) {
+        c->nshow++;
+        if (!getenv("DVDSTUB_DUMPDEC")) dump_frame(c, idx);
+        if (c->rc_ok && !getenv("DVDSTUB_NOSHOW")) { int sr = rch_show(&c->rc, idx); if (sr) LOG("  show failed %d\n", sr); }
+    }
     /* Apple calls cb3 only when the kernel buffer header flags say so; M0 has no kernel side. */
     return 0;
 }

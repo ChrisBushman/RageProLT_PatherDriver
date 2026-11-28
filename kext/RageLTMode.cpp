@@ -369,6 +369,11 @@ IOReturn RageLTDevice::ovlDisableLocked(void)
     if (!chipLive()) return kIOReturnNotReady;         /* asleep: the overlay was disabled before the chip suspended; never write a suspended chip */
     ovlw(fRegs, 0x018, 0x110u);          /* OVERLAY_KEY_CNTL: video never shown */
     ovlw(fRegs, 0x024, 0u);              /* OVERLAY_SCALE_CNTL: scaler and overlay off */
+    ovlw(fRegs, 0x048, OSReadLittleInt32((volatile void *)fRegs, 0x048) & ~0x000f0000u);   /* VIDEO_FORMAT.SCALER_IN back to its idle value 0 (observed idle: all block-1 registers 0): the 3D / YCbCr texture paths must not see our overlay format */
+    {   /* back to the idle chip state observed before any overlay use (every block-1 register 0): geometry, increments, buffers, colour, coefficients, planar offsets */
+        static const uint16_t idle[] = { 0x000, 0x004, 0x008, 0x00c, 0x010, 0x014, 0x020, 0x028, 0x034, 0x038, 0x03c, 0x150, 0x154, 0x158, 0x15c, 0x160, 0x164, 0x1d4, 0x1d8, 0x1dc, 0x1e0 };
+        for (unsigned i = 0; i < sizeof idle / sizeof idle[0]; i++) ovlw(fRegs, idle[i], 0u);
+    }
     fOvlYuv = 0;
     return kIOReturnSuccess;
 }

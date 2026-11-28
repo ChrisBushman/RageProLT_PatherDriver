@@ -73,9 +73,70 @@ fail:
     free(h->cmds); ragegl_close(h->c); free(h);
     return -3;
 }
+
+/* ---------------------------------------------------------------- display through the scaler overlay (docs/re-notes/overlay-yuv-plan.md)
+ * Hardware mode: the picture planes already are in VRAM (same client), the overlay just points at them.
+ * CPU mode: the host-side planes are uploaded into a two-set VRAM ring first.  Destination: the picture fitted into the display (square pixels), centred; integer math. */
+typedef struct { ragegl_t c; uint32_t off[2][3]; int owns_client, on, cur, have_sets; unsigned long n_show, us; } Ov;
+
+static void ov_fit(Recon *rc, ragegl_t c, RageOvlYuv *a)
+{
+    uint32_t gen, dw, dh, pitch, bpp, base, w = (uint32_t)rc->w & ~1u, hh = (uint32_t)rc->h & ~1u, tw, th;
+    if (ragegl_display(c, &gen, &dw, &dh, &pitch, &bpp, &base)) { dw = w; dh = hh; }
+    tw = dw; th = hh * dw / w;
+    if (th > dh) { th = dh; tw = w * dh / hh; }
+    tw &= ~1u; th &= ~1u;
+    a->srcW = (uint16_t)w; a->srcH = (uint16_t)hh; a->dstW = (uint16_t)tw; a->dstH = (uint16_t)th;
+    a->dstX = (uint16_t)((dw - tw) / 2 & ~1u); a->dstY = (uint16_t)((dh - th) / 2);
+}
+
+int rch_show(Recon *rc, int idx)
+{
+    Hw *h = (Hw *)rc->hw; Ov *o = (Ov *)rc->ov; const uint32_t *off; unsigned long t0 = now_us(); int p;
+    kern_return_t kr;
+    if (idx < 0 || idx >= RC_NBUF) return -1;
+    if (!o) {
+        o = (Ov *)calloc(1, sizeof *o); if (!o) return -1;
+        rc->ov = o;
+        if (h) o->c = h->c;
+        else {
+            int s;
+            if (ragegl_open(&o->c)) { rc->ov = 0; free(o); return -2; }
+            o->owns_client = 1;
+            for (s = 0; s < 2; s++) for (p = 0; p < 3; p++) {
+                uint32_t sz = p ? (uint32_t)rc->pitchC * (rc->hC + 3) : (uint32_t)rc->pitchY * (rc->hY + 3);
+                if (ragegl_alloc(o->c, (sz + 7) & ~7u, 8, &o->off[s][p])) { ragegl_close(o->c); rc->ov = 0; free(o); return -3; }
+            }
+            o->have_sets = 1;
+        }
+    }
+    if (h) off = h->off[idx];
+    else {
+        o->cur ^= 1; off = o->off[o->cur];
+        for (p = 0; p < 3; p++) {
+            size_t n = p ? (size_t)rc->pitchC * rc->hC : (size_t)rc->pitchY * rc->hY;
+            if (ragegl_vwrite(o->c, off[p], rc->pl[idx][p], (uint32_t)(n & ~3u), 0)) return -4;
+        }
+    }
+    if (!o->on) {
+        RageOvlYuv a; memset(&a, 0, sizeof a);
+        a.offY = off[0]; a.offU = off[1]; a.offV = off[2];            /* planes 1 / 2 are Cb / Cr (the M1 dumps are I420) */
+        a.pitchY = (uint32_t)rc->pitchY; ov_fit(rc, o->c, &a);
+        kr = IOConnectMethodScalarIScalarO(o->c, RAGE_GL_OVL_ON_YUV, 1, 0, (uint32_t)(uintptr_t)&a);
+        if (kr) { hwlog("  OVL_ON_YUV failed 0x%x\n", (unsigned)kr); return -5; }
+        o->on = 1;
+    } else {
+        kr = IOConnectMethodScalarIScalarO(o->c, RAGE_GL_OVL_FLIP_YUV, 3, 0, off[0], off[1], off[2]);
+        if (kr) return -6;
+    }
+    o->n_show++; o->us += now_us() - t0;
+    return 0;
+}
+
 void rch_free(Recon *rc)
 {
-    Hw *h = (Hw *)rc->hw; int p;
+    Ov *o = (Ov *)rc->ov; Hw *h = (Hw *)rc->hw; int p;
+    if (o) { if (o->on) IOConnectMethodScalarIScalarO(o->c, RAGE_GL_OVL_OFF, 0, 0); if (o->owns_client) ragegl_close(o->c); free(o); rc->ov = 0; }
     if (!h) return;
     for (p = 0; p < 3; p++) free(h->stage[p]);
     free(h->cmds); free(h->fix); free(h->esc); ragegl_close(h->c);                  /* closing the client releases its VRAM blocks */

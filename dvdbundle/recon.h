@@ -21,6 +21,7 @@ typedef struct {
     /* continuation state for the second field pass (Apple keeps these in statics) */
     const rc_u8 *mb_next, *coef_next;
     unsigned long stat_unknown_type, stat_mb, stat_type[8], stat_fielddct;
+    void *ov;                    /* hardware overlay display state (recon_hw.c) */
     void *hw;                    /* Rage MC path state (recon_hw.c), 0 = CPU path */
     long dbg_dec; int dbg_n;   /* debug: print raw MB records of decode #dbg_dec (DVDSTUB_MBDBG) */
 } Recon;
@@ -36,6 +37,7 @@ void rch_free(Recon *rc);
 int  rch_decode(Recon *rc, rc_u8 *params);
 void rch_sync(Recon *rc, int idx);              /* copy picture buffer idx from VRAM into rc->pl[idx] (debug dumps) */
 void rch_read(Recon *rc, int idx, rc_u8 *dst[3]); /* copy picture buffer idx from VRAM into caller buffers (same layout as rc->pl) */
+int rch_show(Recon *rc, int idx);      /* show picture buffer idx through the scaler overlay (YUV 4:2:0, no conversion); works in both modes */
 void rch_stats(Recon *rc, unsigned long *s);    /* s[0..6]: batches, commands, residual clamps, vectors outside the picture, uploads, unsupported MBs, fixed-up blocks */
 /* shared block decode */
 const rc_u8 *rc_decode_block(Recon *rc, const rc_u8 *co, int cnt, int type, rc_s16 *bl);

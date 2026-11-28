@@ -17,3 +17,11 @@ Same registers as OVL_ON in the same order, plus BUF0/1_OFFSET_U/V (4 writes), S
 
 ## Step 4: test
 `tools/ragegl/ovl_yuv`: 704x480 BT.601 colour bars + grey ramp + diagonal/grid in three planes (pitch 768/384), shown on the 1024x768 CRT, flipped to a second set after the hold. Results: see below.
+
+## Result (Nov 28, MDD, 1024x768 16 bpp CRT) - user's observation of `ovl_yuv`
+Eight bars in the right order (white, yellow, cyan, green, magenta, red, blue, black), reversed correctly after the flip (`RAGE_GL_OVL_FLIP_YUV`); bottom quarter: smooth black-to-white ramp, then white grid on black with the diagonal line from upper left towards lower right (about the left three quarters of that panel, as drawn: 2 px per row); clean image, no distortion. So: U/V plane assignment (first-chroma-plane = V register, as Win98) is right with planes given as Y, Cb, Cr; the one-pitch-register assumption (chroma pitch = luma pitch / 2) holds; YUV12 is displayed with no CPU or engine conversion.
+`ovlDisableLocked` now also returns the whole block-1 overlay state (geometry, increments, buffers, colour, coefficients, planar U/V offsets, VIDEO_FORMAT.SCALER_IN) to the idle all-zero values seen before any overlay use.
+
+## Integration in the bundle (done in the tree, hardware verification BLOCKED)
+`rch_show()` (recon_hw.c): hardware mode points the overlay at the picture buffer already in VRAM; CPU mode uploads the host planes to a two-set VRAM ring first; destination = picture fitted into the display (square pixels, centred, integer math); `ShowMPBuffer` calls it unless `DVDSTUB_NOSHOW` is set (the dump/compare scripts set it); `tools/dvd/m1/run_show.sh N secs [cpu]` plays a disc with the frames shown.
+BLOCKER found while testing: since about 00:29 on Nov 28 the framework's open-device callback (`cb4`, AVA) returns error 1000 on the MDD for every run with the rig on - including the bundle from commit 155ce42 that passed all discs earlier, with the original mcprod1 kext, and after restoring the idle overlay registers. Rig off (software VSP path) and plain GL (cgl_probe) work. Not caused by the overlay selectors or the bundle; cause not yet found.
