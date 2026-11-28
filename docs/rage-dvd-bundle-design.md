@@ -55,7 +55,19 @@ Findings:
 * **Dual prime is not representable**: the framework's MbRec for a dual-prime MB is a plain type-1 (forward) record with a single vector (the derived opposite-parity vector and the averaging are not present in the record); decoded output therefore differs from the reference at exactly the encoder's dual-prime MBs (verified by logging the encoder's dual-prime positions). Any record-based hardware path (including Apple's own R128 driver) shares this limit. Dual prime requires a stream without B pictures (low-delay profile); it is not expected on DVD-Video content. Nothing to fix in the bundle.
 * Lower-half 16x8 vectors in B field pictures: in 3 macroblocks the vector in the framework record (e.g. (-52,16) half-pel, bottom field, type 6 lower half) differs from what ffmpeg decodes; our output is an exact copy from the reference frame at the framework's vector (verified by exhaustive source search), so the difference is in the framework's motion-vector prediction (PMV) for 16x8 in field pictures versus ffmpeg, upstream of the bundle. Not DVD-relevant in practice (needs 16x8 field MC in B fields).
 * The last Decode calls of a title can carry a single field (`st=1,0` then `st=2,0`, different destination buffers). rc_decode now skips the second pass when the second structure is not 1/2 (previously it would have read past the macroblock array). Those two pictures are half-decoded by nature (not matched by the reference).
-NOT covered: 625-line PAL / other DVD sizes (352x240 etc.), real-disc content, field-picture streams with odd GOPs from real encoders.
+### M1 size coverage (Nov 28): PASS
+All DVD-legal sizes decode identically to ffmpeg (min PSNR >= 69 dB, max pixel difference <= 3), tools/dvd/m1/make_size_discs.sh + run_sz.sh:
+| disc | system / size | structure | frames compared | result |
+|---|---|---|---|---|
+| 8 | NTSC 704x480 | progressive, B | 145 | pass |
+| 9 | NTSC 352x480 | interlaced (field MC + field DCT) | 80 | pass |
+| 10 | NTSC 352x240 | progressive, B | 150 | pass (maxdiff 3) |
+| 11 | PAL 720x576 | interlaced | 56 | pass |
+| 12 | PAL 704x576 | progressive, B | 119 | pass |
+| 13 | PAL 352x576 | interlaced | 61 | pass |
+| 14 | PAL 352x288 | progressive, B | 150 | pass (maxdiff 3) |
+| 15 | PAL 720x576 | field pictures, B (mpeg2enc) | 56 | pass except the final single-field Decode call (end-of-title artifact) |
+M1 coverage is therefore complete for everything the encoders can produce. Remaining untested: real-disc content, and the two framework-limited cases above (dual prime; lower-half 16x8 in B fields).
 
 ### GeForce / Apple AltiVec decoder as an oracle (Nov 28, partial)
 Method (works): play a disc on the GeForce through the Tiger GL stack wrapper (`/Library/TGL/tgl-run`, sets `DYLD_FRAMEWORK_PATH=/Library/TGL/Frameworks`; player `tools/dvd/dvd_play_nv.c`), with `tools/dvd/gl_yuv_tap.c` inserted (`DYLD_FORCE_FLAT_NAMESPACE=1 DYLD_INSERT_LIBRARIES=...`; real GL entry points must be resolved with NSAddImage on `OpenGL.framework/Libraries/libGL.dylib` + NSLookupSymbolInImage, dlsym/RTLD_NEXT find the wrapper again and recurse). It dumps the AltiVec driver's client-storage YCbCr 4:2:2 texture (GL_YCBCR_422_APPLE, 720x480, `GL_UNPACK_ROW_LENGTH` 736, luma = byte 1 of each 16-bit pair, 4 rotating buffers; snapshot taken one upload later). The rig must be OFF (original DVD.framework).

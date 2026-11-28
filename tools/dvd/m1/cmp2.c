@@ -2,8 +2,12 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <math.h>
+#ifndef W
 #define W 720
+#endif
+#ifndef H
 #define H 480
+#endif
 #define FS (W*H*3/2)
 int main(int argc,char**argv){
   FILE*fa=fopen(argv[1],"rb"),*fr=fopen(argv[2],"rb"); int nf=atoi(argv[3]); int win=argc>4?atoi(argv[4]):8;
