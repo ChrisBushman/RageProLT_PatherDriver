@@ -161,6 +161,24 @@ static void seg(Recon *rc, Pred *dst, int avg, int src_buf, int par, int mbx, in
     }
 }
 
+/* One block's coefficients -> residual samples in bl (raster order).  Returns the advanced coefficient pointer.  Shared by the CPU path and the Rage MC path. */
+const rc_u8 *rc_decode_block(Recon *rc, const rc_u8 *co, int cnt, int type, rc_s16 *bl)
+{
+    const rc_u8 *scan = rc->alt_scan ? rc_altscan : rc_zigzag;
+    int e, pos = -1;
+    memset(bl, 0, 64 * sizeof(rc_s16));
+    for (e = 0; e < cnt; e++, co += 4) {
+        pos += co[0] + 1;
+        if (pos <= 63) bl[scan[pos]] = (rc_s16)((co[2] << 8) | co[3]);
+    }
+    /* The framework tracks intra DC differentially from 0 (predictor reset value 0, dvdpb 0x8a742038 etc.), i.e.
+     * without ISO 13818-2's reset value 128<<3 = 1024 in dequantised units: add it back (== +128 per pixel). */
+    if (type == 0) bl[0] = (rc_s16)(bl[0] + 1024);
+    rc_mismatch(bl);
+    rc_idct8x8(bl);
+    return co;
+}
+
 /* ---------------------------------------------------------------- picture decode */
 static rc_s16 g_blk[64];
 
@@ -221,25 +239,10 @@ static int pass(Recon *rc, int st, int ptype, int second, int bd, int bf, int bb
         /* ---- residual + store ---- */
         fieldDct = (st == 3) && (flags != 0);
         for (b = 0; b < 6; b++) {
-            int cnt = mb[0x16 + b], pos = -1, e;
+            int cnt = mb[0x16 + b];
             rc_s16 *res = bl;
-            if (cnt || type == 0) {
-                const rc_u8 *scan = rc->alt_scan ? rc_altscan : rc_zigzag;
-                memset(bl, 0, 64 * sizeof(rc_s16));
-                for (e = 0; e < cnt; e++, co += 4) {
-                    if (rc->dbg_dec >= 0 && rc->dbg_n == rc->dbg_dec && type >= 5 && x == 17 * 16 && y == 8 * 16 && st == 2) {
-                        char *lp = getenv("DVDSTUB_LOGFILE"); FILE *lf = lp ? fopen(lp, "a") : stderr;
-                        if (lf) { fprintf(lf, "COEF blk=%d e=%d run=%d level=%d\n", b, e, co[0], (rc_s16)((co[2] << 8) | co[3])); if (lp) fclose(lf); }
-                    }
-                    pos += co[0] + 1;
-                    if (pos <= 63) bl[scan[pos]] = (rc_s16)((co[2] << 8) | co[3]);
-                }
-                /* The framework tracks intra DC differentially from 0 (predictor reset value 0, dvdpb 0x8a742038 etc.), i.e.
-                 * without ISO 13818-2's reset value 128<<3 = 1024 in dequantised units: add it back (== +128 per pixel). */
-                if (type == 0) bl[0] = (rc_s16)(bl[0] + 1024);
-                rc_mismatch(bl);
-                rc_idct8x8(bl);
-            } else res = 0;
+            if (cnt || type == 0) co = rc_decode_block(rc, co, cnt, type, bl);
+            else res = 0;
             /* destination geometry */
             {
                 int plane = b < 4 ? 0 : b - 3, bx = (b < 4 ? (b & 1) * 8 : 0), by = (b < 4 ? (b >> 1) * 8 : 0);

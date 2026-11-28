@@ -18,6 +18,8 @@
 	<string>0.1</string>
 	<key>CFBundleSignature</key>
 	<string>????</string>
+	<key>RageDVDMode</key>
+	<string>hw</string>
 	<key>CFBundleVersion</key>
 	<string>0.1</string>
 </dict>

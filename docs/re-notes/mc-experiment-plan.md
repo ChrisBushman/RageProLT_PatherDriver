@@ -51,3 +51,11 @@ Remaining stage-1 gaps: engine hang every ~2nd run (eng_reset path), run on 16x8
 * **Two-way:** needs **bit 31 set on SCALE_OFF_ACC (0x788, the primary)**; Win98's two-reference path always sets it through its `((y|~1)<<2 | x)<<28` expression. Secondary reference address + flags go to SECONDARY_SCALE_OFF_ACC (0x784) before 0x788. With that, all 16 phase pairs x {16x16, 8x8}: 0 of 1536/384 samples differ from `(p1+p2+1)>>1` where p1,p2 use the hardware's own chained hv. Without bit 31 the secondary is ignored. TEX_CNTL variants make no difference.
 * Consequence for M2: prediction is bit-exact vs MPEG-2 except hv half-pel (and two-way averages involving an hv half), which drift by +1 in ~35% of samples. Decision needed: accept (ATI's own MC had the same property), or route hv blocks through the CPU path of M1.
 Remaining: residual (0x1e0 feed or host IDCT + blender add), completion/fence, engine hang every ~2nd run, field-pitch (doubled) cases.
+
+## M2 bundle results (Nov 27)
+
+- Bundle default = Rage MC (Win98 method); `DVDSTUB_CPU=1` or Info.plist `RageDVDMode=cpu` selects the bit-exact CPU path for whole pictures (not per-block hybrid). CPU path still equals M1 (disc 14: 150 frames, maxdiff 3).
+- PAL failure root cause: command list was flushed mid-emission (cap reached) so the engine ran before the residual upload and the upload then overwrote its output. Fix: grow the list, flush once after upload (chunks of RAGE_MC_MAX_CMDS).
+- Verification: `DVDSTUB_BOTH=1` runs HW and CPU on every Decode and compares visible samples. Discs 8-15 (352x240 .. 720x576, frame/field, progressive/interlaced): worst diff 1 (disc 15: 2), 0 samples off by >3 in all but a few disc-15 decodes. Differences are the known hv chained-rounding.
+- Timing (disc 8, 83 decodes, ms): host IDCT+staging 504, upload 497, engine 1004, fix-ups 4030, dump readback 4517. Fix-ups (excess >127 residual, 8-byte vread/vwrite) dominate: M4 target.
+- Open: Show via overlay not implemented; vectors outside picture skipped; per-run dump-vs-ref comparison under HW shows timing-dependent mismatches (dump taken after later decode) — use BOTH mode for accuracy.

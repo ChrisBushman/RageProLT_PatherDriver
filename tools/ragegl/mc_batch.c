@@ -5,14 +5,14 @@
 #include <string.h>
 #include "ragegl.h"
 
-#define PW 64          /* plane pitch == width */
-#define PH 64          /* frame lines */
+static int PW = 64, PH = 64;     /* plane pitch == width, frame lines (argv[1], argv[2]) */
+#define MAXB (800 * 600)
 static ragegl_t c;
 static uint32_t rs = 0xC0FFEE11u;
 static uint32_t rnd(void) { rs ^= rs << 13; rs ^= rs >> 17; rs ^= rs << 5; return rs; }
 static const int BW[4] = { 16, 16, 8, 8 }, BH[4] = { 16, 8, 8, 4 };
 
-static unsigned char A[(PH + 3) * PW], B[(PH + 3) * PW], R[(PH + 3) * PW];      /* source plane, destination plane (with residual), expected */
+static unsigned char A[MAXB], B[MAXB], R[MAXB];      /* source plane, destination plane (with residual), expected */
 
 /* prediction of one reference: base = host copy of the plane at line 0 of the system, stride in bytes */
 static int pred(const unsigned char *base, int stride, int x2, int y2, int i, int j, int chain)
@@ -28,12 +28,31 @@ static int pred(const unsigned char *base, int stride, int x2, int y2, int i, in
 }
 static int clip(int v) { return v < 0 ? 0 : v > 255 ? 255 : v; }
 
-int main(void)
+int main(int argc, char **argv)
 {
+    if (argc > 2) { PW = atoi(argv[1]); PH = atoi(argv[2]); }
+    if ((PH + 3) * PW > MAXB) { printf("too big\n"); return 9; }
     uint32_t offA, offB; int round, bad = 0, total = 0, rounds = 0;
     if (ragegl_open(&c)) { printf("open failed\n"); return 1; }
+    if (argc > 3) { uint32_t padoff; if (ragegl_alloc(c, (uint32_t)atoi(argv[3]) * 1024u, 8, &padoff)) { printf("pad alloc failed\n"); return 7; } }
     if (ragegl_alloc(c, (PH + 3) * PW, 8, &offA) || ragegl_alloc(c, (PH + 3) * PW, 8, &offB)) { printf("alloc failed\n"); return 2; }
     printf("planes A 0x%x B 0x%x\n", offA, offB);
+    if (argc > 4) {                                   /* big batch: every 16x16 block of the plane, random vectors, frame system, zero residual */
+        static RageMcCmd big[RAGE_MC_MAX_CMDS]; int bx, by, n = 0, i, diff = 0, w = PW - (PW % 16 ? PW % 16 : 0), wid = atoi(argv[4]);
+        for (i = 0; i < (PH + 3) * PW; i++) { A[i] = (unsigned char)rnd(); B[i] = 0; R[i] = 0; }
+        for (by = 0; by + 16 <= PH && n < RAGE_MC_MAX_CMDS; by += 16) for (bx = 0; bx + 16 <= wid && n < RAGE_MC_MAX_CMDS; bx += 16) {
+            RageMcCmd *m = &big[n]; int mvx = (int)(rnd() % 9) - 4, mvy = (int)(rnd() % 9) - 4, j;
+            if (mvx + 2 * bx < 0 || mvy + 2 * by < 0 || ((mvx + 2 * bx) >> 1) + 17 > wid || ((mvy + 2 * by) >> 1) + 17 > PH) { mvx = 0; mvy = 0; }
+            m->srcOff = offA; m->srcOff2 = offA; m->dstOff = offB; m->stride = (uint16_t)PW; m->width = (uint16_t)wid; m->rows = (uint16_t)PH; m->size = 0; m->flags = 0;
+            m->x = (int16_t)bx; m->y = (int16_t)by; m->mvx = (int16_t)mvx; m->mvy = (int16_t)mvy; n++;
+            for (j = 0; j < 16; j++) { int ii; for (ii = 0; ii < 16; ii++) R[(by + j) * PW + bx + ii] = (unsigned char)pred(A, PW, mvx + 2 * bx, mvy + 2 * by, ii, j, 1); }
+        }
+        ragegl_vwrite(c, offA, A, (PH + 3) * PW, 0); ragegl_vwrite(c, offB, B, (PH + 3) * PW, 0);
+        { kern_return_t kr = RGL_CALL(RAGE_GL_MC_BATCH, 2, 0, (uint32_t)(uintptr_t)big, (uint32_t)n); printf("big batch %d cmds kr 0x%x\n", n, kr); }
+        { static unsigned char o2[MAXB]; ragegl_vread(c, offB, o2, (PH + 3) * PW, 0); for (by = 0; by < PH; by++) for (bx = 0; bx < wid; bx++) if (o2[by * PW + bx] != R[by * PW + bx]) diff++;
+          printf("%d of %d pixels differ\n", diff, PH * wid); }
+        return diff != 0;
+    }
     for (round = 0; round < 60; round++) {
         /* mode 0 frame system, 1 field system A(par p) -> B(par q), 2 field system inside one plane (src par 0 -> dst par 1) */
         int mode = round % 3, twoway = (round / 3) & 1, i, j, k, n = 0;
@@ -46,7 +65,7 @@ int main(void)
         for (k = 0; k < 6; k++) {
             RageMcCmd *m = &cmds[n]; int sz = rnd() % 4, bw = BW[sz], bh = BH[sz], x, y, ph1 = rnd() % 4, ph2 = rnd() % 4, mv1x, mv1y, mv2x, mv2y, ok = 1;
             /* disjoint destination blocks: 3 columns x 2 row bands */
-            x = (k % 3) * 20 + (rnd() % (21 - bw > 0 ? 21 - bw : 1)); y = (k / 3) * (rows / 2) + (rnd() % (rows / 2 - bh + 1));
+            x = (k % 3) * (PW / 3 & ~1) + (rnd() % ((PW / 3) - bw > 0 ? (PW / 3) - bw : 1)); y = (k / 3) * (rows / 2) + (rnd() % (rows / 2 - bh + 1));
             if (x + bw > PW || y + bh > (int)rows) continue;
             mv1x = (int)(rnd() % 13) - 6 + (ph1 & 1) * 0; mv1y = (int)(rnd() % 9) - 4;
             mv1x = (mv1x & ~1) | (ph1 & 1); mv1y = (mv1y & ~1) | ((ph1 >> 1) & 1);
@@ -70,7 +89,7 @@ int main(void)
         if (!n) continue;
         if (ragegl_vwrite(c, offA, A, (PH + 3) * PW, 0) || ragegl_vwrite(c, offB, B, (PH + 3) * PW, 0)) { printf("vwrite failed\n"); return 3; }
         { kern_return_t kr = RGL_CALL(RAGE_GL_MC_BATCH, 2, 0, (uint32_t)(uintptr_t)cmds, (uint32_t)n); if (kr) { printf("round %d mode %d MC_BATCH failed 0x%x\n", round, mode, kr); return 4; } }
-        { static unsigned char out[(PH + 3) * PW]; int diff = 0; ragegl_vread(c, offB, out, (PH + 3) * PW, 0);
+        { static unsigned char out[MAXB]; int diff = 0; ragegl_vread(c, offB, out, (PH + 3) * PW, 0);
           for (i = 0; i < PH * PW; i++) { total++; if (out[i] != R[i]) diff++; }
           if (diff) { printf("round %d mode %d twoway %d: %d of %d bytes differ\n", round, mode, twoway, diff, PH * PW); bad++; }
           rounds++; }
