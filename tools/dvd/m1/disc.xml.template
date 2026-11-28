@@ -1,0 +1,12 @@
+<dvdauthor dest="disc2">
+  <vmgm />
+  <titleset>
+    <titles>
+      <video format="ntsc" aspect="4:3" />
+      <audio format="ac3" lang="en" />
+      <pgc>
+        <vob file="t2.mpg" chapters="0,0:10,0:20" />
+      </pgc>
+    </titles>
+  </titleset>
+</dvdauthor>

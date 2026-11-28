@@ -1,6 +1,7 @@
 /* recon.c - see recon.h */
 #include <stdlib.h>
 #include <string.h>
+#include <stdio.h>
 #include "recon.h"
 
 const rc_u8 rc_zigzag[64] = {
@@ -176,6 +177,11 @@ static int pass(Recon *rc, int st, int ptype, int second, int bd, int bf, int bb
         rc_s16 *bl = g_blk;
         memset(&pr, 0, sizeof pr);
         rc->stat_mb++;
+        if (rc->dbg_dec >= 0 && rc->dbg_n == rc->dbg_dec && n < nmb && y < 32) {
+            int k; char *lp = getenv("DVDSTUB_LOGFILE"); FILE *lf = lp ? fopen(lp, "a") : stderr;
+            if (lf) { fprintf(lf, "MBDBG dec=%d st=%d ptype=%d mb(%d,%d) type=%d flags=%d rec=", rc->dbg_n, st, ptype, x >> 4, y >> 4, type, flags);
+              for (k = 0; k < 0x1c; k++) fprintf(lf, "%02x", mb[k]); fprintf(lf, "\n"); if (lp) fclose(lf); }
+        }
         if (type < 8) rc->stat_type[type]++;
         if (st == 3 && flags) rc->stat_fielddct++;
         /* ---- prediction ---- */
@@ -221,6 +227,10 @@ static int pass(Recon *rc, int st, int ptype, int second, int bd, int bf, int bb
                 const rc_u8 *scan = rc->alt_scan ? rc_altscan : rc_zigzag;
                 memset(bl, 0, 64 * sizeof(rc_s16));
                 for (e = 0; e < cnt; e++, co += 4) {
+                    if (rc->dbg_dec >= 0 && rc->dbg_n == rc->dbg_dec && type >= 5 && x == 17 * 16 && y == 8 * 16 && st == 2) {
+                        char *lp = getenv("DVDSTUB_LOGFILE"); FILE *lf = lp ? fopen(lp, "a") : stderr;
+                        if (lf) { fprintf(lf, "COEF blk=%d e=%d run=%d level=%d\n", b, e, co[0], (rc_s16)((co[2] << 8) | co[3])); if (lp) fclose(lf); }
+                    }
                     pos += co[0] + 1;
                     if (pos <= 63) bl[scan[pos]] = (rc_s16)((co[2] << 8) | co[3]);
                 }
@@ -268,6 +278,7 @@ int rc_decode(Recon *rc, rc_u8 *p)
     for (f = 0; f < passes; f++) {
         st = p[2 + f]; ptype = p[f];
         if (p[2] == 0 && f == 0) return 0;
+        if (f == 1 && st != 1 && st != 2) break;   /* a Decode call may carry a single field (end of title): no second pass */
         bd = p[6]; bf = p[7]; bb = p[8];
         if (bd == 0xff) bd = p[6] = 0;
         if (bf == 0xff) bf = p[7] = 0;

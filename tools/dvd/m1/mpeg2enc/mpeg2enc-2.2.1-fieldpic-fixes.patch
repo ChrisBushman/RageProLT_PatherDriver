@@ -1,0 +1,168 @@
+--- a/mpeg2enc/picture.cc	2021-09-04 23:14:13.021372861 -0700
++++ b/mpeg2enc/picture.cc	2026-11-27 21:43:08.731395458 -0800
+@@ -1,3 +1,5 @@
++#include <stdio.h>
++#include <stdlib.h>
+ /* Picture encoding object */
+ 
+ 
+@@ -100,7 +102,7 @@
+     }
+ 
+ 
+-    rec_img = new ImagePlanes( encparams );
++    rec_img = own_rec_img = new ImagePlanes( encparams );
+     pred   = new ImagePlanes( encparams );
+ 
+     // Initialise the reference image pointers to NULL to ensure errors show
+@@ -120,7 +122,7 @@
+ 
+ Picture::~Picture()
+ {
+-    delete rec_img;
++    delete own_rec_img;
+     delete pred;
+     delete coding;
+ }
+@@ -135,13 +137,15 @@
+ 
+ void Picture::Reconstruct()
+ {
+-
+ #ifndef OUTPUT_STAT
+ 	if( pict_type!=B_TYPE)
+ 	{
+ #endif
+ 		IQuantize();
+ 		ITransform();
++        { static int dn2=0; const char *dp=getenv("M2E_DUMP");
++          if(dp && dn2<2 && pict_type==I_TYPE){ char fn[256]; snprintf(fn,sizeof fn,"%s.%d.y",dp,dn2++); FILE*f=fopen(fn,"wb");
++            if(f){ for(int y=0;y<encparams.enc_height;y++) fwrite(rec_img->Plane(0)+y*encparams.phy_width,1,encparams.enc_width,f); fclose(f);} } }
+ 		CalcSNR();
+ 		Stats();
+ #ifndef OUTPUT_STAT
+@@ -205,6 +209,7 @@
+                 gop_start = false;
+                 ipflag = 1;
+                 pict_type = P_TYPE;
++                if( fwd_org == 0 ) { pict_type = I_TYPE; ipflag = 0; } /* patched: first frame of stream has no previous reference */
+                 new_seq = false;
+             }
+         }
+@@ -609,6 +614,13 @@
+                 */
+                 if ( pict_type==P_TYPE && !cur_mb->cbp)
+                     mb_type|= MB_FORWARD;
++                { static long cnt[3][4][8]; static bool reg=false; /* patched: M2E_STATS histogram [struct][motion_type][mbtype&7] */
++                  if(!reg){ reg=true; atexit([](){ if(getenv("M2E_STATS")){ extern void m2e_dump(void); m2e_dump(); } }); }
++                  extern long (*m2e_cnt)[4][8]; m2e_cnt=cnt;
++                  int ps = pict_struct==FRAME_PICTURE?0:(pict_struct==TOP_FIELD?1:2);
++                  int mt = (mb_type & MB_INTRA)?0:cur_mb->best_me->motion_type;
++                  if (mt==3 && getenv("M2E_DMVLOG")) fprintf(stderr,"DMV present=%d struct=%d mb(%d,%d)\n", present, ps, i, j);
++                  cnt[ps][mt&3][((mb_type&MB_FORWARD)?1:0)|((mb_type&MB_BACKWARD)?2:0)|((mb_type&MB_INTRA)?4:0)]++; }
+                 coding->PutAddrInc(MBAinc); /* macroblock_address_increment */
+                 MBAinc = 1;
+                 
+@@ -681,7 +693,7 @@
+        format like (S)VCD that mandates sequence headers every GOP to
+        do fast forward, rewind etc.
+     */
+-    if( new_seq || decode == 0 || (gop_start && encparams.seq_hdr_every_gop) )
++    if( !secondfield && ( new_seq || decode == 0 || (gop_start && encparams.seq_hdr_every_gop) ) ) /* patched: never between the two fields of a frame */
+     {
+       coding->PutSeqHdr();
+     }
+@@ -783,3 +795,6 @@
+  *  indent-tabs-mode: nil
+  * End:
+  */
++
++long (*m2e_cnt)[4][8];
++void m2e_dump(void){ const char*sn[3]={"frame","top","bot"}; for(int p=0;p<3;p++) for(int m=0;m<4;m++) for(int t=0;t<8;t++) if(m2e_cnt[p][m][t]) fprintf(stderr,"M2E_STATS %s motion_type=%d fwd/bwd/intra=%d : %ld\n",sn[p],m,t,m2e_cnt[p][m][t]); }
+--- a/mpeg2enc/picture.hh	2021-09-04 23:14:13.021372861 -0700
++++ b/mpeg2enc/picture.hh	2026-11-27 21:14:12.503242417 -0800
+@@ -199,6 +199,7 @@
+                                     // reference pictures
+ 	ImagePlanes *fwd_rec, *bwd_rec;	// Reconstructed  Images for fwd and 
+                                     // bwd references pictures
++	ImagePlanes *own_rec_img;	// patched: owned reconstruction buffer (rec_img may alias the first field's)
+ 	ImagePlanes *org_img, *rec_img;	// Images for current pict: orginal
+                                                         // and reconstructed.  Reconstructed
+                                                         // 0 for B planes except when debugging
+--- a/mpeg2enc/predict.cc	2021-09-04 23:14:13.021372861 -0700
++++ b/mpeg2enc/predict.cc	2026-11-27 21:19:36.740928365 -0800
+@@ -181,10 +181,10 @@
+     const int bx = TopleftX();
+     const int by = TopleftY();
+     uint8_t **fwd_rec = picture.fwd_rec->Planes();   // Forward prediction
+-    uint8_t **bwd_rec = picture.bwd_rec->Planes();   // Backward prediction
++    uint8_t **bwd_rec = (picture.bwd_rec ? picture.bwd_rec : picture.rec_img)->Planes();   // Backward prediction (patched: P second field uses the current frame)
+     uint8_t **cur = picture.pred->Planes();      // Frame to predict
+     int lx = picture.encparams.phy_width;
+-    int lx2 = picture.encparams.phy_width;
++    int lx2 = picture.encparams.phy_width2;   /* patched: field pictures need the field stride */
+     
+     bool addflag;
+     int currentfield;
+--- a/mpeg2enc/seqencoder.cc	2021-09-04 23:14:13.021372861 -0700
++++ b/mpeg2enc/seqencoder.cc	2026-11-27 21:16:08.308997066 -0800
+@@ -212,21 +212,9 @@
+         Picture *picture = job->picture;
+         vector<MacroBlock>::iterator macroblocks_begin;
+         vector<MacroBlock>::iterator macroblocks_end;
+-        switch( picture->pict_struct )
+-        {
+-            case FRAME_PICTURE :
+-                macroblocks_begin = picture->mbinfo.begin();
+-                macroblocks_end = picture->mbinfo.end();
+-                break;
+-            case TOP_FIELD :
+-                macroblocks_begin = picture->mbinfo.begin();
+-                macroblocks_end = picture->mbinfo.begin() + picture->mbinfo.size()/2;
+-                break;
+-            case BOTTOM_FIELD :
+-                macroblocks_begin = picture->mbinfo.begin() + picture->mbinfo.size()/2;
+-                macroblocks_end = picture->mbinfo.end();
+-                break;
+-        }
++        /* patched: each field Picture's mbinfo already holds one field's macroblocks */
++        macroblocks_begin = picture->mbinfo.begin();
++        macroblocks_end = picture->mbinfo.end();
+         
+         int macroblocks = macroblocks_end-macroblocks_begin;
+ 
+@@ -517,6 +505,7 @@
+     {
+         fresh = free_pictures.back();
+         free_pictures.pop_back();
++        fresh->rec_img = fresh->own_rec_img;
+     }
+     return fresh;
+ }
+@@ -686,6 +675,8 @@
+ {
+   Picture *frame_pic1;
+   frame_pic1 = GetFreshPicture();
++  // patched: both fields of a frame reconstruct into the same frame buffer
++  frame_pic1->rec_img = frame_pic0->rec_img;
+   frame_pic1->fwd_org = frame_pic0->fwd_org;
+   frame_pic1->fwd_rec = frame_pic0->fwd_rec;
+   frame_pic1->bwd_org = frame_pic0->bwd_org;
+--- a/mpeg2enc/motionest.cc	2021-09-04 23:14:13.021372861 -0700
++++ b/mpeg2enc/motionest.cc	2026-11-27 21:07:24.270701221 -0800
+@@ -1058,10 +1058,11 @@
+     }
+ 	else if (picture.pict_type==P_TYPE)
+ 	{
+-        toporg = picture.fwd_org->Plane(0);
+-        topref = picture.fwd_rec->Plane(0);
+-        botorg = picture.fwd_org->Plane(0);
+-        botref = picture.fwd_rec->Plane(0);
++        /* patched: first frame of the sequence has no previous reference (fwd_org==NULL) */
++        toporg = (picture.fwd_org ? picture.fwd_org : picture.org_img)->Plane(0);
++        topref = (picture.fwd_rec ? picture.fwd_rec : picture.rec_img)->Plane(0);
++        botorg = (picture.fwd_org ? picture.fwd_org : picture.org_img)->Plane(0);
++        botref = (picture.fwd_rec ? picture.fwd_rec : picture.rec_img)->Plane(0);
+                                                         
+ 		if (picture.secondfield)
+ 		{

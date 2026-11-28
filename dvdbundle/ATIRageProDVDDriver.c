@@ -132,12 +132,13 @@ int DVDDriverDecode(Ctx *c, unsigned char *p, short *rect)
         c->rc_ok = rc_init(&c->rc, rect[3] - rect[1], rect[2] - rect[0]) == 0;
         LOG("Decode: recon %dx%d init %s\n", rect[3] - rect[1], rect[2] - rect[0], c->rc_ok ? "ok" : "FAILED");
     }
-    if (c->ndec < 60)
+    if (c->ndec < 1000)
         LOG("Decode#%lu ptype=%d,%d st=%d,%d aux=%d,%d buf=%d,%d,%d\n", c->ndec, p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7], p[8]);
     if (c->rc_ok) {
+        { const char *e = getenv("DVDSTUB_MBDBG"); c->rc.dbg_dec = e ? atol(e) : -1; c->rc.dbg_n = (int)c->ndec; }
         r = rc_decode(&c->rc, p);
-        if (getenv("DVDSTUB_DUMPDEC") && p[2] == 3) dump_frame(c, p[6]);   /* decode-order dump (frame pictures) */
-        if (c->ndec < 60) LOG("  mbs=%lu unknown_type=%lu rc=%d\n", c->rc.stat_mb, c->rc.stat_unknown_type, r);
+        if (getenv("DVDSTUB_DUMPDEC")) dump_frame(c, p[6]);   /* decode-order dump (one entry per Decode call: frame, or both fields) */
+        if (c->ndec < 1000) LOG("  mbs=%lu unknown_type=%lu rc=%d\n", c->rc.stat_mb, c->rc.stat_unknown_type, r);
     }
     c->ndec++;
     return r < 0 ? -3 : 0;
