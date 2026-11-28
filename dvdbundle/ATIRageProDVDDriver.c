@@ -105,7 +105,7 @@ int DVDDriverCloseDevice(Ctx *c) { LOG("CloseDevice %lx\n", (u32)c);
     if (c && c->rc_ok) LOG("stats: decodes=%lu mbs=%lu types[0..7]=%lu %lu %lu %lu %lu %lu %lu %lu fieldDCT=%lu unknown=%lu\n", c->ndec, c->rc.stat_mb,
         c->rc.stat_type[0], c->rc.stat_type[1], c->rc.stat_type[2], c->rc.stat_type[3], c->rc.stat_type[4], c->rc.stat_type[5], c->rc.stat_type[6], c->rc.stat_type[7], c->rc.stat_fielddct, c->rc.stat_unknown_type); if (!c) return (int)0xe00002c2;
     if (c->both && c->cmp_n) LOG("BOTH summary: %lu decodes compared HW vs CPU: %lu identical, %lu with max diff <= 1, %lu with max diff <= 3, %lu with samples off by more than 8, worst max diff %lu\n", c->cmp_n, c->cmp_exact, c->cmp_le1, c->cmp_le3, c->cmp_big, c->cmp_worst);
-    if (c->rc_ok && c->rc.hw) { unsigned long s[12]; rch_stats(&c->rc, s); LOG("rage MC: batches=%lu cmds=%lu residual-excess samples=%lu vectors outside picture=%lu uploads=%lu unsupported MBs=%lu fixed-up blocks=%lu\n", s[0], s[1], s[2], s[3], s[4], s[5], s[6]);
+    if (c->rc_ok && c->rc.hw) { unsigned long s[12]; rch_stats(&c->rc, s); LOG("rage MC: batches=%lu cmds=%lu residual-excess samples=%lu blocks with vectors outside picture (host edge clamp)=%lu uploads=%lu unsupported MBs=%lu fixed-up blocks=%lu\n", s[0], s[1], s[2], s[3], s[4], s[5], s[6]);
         LOG("rage MC time (ms): host IDCT+staging %lu, upload %lu, engine batches %lu, fix-ups %lu, readback for dumps %lu\n", s[7] / 1000, s[8] / 1000, s[9] / 1000, s[10] / 1000, s[11] / 1000); rch_free(&c->rc); }
     free(c); return 0; }
 

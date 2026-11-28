@@ -37,6 +37,7 @@ typedef struct {
     RageMcCmd *cmds; int ncmd, cap;
     unsigned long n_batches, n_cmds, n_clamp, n_badvec, n_upload, n_unsup, n_fix;
     unsigned long us[5];                    /* microseconds: host (IDCT + staging + commands), upload, engine batches, fix-ups, sync */
+    RageMcCmd *esc; int nesc, capesc; unsigned long n_esc;   /* blocks whose vectors leave the picture: predicted on the host with edge clamping */
     struct Fix *fix; int nfix, capfix;      /* blocks whose residual exceeded the signed byte: corrected after the engine pass (see pass()) */
 } Hw;
 
@@ -46,6 +47,7 @@ struct Fix { int plane; unsigned off, step; rc_s16 ex[64]; };      /* off = byte
 
 static int be16s(const rc_u8 *p) { return (rc_s16)((p[0] << 8) | p[1]); }
 static int clip8(int v) { return v < 0 ? 0 : v > 255 ? 255 : v; }
+static int esc_all = -1;
 static int half_trunc(int v) { return v / 2; }
 
 int rch_init(Recon *rc)
@@ -76,14 +78,14 @@ void rch_free(Recon *rc)
     Hw *h = (Hw *)rc->hw; int p;
     if (!h) return;
     for (p = 0; p < 3; p++) free(h->stage[p]);
-    free(h->cmds); free(h->fix); ragegl_close(h->c);                  /* closing the client releases its VRAM blocks */
+    free(h->cmds); free(h->fix); free(h->esc); ragegl_close(h->c);                  /* closing the client releases its VRAM blocks */
     free(h); rc->hw = 0;
 }
 void rch_stats(Recon *rc, unsigned long *s)
 {
     Hw *h = (Hw *)rc->hw;
     if (!h) { memset(s, 0, 12 * sizeof *s); return; }
-    s[0] = h->n_batches; s[1] = h->n_cmds; s[2] = h->n_clamp; s[3] = h->n_badvec; s[4] = h->n_upload; s[5] = h->n_unsup; s[6] = h->n_fix;
+    s[0] = h->n_batches; s[1] = h->n_cmds; s[2] = h->n_clamp; s[3] = h->n_badvec + h->n_esc; s[4] = h->n_upload; s[5] = h->n_unsup; s[6] = h->n_fix;
     s[7] = h->us[0]; s[8] = h->us[1]; s[9] = h->us[2]; s[10] = h->us[3]; s[11] = h->us[4];
 }
 void rch_sync(Recon *rc, int idx)
@@ -117,17 +119,59 @@ static int flush(Hw *h)
     return rc;
 }
 
-/* host-side copy of the kernel's validation: a block that cannot be done by the engine (vector outside the picture) is counted and skipped */
+/* 1 = engine can do it; 0 = destination invalid (dropped); 2 = a vector leaves the picture (edge clamping needed: done on the host) */
 static int cmd_ok(const RageMcCmd *c)
 {
     static const int bwT[4] = { 16, 16, 8, 8 }, bhT[4] = { 16, 8, 8, 4 };
-    int bw = bwT[c->size], bh = bhT[c->size], k, nref = (c->flags & RAGE_MC_TWOWAY) ? 2 : 1;
+    int bw = bwT[c->size], bh = bhT[c->size], k, nref = (c->flags & RAGE_MC_TWOWAY) ? 2 : 1, res = 1;
     if (c->x < 0 || c->y < 0 || c->x + bw > c->width || c->y + bh > c->rows) return 0;
     for (k = 0; k < nref; k++) {
         int sx = (k ? c->mv2x : c->mvx) + 2 * c->x, sy = (k ? c->mv2y : c->mvy) + 2 * c->y;
-        if (sx < 0 || sy < 0 || (sx >> 1) + bw + (sx & 1) > c->width || (sy >> 1) + bh + (sy & 1) > c->rows) return 0;
+        if (sx < 0 || sy < 0 || (sx >> 1) + bw + (sx & 1) > c->width || (sy >> 1) + bh + (sy & 1) > c->rows) res = 2;
     }
-    return 1;
+    return res;
+}
+
+/* Host prediction of one block with edge replication (ISO 13818-2 rounding), result = clip(pred + residual byte already in the destination).
+ * Runs before the excess fix-ups so the decomposition is the same as for engine blocks. */
+static int host_block(Hw *h, const RageMcCmd *c)
+{
+    static const int bwT[4] = { 16, 16, 8, 8 }, bhT[4] = { 16, 8, 8, 4 };
+    int bw = bwT[c->size], bh = bhT[c->size], nref = (c->flags & RAGE_MC_TWOWAY) ? 2 : 1, k, x, y, rd = (c->width + 7) & ~7;
+    int pred[2][16 * 16], res[16 * 16];
+    rc_u8 line[1024];
+    if (rd > c->stride) rd = c->stride;
+    if (rd > (int)sizeof line) return -1;
+    for (k = 0; k < nref; k++) {
+        uint32_t so = k ? c->srcOff2 : c->srcOff; int mvx = k ? c->mv2x : c->mvx, mvy = k ? c->mv2y : c->mvy;
+        int sx = mvx + 2 * c->x, sy = mvy + 2 * c->y, ix = sx >> 1, iy = sy >> 1, fx = sx & 1, fy = sy & 1;
+        rc_u8 rows[17][1024]; int have[17], yy;
+        memset(have, 0, sizeof have);
+        for (yy = 0; yy <= bh; yy++) {
+            int l = iy + yy; if (l < 0) l = 0; else if (l >= c->rows) l = c->rows - 1;
+            if (yy == bh && !fy) break;
+            if (ragegl_vread(h->c, so + (uint32_t)l * c->stride, line, (uint32_t)rd, 0)) return -1;
+            memcpy(rows[yy], line, rd); have[yy] = 1;
+        }
+        for (y = 0; y < bh; y++) for (x = 0; x < bw; x++) {
+            int x0 = ix + x, x1 = x0 + 1, a, b = 0, cc = 0, d = 0, v;
+            if (x0 < 0) x0 = 0; else if (x0 >= c->width) x0 = c->width - 1;
+            if (x1 < 0) x1 = 0; else if (x1 >= c->width) x1 = c->width - 1;
+            a = rows[y][x0]; if (fx) b = rows[y][x1]; if (fy) cc = rows[y + 1][x0]; if (fx && fy) d = rows[y + 1][x1];
+            v = (fx && fy) ? (a + b + cc + d + 2) >> 2 : fx ? (a + b + 1) >> 1 : fy ? (a + cc + 1) >> 1 : a;
+            pred[k][y * 16 + x] = v;
+        }
+    }
+    for (y = 0; y < bh; y++) {
+        uint32_t o = c->dstOff + (uint32_t)(c->y + y) * c->stride + (uint32_t)c->x; rc_u8 t[16];
+        if (ragegl_vread(h->c, o, t, (uint32_t)bw, 0)) return -1;
+        for (x = 0; x < bw; x++) {
+            int p = nref == 2 ? (pred[0][y * 16 + x] + pred[1][y * 16 + x] + 1) >> 1 : pred[0][y * 16 + x];
+            res[x] = (signed char)t[x]; t[x] = (rc_u8)clip8(p + res[x]);
+        }
+        if (ragegl_vwrite(h->c, o, t, (uint32_t)bw, 0)) return -1;
+    }
+    return 0;
 }
 
 /* One prediction unit: luma block (16 wide, bh = 16 or 8 lines) at x, ylum of the system, and its chroma blocks.
@@ -156,7 +200,13 @@ static void emit_unit(Recon *rc, Hw *h, int bd, int nref, const Ref *r, int dpar
             else { c->srcOff2 = so; c->mv2x = (int16_t)mx; c->mv2y = (int16_t)my; c->flags |= RAGE_MC_TWOWAY; }
         }
         if (nref == 1) c->srcOff2 = c->srcOff;
-        if (!cmd_ok(c)) { h->n_badvec++; continue; }
+        k = cmd_ok(c);
+        if (k == 1 && esc_all) k = 2;                 /* DVDSTUB_ESCALL: test hook, route every block through the host path */
+        if (!k) { h->n_badvec++; continue; }
+        if (k == 2) {
+            if (h->nesc == h->capesc) { h->capesc = h->capesc ? h->capesc * 2 : 64; h->esc = (RageMcCmd *)realloc(h->esc, h->capesc * sizeof *h->esc); if (!h->esc) { h->capesc = h->nesc = 0; continue; } }
+            h->esc[h->nesc++] = *c; h->n_esc++; continue;
+        }
         h->ncmd++;
     }
 }
@@ -192,7 +242,8 @@ static int pass(Recon *rc, Hw *h, int st, int ptype, int second, int bd, int bf,
     rc_s16 blk[64]; unsigned long t0 = now_us(), t1;
     if (st != 3) nmb >>= 1;
     memset(h->stage[0], 0, (size_t)rc->pitchY * rc->hY); memset(h->stage[1], 0, (size_t)rc->pitchC * rc->hC); memset(h->stage[2], 0, (size_t)rc->pitchC * rc->hC);
-    h->ncmd = 0; h->nfix = 0;
+    if (esc_all < 0) esc_all = getenv("DVDSTUB_ESCALL") != 0;
+    h->ncmd = 0; h->nfix = 0; h->nesc = 0;
 #define FWD_BUF(par) ((ptype == 2 && second && (par) != cp) ? bd : bf)
     for (n = 0; n < nmb; n++, mb += 0x1c) {
         int type = mb[0x14], flags = mb[0x15], fieldDct = (st == 3) && (flags != 0), r;
@@ -294,6 +345,7 @@ static int pass(Recon *rc, Hw *h, int st, int ptype, int second, int bd, int bf,
     if (getenv("DVDSTUB_HWDBG") && st == 3) { RageMcCmd keep[16]; int nk = h->ncmd < 16 ? h->ncmd : 16; memcpy(keep, h->cmds, nk * sizeof(RageMcCmd)); if (flush(h)) return -1; selfcheck(rc, h, bd, keep, nk); }
     else if (flush(h)) return -1;
     t1 = now_us();
+    for (n = 0; n < h->nesc; n++) if (host_block(h, &h->esc[n])) return -1;
     for (n = 0; n < h->nfix; n++) {                       /* residual excess fix-ups (rare: large residuals), 8 bytes per line */
         const struct Fix *f = &h->fix[n]; int rr, cc;
         for (rr = 0; rr < 8; rr++) {
