@@ -26,3 +26,8 @@ Own user-client selectors modelled on the R128 set (open/close, ring map, show/e
 
 ## Open questions (must be resolved statically before M2)
 Residual-add mechanism and rounding on LT Pro; MC register semantics for 0xE4 trigger/size codes; dual-prime handling (R128 has no distinct handler, so framework likely converts); what DVD.framework does when no bundle loads on a G3.
+
+## M0 result (Nov 28, MDD, live): PASS
+Rig: tools/dvd/m0_rig.sh (backs up DVD.framework's binary, patches the VSP probe symbol 'VSPMaximumThreads'->'VSPMaximumThreadX' => probe fails like on a VSP-less G3; installs dvdbundle/ATIRageProDVDDriver.bundle; `off` restores byte-identical). Kext personality IODVDBundleName = ATIRageProDVDDriver.
+DVD.framework selected and loaded the stub via the hardware-assist path and called: InitializeLibrary(services, mask, cb3, cb4) -> GetVersion -> OpenDevice(out, maxSize, display, a4..a6, flagsOut, _, &nMP, &nSP) -> SetMPRects -> ClearMP/GetKeyColor/EnableButton/EnableSP/GetSPBuffer/ClearSP/ShowSPBuffer/SetSPPalette -> EnableMP(1) -> SetMVLevel -> then per frame Decode(ctx, params, rect) + ShowMPBuffer(idx 0..3 cycling). 490 Decode + 485 ShowMPBuffer calls in 15 s; DVDPlay ran with no errors (no video, as expected for a stub). Trace: docs/re-notes/r128-dvd-driver/M0_call_trace.txt. Stub has no AltiVec instructions (-mcpu=750).
+Findings: Decode receives (ctx, params, rect) as predicted; ShowMPBuffer cycles 4 buffers (OpenDevice reported 5); 720x480 content, 16bpp main display => GetKeyColor 0x40.

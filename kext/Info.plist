@@ -34,7 +34,7 @@
       <!-- CGL reads this from the accelerator the framebuffer's IOAccelTypes names, and loads that bundle as the renderer -->
       <key>IOGLBundleName</key>      <string>ATIRageProGLDriver</string>
       <!-- B10 experiment: DVDPlayback reads IODVDBundleName from the accelerator (GeForce: GeForceVADriver, Rage 128: ATIRage128DVDDriver); no key = display unsupported (DVDIsSupportedDisplay -70013) -->
-      <key>IODVDBundleName</key>     <string>AppleAltiVecDVDDriver</string>
+      <key>IODVDBundleName</key>     <string>ATIRageProDVDDriver</string>
       <key>IOProbeScore</key>        <integer>1000</integer>
       <!-- Quartz 2D: IOKit finds the plugin through the FRAMEBUFFER (publishFramebuffer copies this property onto it); ATIRageProGA.plugin stays in /System/Library/Extensions
            (docs/re-notes/ga-2d-client-decode.md section 1) -->

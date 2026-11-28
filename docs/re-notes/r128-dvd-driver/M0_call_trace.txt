@@ -1,0 +1,60 @@
+InitializeLibrary services=8f00bc88 mask=4 cb3=8f002ffc cb4=8f003004 slots=3
+GetVersion mask=4
+OpenDevice out=2860a00 maxSize=2860a04 disp=5b81c5c2 a4=7cc7 a5=a32 a6=207 flagsOut=535210
+OpenDevice ok ctx=53cb60
+SetMPRects 53cb60 rect=0,0,480,720
+ClearMP 53cb60 53dcd0 8a7da214 0 8a7da148 8a7ac670
+GetKeyColor bpp=16
+EnableButton 53cb60 0 53dcd0 8a7a8e94 8a7da148 8a7dcddc
+EnableSP 53cb60 0 53dcd0 8a7a8cec 8a7dc9dc 0
+ClearMP 53cb60 53dcd0 8a7da214 0 8a7da148 8a7ac670
+GetSPBuffer 53cb60 559420 559440 53dcd0 8a7a8f64 8a7dcfdc
+ClearSP 53cb60 7 53dcd0 8a7a8278 8a7a8ca8 8a7dca80
+ShowSPBuffer 53cb60 7 bffff130 207 53dcd0 8a7a8278
+SetSPPalette 53cb60 5593b0 53dcd0 8a7a8d74 8a7da148 8a7dcbdc
+SetMPRects 53cb60 rect=0,0,480,720
+EnableMP 53cb60 1 53dcd0 0 8a7da148 8a7ac5c0
+SetMVLevel 53cb60 0 53dcd0 0 8a7da148 8a7ac1cc
+Decode 53cb60 535194 16bb9a0 53dcd0 8a7da148 8a7dc8f4
+ShowMPBuffer idx=0 mode=2
+Decode 53cb60 535194 16bb9a0 53dcd0 8a7da148 8a7dc8f4
+Decode 53cb60 535194 16bb9a0 53dcd0 8a7da148 8a7dc8f4
+Decode 53cb60 535194 16bb9a0 53dcd0 8a7da148 8a7dc8f4
+ShowMPBuffer idx=3 mode=2
+Decode 53cb60 535194 16bb9a0 53dcd0 8a7da148 8a7dc8f4
+Decode 53cb60 535194 16bb9a0 53dcd0 8a7da148 8a7dc8f4
+Decode 53cb60 535194 16bb9a0 53dcd0 8a7da148 8a7dc8f4
+ShowMPBuffer idx=0 mode=2
+Decode 53cb60 535194 16bb9a0 53dcd0 8a7da148 8a7dc8f4
+ShowMPBuffer idx=1 mode=2
+Decode 53cb60 535194 16bb9a0 53dcd0 8a7da148 8a7dc8f4
+ShowMPBuffer idx=2 mode=2
+Decode 53cb60 535194 16bb9a0 53dcd0 8a7da148 8a7dc8f4
+ShowMPBuffer idx=3 mode=2
+Decode 53cb60 535194 16bb9a0 53dcd0 8a7da148 8a7dc8f4
+ShowMPBuffer idx=0 mode=2
+Decode 53cb60 535194 16bb9a0 53dcd0 8a7da148 8a7dc8f4
+ShowMPBuffer idx=1 mode=2
+Decode 53cb60 535194 16bb9a0 53dcd0 8a7da148 8a7dc8f4
+ShowMPBuffer idx=2 mode=2
+Decode 53cb60 535194 16bb9a0 53dcd0 8a7da148 8a7dc8f4
+ShowMPBuffer idx=3 mode=2
+Decode 53cb60 535194 16bb9a0 53dcd0 8a7da148 8a7dc8f4
+ShowMPBuffer idx=0 mode=2
+Decode 53cb60 535194 16bb9a0 53dcd0 8a7da148 8a7dc8f4
+ShowMPBuffer idx=1 mode=2
+Decode 53cb60 535194 16bb9a0 53dcd0 8a7da148 8a7dc8f4
+ShowMPBuffer idx=2 mode=2
+Decode 53cb60 535194 16bb9a0 53dcd0 8a7da148 8a7dc8f4
+ShowMPBuffer idx=3 mode=2
+Decode 53cb60 535194 16bb9a0 53dcd0 8a7da148 8a7dc8f4
+ShowMPBuffer idx=0 mode=2
+Decode 53cb60 535194 16bb9a0 53dcd0 8a7da148 8a7dc8f4
+SetMVLevel 53cb60 0 53dcd0 0 8a7da148 8a7ac1cc
+ShowMPBuffer idx=1 mode=2
+Decode 53cb60 535194 16bb9a0 53dcd0 8a7da148 8a7dc8f4
+ShowMPBuffer idx=2 mode=2
+Decode 53cb60 535194 16bb9a0 53dcd0 8a7da148 8a7dc8f4
+ShowMPBuffer idx=3 mode=2
+Decode 53cb60 535194 16bb9a0 53dcd0 8a7da148 8a7dc8f4
+ShowMPBuffer idx=0 mode=2
