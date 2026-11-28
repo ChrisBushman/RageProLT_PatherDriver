@@ -79,3 +79,18 @@ feed), which needs the 0x1e0..0x1e2 register formats (3-dword entry layout: unkn
 experiment), or (B) host IDCT (our integer IDCT) + hardware prediction only, adding the residual through the blender: unproven, no Win98 precedent for that chip.
 Remaining static work: the entry layout of the 3-dword packets = how the framework's coefficient buffer (Rage-format, DVD.framework side, see
 docs/re-notes/r128-dvd-driver/D_framework_coefficients.md) maps to them; if the Apple Rage 128 coefficient format equals this one the feed is a memcpy.
+
+## Update 3: where the 0x1e0 data comes from (Win98 RenderMoComp @0xb00c4d80, capstone disassembly; Ghidra had not made it a function)
+- The 0xb00c4d80 function is the DirectDraw MoComp RenderMoComp: it loops over the application's buffers, dispatching on a buffer-type code 1..15 (jump table):
+  type 1 = picture/surface setup (ctx+0x414, +0x440, +0x200..0x214 = plane offsets), the macroblock-control buffer -> ctx+0x3fc (case @0xb00c4f0a, flag 2),
+  the **coefficient buffer -> ctx+0x400** (case @0xb00c4f28, flag 4), other types copy parameter blocks (0x40/0x14 bytes) or a table into ctx. When flags 2 and 4 are
+  both present it calls FUN_b00c60a0 (the stream builder) once. So the 0x1e0 payload is the *application's* buffer forwarded unchanged: the packing is defined by
+  ATI's MC12 interface, the HAL does no repacking.
+- Corollary: no producer exists inside the driver; the MB record layout (u16 addr, u16 flags, u32 {repeat<<24 | coef offset in dwords}, +10..+15 per-block
+  counts, MVs at +0x20) is ATI's MC12 structure; the framework's MbRec (0x1c bytes, coefficient counts at +0x16..0x1b) is the same idea.
+- Packet arithmetic (E): 3 dwords per 4 coefficients = 12 bytes = four {u8 run, s16 level}. That matches exactly what the framework produces (u8 run + s16 level, already dequantised,
+  D_framework_coefficients.md) if run-bytes are packed into one dword and levels into two (I; layout of those 3 dwords within the group is the remaining unknown: runs-first vs
+  interleaved). The R128/LT Pro register guides here contain no IDCT register descriptions, so this is derivable only by one live experiment or from ATI's MC12 spec.
+- "IDCTinAGP" (INI) = IDCT data placed in AGP/system memory for bus-master fetch; "emulate" = PCI-memory stand-in. TwoWayIDCT/OneWayIDCT counters = the IDCT variants of the two
+  prediction kinds. Consistent with a hardware IDCT inside the MC engine.
+Static analysis is now exhausted for this question: remaining unknowns (3-dword layout, rounding bit-exactness, completion) need the live experiment.
