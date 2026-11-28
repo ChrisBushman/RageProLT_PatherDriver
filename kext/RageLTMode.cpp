@@ -190,6 +190,12 @@ void RageLTDevice::vsyncWait(void)
     setProperty("RageVsyncTimeouts", (unsigned long long)fVsyncTimeouts, 32); setProperty("RageVsyncWaitUs", (unsigned long long)(fVsyncNs / 1000ull), 64);
 }
 
+/* The 3D engine's destination pixel cache is not written back to VRAM when the engine goes idle; only a CPU write into VRAM flushes it (measured Nov 20, see vramCopyOut).  A present
+ * blit / quad reads the render target as its source, so it needs the same flush after idleWait(): without it the last-drawn pixels of frame N are still in the cache and the screen
+ * gets frame N-1's pixels there (small stale blobs, 3 rows x 10-35 px, scattered and timing dependent -- the DVD video "thin lines").  Rewrite a word the engine never writes. */
+#define RAGE_FLUSH_DST_CACHE() do { if (fScratch) { volatile uint8_t *v_ = (volatile uint8_t *)fMap->getVirtualAddress(); uint32_t t_ = OSReadLittleInt32((void *)v_, fScratch); \
+    OSWriteLittleInt32((void *)v_, fScratch, t_); __asm__ volatile("sync" ::: "memory"); (void)OSReadLittleInt32((void *)v_, fScratch); __asm__ volatile("sync" ::: "memory"); } } while (0)
+
 /* Present, general form.  Same-format 1:1 = the 2D engine's raw blit.  Anything else (the target and the scanout differ in pixel size, or the destination rectangle is a different size
  * = scaled present) = a textured quad of the 3D engine reading the target as a SQUARE power-of-two texture (the bundle allocates the target with a power-of-two pitch when it needs this).
  * The engine converts between pixel formats itself.  scale3d: nearest for the 1:1 conversion, bilinear when scaling and filter != 0.  Both write the scanout only inside the
@@ -212,6 +218,7 @@ IOReturn RageLTDevice::presentEx(uint32_t owner, uint32_t sx, uint32_t sy, uint3
         if (w > d.w - dx) w = d.w - dx;
         if (h > d.h - dy) h = d.h - dy;
         if (idleWait()) { IOLockUnlock(fLock); return kIOReturnTimeout; }
+        RAGE_FLUSH_DST_CACHE();
         vsyncWait();
         rc = (IOReturn)eng_blit(fRegs, pixw, c.tgt_off, c.tgt_pitch, d.base, d.pitch_px, sx, sy, dx, dy, w, h, ((d.w - 1u) << 16), ((d.h - 1u) << 16));
     } else {
@@ -222,6 +229,7 @@ IOReturn RageLTDevice::presentEx(uint32_t owner, uint32_t sx, uint32_t sy, uint3
         right = dx + dw; if (right > d.w) right = d.w;
         bottom = dy + dh; if (bottom > d.h) bottom = d.h;
         if (idleWait()) { IOLockUnlock(fLock); return kIOReturnTimeout; }
+        RAGE_FLUSH_DST_CACHE();
         rc = (IOReturn)eng_texquad(fRegs, pixw, d.base, d.pitch_px, texfmt, c.tgt_off, wl,
                                    (int32_t)(dx * 4u) + xb, (int32_t)(dy * 4u) + xb, (int32_t)((dx + dw) * 4u) + xb, (int32_t)((dy + dh) * 4u) + xb,
                                    (int32_t)(sx * 256u) + ub, (int32_t)(sy * 256u) + vb, (int32_t)((sx + w) * 256u) + ub, (int32_t)((sy + h) * 256u) + vb,

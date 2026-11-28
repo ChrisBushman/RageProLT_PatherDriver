@@ -8,7 +8,6 @@
  */
 #include <stdlib.h>
 #include <stdio.h>
-#include <mach/mach_time.h>
 #include "gld.h"
 
 #define TEX_LOCK()
@@ -175,10 +174,8 @@ static void cube_cache_drop(uint32_t state);
 static void vol_cache_drop(uint32_t state);
 
 static void cpu_free(mach64_tex_slot *s) { int k; g_tex_epoch++; free(s->cpu); s->cpu = 0; for (k = 0; k < 12; k++) { free(s->cpul[k]); s->cpul[k] = 0; } }
-void mach64_texture_snapshot_drop(void *texobj);
 void mach64_texture_deleted(gld_context *ctx, void *texobj)
 {
-    mach64_texture_snapshot_drop(texobj);
     g_tex_epoch++;
     mach64_tex_slot *s; int used;
     /* A draw that sampled this texture may still sit in the unsubmitted batch: submit it before the VRAM is returned (the kernel validates texture offsets against the
@@ -380,64 +377,6 @@ static unsigned char *tex_tighten(uint32_t src, uint32_t w, uint32_t h, uint32_t
     if (d) for (y = 0; y < h; y++) memcpy(d + (size_t)y * w * bpp, (const unsigned char *)(uintptr_t)src + (size_t)y * pitch * bpp, (size_t)w * bpp);
     return d;
 }
-/* Client-storage video frames (DVD Player's AltiVec driver: glTexSubImage2D from its own YCbCr buffer, GL_UNPACK_CLIENT_STORAGE_APPLE).  The upload runs later, at the next
- * draw, but the decoder is already writing the NEXT frame into that same buffer by then: measured on the G4 with a snapshot taken before each upload, 1-40 rows per frame of the
- * application's buffer changed during the copy and nothing was lost in the kernel write -- the picture showed thin horizontal lines of the previous frame where the shapes had
- * been.  gldModifyTextureLevel runs synchronously inside glTexSubImage2D, when the buffer is consistent: copy it into a private tight buffer there and upload from the copy. */
-#define SNAPN 16
-static struct { void *tex; unsigned char *buf; size_t cap; uint32_t src, w, h; int valid; } g_snap[SNAPN];
-void mach64_texture_snapshot_drop(void *texobj)
-{
-    int i; for (i = 0; i < SNAPN; i++) if (g_snap[i].tex == texobj) { free(g_snap[i].buf); memset(&g_snap[i], 0, sizeof g_snap[i]); }
-}
-void mach64_texture_snapshot_invalidate(void *texobj)
-{
-    int i; for (i = 0; i < SNAPN; i++) if (g_snap[i].tex == texobj) g_snap[i].valid = 0;
-}
-static unsigned g_sw[3];
-static void snapwin_report(void) { fprintf(stderr, "SNAPWIN: %u frames, %u had rows re-copied within the window (%.1f%%), %u rows in total\n", g_sw[0], g_sw[1], g_sw[0] ? 100.0 * g_sw[1] / g_sw[0] : 0.0, g_sw[2]); }
-void mach64_texture_snapshot(void *texobj)
-{
-    const unsigned char *t = (const unsigned char *)texobj, *s, *r; uint32_t state, lw, lh, lsrc, rowlen, y; int i, f = -1;
-    if (!t) return;
-    state = *(const uint32_t *)(t + 0x30);
-    if (state < 0x10000 || state > M64_UADDR_MAX) return;
-    s = (const unsigned char *)(uintptr_t)state;
-    r = s + 0x9c + (uint32_t)s[0x5e] * 0x14;
-    lw = *(const uint16_t *)(r + 0x00); lh = *(const uint16_t *)(r + 0x02); lsrc = *(const uint32_t *)(r + 0x10); rowlen = *(const uint16_t *)(r + 0x08);
-    if (!(r[0x07] & 1u) || *(const uint16_t *)(r + 0x0c) != 0x85B9u || rowlen <= lw || !lw || !lh || lw > 1024u || lh > 1024u || lsrc < 0x10000 || lsrc > M64_UADDR_MAX) return;
-    for (i = 0; i < SNAPN; i++) if (g_snap[i].tex == texobj) { f = i; break; }
-    if (f < 0) for (i = 0; i < SNAPN; i++) if (!g_snap[i].tex) { f = i; break; }
-    if (f < 0) return;                                                        /* table full: the upload falls back to the application's buffer */
-    if (g_snap[f].cap < (size_t)lw * lh * 2u) {
-        unsigned char *nb = (unsigned char *)realloc(g_snap[f].buf, (size_t)lw * lh * 2u);
-        if (!nb) { g_snap[f].valid = 0; return; }
-        g_snap[f].buf = nb; g_snap[f].cap = (size_t)lw * lh * 2u;
-    }
-    {   /* The decoder keeps writing the frame for a moment AFTER it announces it (measured on the G4 by polling the buffer: 13% of frames are still being completed within 1 ms, a few more up
-         * to 8 ms; in another ~14% of frames the decoder starts REUSING the buffer for the next frame 8-40 ms after the notification).  So: copy now, then re-scan for a short window
-         * (RAGE_SNAPWIN_US, default 2.5 ms: measured 29-30 fps, a 5 ms window costs 4-8 fps) and re-copy the rows that changed -- that covers the completion writes and ends before the buffer is reused. */
-        static int init, win_us = 2500, stats; static double nspt; static unsigned nfr, npatched, nrows; double t0, now; int patched = 0;
-        if (!init) { mach_timebase_info_data_t tb; const char *e = getenv("RAGE_SNAPWIN_US"); init = 1; if (e) win_us = atoi(e); stats = getenv("RAGE_SNAPWIN_STATS") != 0; mach_timebase_info(&tb); nspt = (double)tb.numer / tb.denom; }
-        t0 = mach_absolute_time() * nspt / 1000.0;
-        for (y = 0; y < lh; y++) memcpy(g_snap[f].buf + (size_t)y * lw * 2u, (const unsigned char *)(uintptr_t)lsrc + (size_t)y * rowlen * 2u, (size_t)lw * 2u);
-        if (win_us > 0) do {
-            for (y = 0; y < lh; y++) {
-                const unsigned char *lv = (const unsigned char *)(uintptr_t)lsrc + (size_t)y * rowlen * 2u; unsigned char *sb = g_snap[f].buf + (size_t)y * lw * 2u;
-                if (memcmp(sb, lv, (size_t)lw * 2u)) { memcpy(sb, lv, (size_t)lw * 2u); patched = 1; nrows++; }
-            }
-            now = mach_absolute_time() * nspt / 1000.0;
-        } while (now - t0 < win_us);
-        if (stats) { static int reg; if (!reg) { reg = 1; atexit(snapwin_report); } }
-        nfr++; if (patched) npatched++; g_sw[0] = nfr; g_sw[1] = npatched; g_sw[2] = nrows;
-    }
-    g_snap[f].tex = texobj; g_snap[f].src = lsrc; g_snap[f].w = lw; g_snap[f].h = lh; g_snap[f].valid = 1;
-}
-static const unsigned char *snapshot_for(void *texobj, uint32_t src, uint32_t w, uint32_t h)
-{
-    int i; for (i = 0; i < SNAPN; i++) if (g_snap[i].tex == texobj && g_snap[i].valid && g_snap[i].src == src && g_snap[i].w == w && g_snap[i].h == h) return g_snap[i].buf;
-    return 0;
-}
 static int mach64_upload(gld_context *ctx, void *texobj)
 {
     g_tex_epoch++;
@@ -482,11 +421,7 @@ static int mach64_upload(gld_context *ctx, void *texobj)
              * (green with slanting lines).  Repack to tight rows here so everything below sees width * bytes-per-texel pitch. */
             uint32_t rowlen = *(const uint16_t *)(r + 0x08), bpp = tex_src_bytes(1, 1, (uint16_t)lvl[nlevels].fmt, (uint16_t)lvl[nlevels].type);
             if ((r[0x07] & 1u) && rowlen > lw && bpp && bpp <= 16u) {
-                if (lvl[nlevels].fmt == 0x85B9u && bpp == 2u) {
-                    const unsigned char *sn = nlevels == 0 ? snapshot_for(texobj, lsrc, lw, lh) : 0;
-                    if (sn) { lvl[nlevels].src = (uint32_t)(uintptr_t)sn; ypitch[nlevels] = lw; }          /* the frame as it was when glTexSubImage2D returned (tight rows) */
-                    else ypitch[nlevels] = rowlen;
-                }         /* video frames: no separate repack pass, the hash and the pad/upload copy read the rows with their pitch */
+                if (lvl[nlevels].fmt == 0x85B9u && bpp == 2u) ypitch[nlevels] = rowlen;         /* video frames: no separate repack pass, the hash and the pad/upload copy read the rows with their pitch */
                 else {
                     unsigned char *d = tex_tighten(lsrc, lw, lh, rowlen, bpp);
                     if (d) { lvl[nlevels].src = (uint32_t)(uintptr_t)d; dec_bufs[nlevels] = d; }
