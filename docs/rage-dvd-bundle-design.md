@@ -9,7 +9,7 @@ without VSP/AltiVec (G3 Lombard) via the accelerator property `IODVDBundleName`.
 
 ## Pipeline per picture (DVDDriverDecode)
 1. Read MbRec array + coefficient stream (spec A). Coefficients arrive dequantised (spec D).
-2. IDCT (host): 8x8 integer IDCT (fixed point, 16-bit intermediates, row/column with precomputed constant table; sparse-block shortcuts: DC-only, run-limited rows) -> residual blocks.
+2. IDCT (host): 8x8 integer IDCT incl. ISO 13818-2 mismatch control (framework does none; see spec D) (fixed point, 16-bit intermediates, row/column with precomputed constant table; sparse-block shortcuts: DC-only, run-limited rows) -> residual blocks.
 3. Prediction + residual:
    - M1 (reference path, correctness oracle): CPU does MC + residual into the destination frame buffer (half-pel integer interpolation, rounding per MPEG-2 spec). Also used as fallback.
    - M2 (Rage MC): emit MC via our kext (LT Pro scaler regs 0xE0-0xE4, SCALE_3D_CNTL blend ONE/ONE with signed dst clamp as in Win98 init - the likely residual-add mechanism: IDCT residual uploaded as a signed plane, then blended on top of / before MC). Compare frame by frame against M1.
@@ -25,4 +25,4 @@ Own user-client selectors modelled on the R128 set (open/close, ring map, show/e
 - M2 Rage MC + host residual; M3 SP/buttons; M4 timing/optimisation (profile per phase before optimising); M5 B-frames/field/dual-prime coverage.
 
 ## Open questions (must be resolved statically before M2)
-Residual-add mechanism and rounding on LT Pro; MC register semantics for 0xE4 trigger/size codes; mismatch control location; dual-prime handling (R128 has no distinct handler, so framework likely converts); what DVD.framework does when no bundle loads on a G3.
+Residual-add mechanism and rounding on LT Pro; MC register semantics for 0xE4 trigger/size codes; dual-prime handling (R128 has no distinct handler, so framework likely converts); what DVD.framework does when no bundle loads on a G3.
