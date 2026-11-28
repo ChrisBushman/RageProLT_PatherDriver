@@ -61,3 +61,21 @@ Open (N), the decisive one for M2: does 4c49 take THIS stream (0x1e0 coefficient
 mode whose result is fed some other way? ICD says "IDCT absent" for 4c49 yet MC12 families {5,6,8,9} are all emitted by the same function; the mapping HAL/ICD
 family -> MC family (DAT_b0122e50) and the meaning of ctx+0x220 byte +0x13 (selects FUN_b00c60a0's two branches) must be traced next, plus the host IDCT's output
 format at ATIMCRAE ~5790. Until then the "no hardware IDCT on LT Pro" statement is E only from the ICD capability key, not from MC register behaviour.
+
+## Update 2: the three traces (Win98 ATID32AE HAL init @0xb00b2xxx, ATIMCRAE DriverInitMC12 @0xb01031a0, FUN_b010b730)
+1. Chip -> family (E code, I that uStack_50 is the PCI device id; chip classes 0x47/0x4c/0x56 = GT/LT/VT match). In the HAL init, device-id high byte 0x4c:
+   ids 4c00/4c40/4c80/4c9c -> family 0 (no 3D assist); 4c18/4c5c/4cdc -> 4; **every other 0x4c.. id, including our 4c49 -> family 7**. DriverInitMC12 maps
+   HAL family 3->MC5, 4->MC6, 5/6->MC9, **7->MC8**. So the LT Pro runs as MC family 8, the one family that also allows the MCAM/MCRM fourccs, and
+   MC12 sets IDCTEngineUsed=1 for it. => the Win98 driver drives 4c49 through the SAME stream as the IDCT-capable parts; the earlier ICD key "IDCT absent
+   for 4c49" is a capability-report quirk or is wrong; the HAL behaviour is what hardware was driven with.
+2. The 0x1e0 feed (E stream, I meaning): MC family 8 always receives the framework's coefficients (3 dwords per 4 run/level entries, counts per block in MB +0x16..) at
+   register 0x1e0..0x1e2, i.e. hardware IDCT + residual add inside the same pass. There is NO alternative host-IDCT stream in the HAL for this chip.
+   (ctx+0x220 byte +0x13 selecting FUN_b00c60a0's second branch (0x8240 for every MB, no prediction) is a different surface type, not traced; irrelevant to P/B.)
+3. FUN_b010b730 (ATIMCRAE) is a SOFTWARE reference of the same operation: half-pel (a+b+1)/2, 4-tap (a+b+c+d+2)>>2, two-way (p1+p2+1)/2, + int16 residual,
+   clamp 0..255, 8-bit. It documents the MPEG-2-exact semantics the hardware is meant to reproduce (used for SPSWTest comparisons), and its coefficient
+   argument is already-IDCT'd int16 data, so the hardware stream is the only place the IDCT happens in the driver.
+Consequences for M2: the practical LT Pro plan is NOT "host IDCT + hardware prediction". Either (A) copy the Win98 stream exactly (prediction + 0x1e0 coefficient
+feed), which needs the 0x1e0..0x1e2 register formats (3-dword entry layout: unknown, must be derived from the coefficient buffer producer / one live
+experiment), or (B) host IDCT (our integer IDCT) + hardware prediction only, adding the residual through the blender: unproven, no Win98 precedent for that chip.
+Remaining static work: the entry layout of the 3-dword packets = how the framework's coefficient buffer (Rage-format, DVD.framework side, see
+docs/re-notes/r128-dvd-driver/D_framework_coefficients.md) maps to them; if the Apple Rage 128 coefficient format equals this one the feed is a memcpy.
