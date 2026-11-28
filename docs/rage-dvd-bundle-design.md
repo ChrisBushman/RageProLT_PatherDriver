@@ -31,3 +31,14 @@ Residual-add mechanism and rounding on LT Pro; MC register semantics for 0xE4 tr
 Rig: tools/dvd/m0_rig.sh (backs up DVD.framework's binary, patches the VSP probe symbol 'VSPMaximumThreads'->'VSPMaximumThreadX' => probe fails like on a VSP-less G3; installs dvdbundle/ATIRageProDVDDriver.bundle; `off` restores byte-identical). Kext personality IODVDBundleName = ATIRageProDVDDriver.
 DVD.framework selected and loaded the stub via the hardware-assist path and called: InitializeLibrary(services, mask, cb3, cb4) -> GetVersion -> OpenDevice(out, maxSize, display, a4..a6, flagsOut, _, &nMP, &nSP) -> SetMPRects -> ClearMP/GetKeyColor/EnableButton/EnableSP/GetSPBuffer/ClearSP/ShowSPBuffer/SetSPPalette -> EnableMP(1) -> SetMVLevel -> then per frame Decode(ctx, params, rect) + ShowMPBuffer(idx 0..3 cycling). 490 Decode + 485 ShowMPBuffer calls in 15 s; DVDPlay ran with no errors (no video, as expected for a stub). Trace: docs/re-notes/r128-dvd-driver/M0_call_trace.txt. Stub has no AltiVec instructions (-mcpu=750).
 Findings: Decode receives (ctx, params, rect) as predicted; ShowMPBuffer cycles 4 buffers (OpenDevice reported 5); 720x480 content, 16bpp main display => GetKeyColor 0x40.
+
+## M1 result (Nov 28, MDD + host reference): PASS for frame pictures
+dvdbundle/recon.c: integer Chen-Wang IDCT (IEEE 1180 accuracy test passes: dvdbundle/test_idct.c), ISO 13818-2 mismatch control, half-pel MC for all frame-picture types, field DCT, residual add; run inside the stub through the M0 rig; decode-order frames dumped (DVDSTUB_YUV/DVDSTUB_FRAMES/DVDSTUB_DUMPDEC=1) and compared with ffmpeg's decode of the same VOB (tools/dvd/m1/cmp2.c matches each dumped frame to the best reference frame; ShowMPBuffer is time-driven so the framework drops/repeats frames).
+| stream (ffmpeg authored, 720x480) | coverage | result |
+|---|---|---|
+| TESTDVD (I,P progressive) | intra, forward | 150 frames, min PSNR 70.0, maxdiff 2 |
+| v1 (-bf 2) | + backward, bidirectional (B) | 150 frames, min PSNR 72.2, maxdiff 2 |
+| v2 (interlaced, ildct/ilme, bf 2) | + field-pred types 5/6 (fwd/bwd), field DCT (flags!=0) | 133 frames, min PSNR 72.2, maxdiff 2 |
+| v3 (-alternate_scan 1, bf 2) | alternate scan | 147 frames, min PSNR 72.2, maxdiff 2 |
+Established by the runs: params +6/+7/+8 = dest/forward/backward buffer index; params +4/+5 = alternate_scan flag per pass; MbRec.flags != 0 = field DCT (frame pictures); mc types 1/2/3/5/6 semantics as in recon.c; intra DC needs +1024 (framework predictor starts at 0); mv units = half-sample, chroma = trunc(mv/2).
+NOT covered yet (no ffmpeg-authorable content; need another encoder or real discs): field pictures (st 1/2, incl. P second field referencing the first), 16x8 MC (types 5-7 in field pictures), type 7 (bidirectional field-pred), dual prime, odd picture sizes, 625-line PAL.

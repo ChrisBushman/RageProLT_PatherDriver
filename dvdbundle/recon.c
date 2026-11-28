@@ -176,6 +176,8 @@ static int pass(Recon *rc, int st, int ptype, int second, int bd, int bf, int bb
         rc_s16 *bl = g_blk;
         memset(&pr, 0, sizeof pr);
         rc->stat_mb++;
+        if (type < 8) rc->stat_type[type]++;
+        if (st == 3 && flags) rc->stat_fielddct++;
         /* ---- prediction ---- */
         if (st == 3) {
             if (type == 1 || type == 2) {
@@ -275,6 +277,7 @@ int rc_decode(Recon *rc, rc_u8 *p)
             memcpy(&mb, p + 12, sizeof mb);       /* native big-endian 32-bit pointers on PPC */
             memcpy(&co, p + 16, sizeof co);
         } else { mb = rc->mb_next; co = rc->coef_next; }
+        rc->alt_scan = p[4 + f] & 1;           /* params +4/+5 = alternate_scan flag per pass (verified on an ffmpeg -alternate_scan 1 stream) */
         pass(rc, st, ptype, f, bd, bf, bb, p[4 + f], &mb, &co, p);
         rc->mb_next = mb; rc->coef_next = co;
     }

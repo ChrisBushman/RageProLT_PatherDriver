@@ -20,7 +20,7 @@ typedef struct {
     int alt_scan;                /* 0 = zig-zag, 1 = alternate scan */
     /* continuation state for the second field pass (Apple keeps these in statics) */
     const rc_u8 *mb_next, *coef_next;
-    unsigned long stat_unknown_type, stat_mb;
+    unsigned long stat_unknown_type, stat_mb, stat_type[8], stat_fielddct;
 } Recon;
 
 int  rc_init(Recon *rc, int w, int h);          /* 0 ok */

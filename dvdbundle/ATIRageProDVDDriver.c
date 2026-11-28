@@ -82,7 +82,9 @@ int DVDDriverOpenDevice(Ctx **out, u32 *maxSize, CGDirectDisplayID disp, u32 a4,
     LOG("OpenDevice ok ctx=%lx\n", (u32)c);
     return 0;
 }
-int DVDDriverCloseDevice(Ctx *c) { LOG("CloseDevice %lx\n", (u32)c); if (!c) return (int)0xe00002c2; free(c); return 0; }
+int DVDDriverCloseDevice(Ctx *c) { LOG("CloseDevice %lx\n", (u32)c);
+    if (c && c->rc_ok) LOG("stats: decodes=%lu mbs=%lu types[0..7]=%lu %lu %lu %lu %lu %lu %lu %lu fieldDCT=%lu unknown=%lu\n", c->ndec, c->rc.stat_mb,
+        c->rc.stat_type[0], c->rc.stat_type[1], c->rc.stat_type[2], c->rc.stat_type[3], c->rc.stat_type[4], c->rc.stat_type[5], c->rc.stat_type[6], c->rc.stat_type[7], c->rc.stat_fielddct, c->rc.stat_unknown_type); if (!c) return (int)0xe00002c2; free(c); return 0; }
 
 int DVDDriverGetKeyColor(Ctx *c, u32 *key)
 {
@@ -133,8 +135,6 @@ int DVDDriverDecode(Ctx *c, unsigned char *p, short *rect)
     if (c->ndec < 60)
         LOG("Decode#%lu ptype=%d,%d st=%d,%d aux=%d,%d buf=%d,%d,%d\n", c->ndec, p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7], p[8]);
     if (c->rc_ok) {
-        const char *a = getenv("DVDSTUB_ALTSCAN");
-        c->rc.alt_scan = a ? atoi(a) : 0;
         r = rc_decode(&c->rc, p);
         if (getenv("DVDSTUB_DUMPDEC") && p[2] == 3) dump_frame(c, p[6]);   /* decode-order dump (frame pictures) */
         if (c->ndec < 60) LOG("  mbs=%lu unknown_type=%lu rc=%d\n", c->rc.stat_mb, c->rc.stat_unknown_type, r);
