@@ -12,6 +12,7 @@
 #include <unistd.h>
 #include <stdarg.h>
 #include <ApplicationServices/ApplicationServices.h>
+#include "recon.h"
 
 typedef unsigned long u32;
 
@@ -22,7 +23,7 @@ static struct {                         /* mirrors Apple's G (spec C 1.2) */
     int (*cb4)(u32, u32, u32, u32, CGDirectDisplayID);
 } G;
 
-typedef struct { CGDirectDisplayID disp; u32 a4, a5, a6, flags, w, pitch, h; } Ctx;
+typedef struct { CGDirectDisplayID disp; u32 a4, a5, a6, flags, w, pitch, h; Recon rc; int rc_ok; unsigned long ndec, nshow, ndump; } Ctx;
 
 static void LOG(const char *fmt, ...)
 {
@@ -96,15 +97,52 @@ int DVDDriverSetMPRects(Ctx *c, short *r)
     if (c && r) { c->w = r[3] - r[1]; c->pitch = (c->w + 63) & ~63UL; c->h = r[2] - r[0]; }
     return 0;
 }
+static void dump_frame(Ctx *c, int idx)
+{
+    const char *path = getenv("DVDSTUB_YUV"), *mx = getenv("DVDSTUB_FRAMES");
+    int fd, y, w, h;
+    if (!path || !c->rc_ok || idx < 0 || idx >= RC_NBUF) return;
+    if (c->ndump >= (unsigned long)(mx ? atoi(mx) : 0)) return;
+    fd = open(path, O_WRONLY | O_CREAT | O_APPEND, 0644);
+    if (fd < 0) return;
+    w = c->rc.w; h = c->rc.h;
+    for (y = 0; y < h; y++) write(fd, c->rc.pl[idx][0] + (long)y * c->rc.pitchY, w);
+    for (y = 0; y < h / 2; y++) write(fd, c->rc.pl[idx][1] + (long)y * c->rc.pitchC, w / 2);
+    for (y = 0; y < h / 2; y++) write(fd, c->rc.pl[idx][2] + (long)y * c->rc.pitchC, w / 2);
+    close(fd);
+    c->ndump++;
+}
 int DVDDriverShowMPBuffer(Ctx *c, int idx, unsigned short *mode)
 {
     LOG("ShowMPBuffer idx=%d mode=%d\n", idx, mode ? *mode : 2);
+    if (c) { c->nshow++; if (!getenv("DVDSTUB_DUMPDEC")) dump_frame(c, idx); }
     /* Apple calls cb3 only when the kernel buffer header flags say so; M0 has no kernel side. */
     return 0;
 }
 
 /* everything else: log and succeed (0) - unsupported multiprocessor entries return -5 like Apple's R128 driver */
-STUB(EnableMP, 0)        STUB(ClearMP, 0)       STUB(Decode, 0)         STUB(BeginDecode, 0)
+int DVDDriverDecode(Ctx *c, unsigned char *p, short *rect)
+{
+    int r = 0;
+    if (!c || !p) return -7;
+    if (rect && (!c->rc_ok || c->rc.w != rect[3] - rect[1] || c->rc.h != rect[2] - rect[0])) {
+        if (c->rc_ok) rc_free(&c->rc);
+        c->rc_ok = rc_init(&c->rc, rect[3] - rect[1], rect[2] - rect[0]) == 0;
+        LOG("Decode: recon %dx%d init %s\n", rect[3] - rect[1], rect[2] - rect[0], c->rc_ok ? "ok" : "FAILED");
+    }
+    if (c->ndec < 60)
+        LOG("Decode#%lu ptype=%d,%d st=%d,%d aux=%d,%d buf=%d,%d,%d\n", c->ndec, p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7], p[8]);
+    if (c->rc_ok) {
+        const char *a = getenv("DVDSTUB_ALTSCAN");
+        c->rc.alt_scan = a ? atoi(a) : 0;
+        r = rc_decode(&c->rc, p);
+        if (getenv("DVDSTUB_DUMPDEC") && p[2] == 3) dump_frame(c, p[6]);   /* decode-order dump (frame pictures) */
+        if (c->ndec < 60) LOG("  mbs=%lu unknown_type=%lu rc=%d\n", c->rc.stat_mb, c->rc.stat_unknown_type, r);
+    }
+    c->ndec++;
+    return r < 0 ? -3 : 0;
+}
+STUB(EnableMP, 0)        STUB(ClearMP, 0)       STUB(BeginDecode, 0)
 STUB(ContinueDecode, 0)  STUB(EndDecode, 0)     STUB(EnableSP, 0)       STUB(ClearSP, 0)
 STUB(ShowSPBuffer, 0)    STUB(SetSPPalette, 0)  STUB(SetSPBuffer, 0)    STUB(GetSPBuffer, -5)
 STUB(SetSPColorControl, 0) STUB(SetSPDefaultColorControl, 0)            STUB(ApplySPDCSQ, 0)
