@@ -10,7 +10,8 @@
 static uint32_t rs = 0x2468ace1u;
 static uint32_t rnd(void) { rs ^= rs << 13; rs ^= rs >> 17; rs ^= rs << 5; return rs; }
 static unsigned char src[P * H], dst0[P * H], out[P * H];
-static uint32_t lastfifo, norestore;
+static uint32_t texvar, lastfifo, norestore, szcode, twoway;
+static const int BW[4] = { 16, 16, 8, 8 }, BH[4] = { 16, 8, 8, 4 };
 static ragegl_t c; static uint32_t srcOff, dstOff;
 
 static int run(int swap, int X, int Y, int mvx, int mvy, uint32_t *gui, uint32_t *st)
@@ -18,7 +19,7 @@ static int run(int swap, int X, int Y, int mvx, int mvy, uint32_t *gui, uint32_t
     kern_return_t kr;
     if (ragegl_vwrite(c, dstOff, dst0, P * H, swap)) { printf("vwrite dst failed\n"); return -1; }
     uint32_t o = 0;
-    kr = RGL_CALL(RAGE_GL_MC_EXP, 5, 1, srcOff, dstOff, P | (H << 16) | ((norestore & 1u) << 31) | (((norestore >> 1) & 1u) << 30), (uint32_t)X | ((uint32_t)Y << 16), ((uint32_t)mvx & 0xffffu) | ((uint32_t)mvy << 16), &o);
+    kr = RGL_CALL(RAGE_GL_MC_EXP, 5, 1, srcOff, dstOff, P | (H << 16) | (szcode << 27) | (twoway << 29) | ((norestore & 1u) << 31) | (((norestore >> 1) & 1u) << 30), ((uint32_t)X & 0xffu) | (texvar << 8) | ((uint32_t)Y << 16), ((uint32_t)mvx & 0xffffu) | ((uint32_t)mvy << 16), &o);
     *gui = (o >> 24) << 16; *st = o & 0xffu; lastfifo = (o >> 8) & 0xffffu;
     if (kr) { printf("MC_EXP failed 0x%x (0xe00002c2 bad arg, 0xe00002e2 not ready; needs a RAGE_DEBUG_ENGTEST kext)\n", (unsigned)kr); return -1; }
     if (*st) { printf("MC_EXP status %u (GUI_STAT[23:16] 0x%08x, FIFO_STAT 0x%04x)\n", (unsigned)*st, (unsigned)*gui, (unsigned)lastfifo); return -1; }
@@ -28,12 +29,12 @@ static int run(int swap, int X, int Y, int mvx, int mvy, uint32_t *gui, uint32_t
 static int ref(int X, int Y, int mvx, int mvy, int rule, unsigned char *r)       /* rule 0 = MPEG-2 (a+b+1)>>1, (a+b+c+d+2)>>2; rule 1 = truncating */
 {
     int x2 = mvx + 2 * X, y2 = mvy + 2 * Y, ax = x2 >> 1, ay = y2 >> 1, fx = x2 & 1, fy = y2 & 1, i, j;
-    for (j = 0; j < 16; j++) for (i = 0; i < 16; i++) {
+    for (j = 0; j < BH[szcode]; j++) for (i = 0; i < BW[szcode]; i++) {
         int a = src[(ay + j) * P + ax + i], b = src[(ay + j) * P + ax + i + 1], cc = src[(ay + j + 1) * P + ax + i], d = src[(ay + j + 1) * P + ax + i + 1], v;
         if (!fx && !fy) v = a;
         else if (fx && !fy) v = rule ? (a + b) >> 1 : (a + b + 1) >> 1;
         else if (!fx && fy) v = rule ? (a + cc) >> 1 : (a + cc + 1) >> 1;
-        else v = rule ? (a + b + cc + d) >> 2 : (a + b + cc + d + 2) >> 2;
+        else v = rule ? ((((a + b + 1) >> 1) + ((cc + d + 1) >> 1) + 1) >> 1) : (a + b + cc + d + 2) >> 2;   /* rule 1 for hv: chained rounding, H first */
         r[j * 16 + i] = (unsigned char)v;
     }
     return 0;
@@ -68,6 +69,55 @@ int main(int argc, char **argv)
         printf("swap %d: GUI_STAT 0x%08x status %u, %d of %d bytes differ from the 0xA5 fill\n", sw, (unsigned)gui, (unsigned)st, changed, P * H);
         for (r = 14; r < 34; r++) { if (argc > 4) { printf("  out row %2d:", r); for (k = 12; k < 36; k++) printf(" %02x", out[r * P + k]); printf("\n"); continue; } printf("  src row %2d:", r); for (k = 12; k < 24; k++) printf(" %02x", src[r * P + k]); printf("\n  out row %2d:", r); for (k = 12; k < 24; k++) printf(" %02x", out[r * P + k]); printf("\n"); }
         ragegl_free(c, srcOff); ragegl_free(c, dstOff); return 0;
+    }
+    if (argc > 1 && argv[1][0] == 'z') {                      /* block sizes: all 4 size codes x 4 phases x positions; one-way, vs MPEG-2 (hv expected chained) */
+        int z, ph, n, bad = 0, badhv = 0, tot = 0, tothv = 0, outside = 0;
+        for (z = 0; z < 4; z++) for (ph = 0; ph < 4; ph++) {
+            int mvx = ph & 1 ? 2 : 0, mvy = ph & 2 ? 2 : 0; bad = 0; tot = 0; outside = 0;
+            for (n = 0; n < 8; n++) {
+                int X = 8 + 4 * n, Y = 8 + 5 * (n & 3), i, j; unsigned char r0[256], r1[256];
+                szcode = z; norestore = 0;
+                for (i = 0; i < P * H; i++) src[i] = (unsigned char)rnd();
+                memset(dst0, 0, sizeof dst0);
+                if (ragegl_vwrite(c, srcOff, src, P * H, 0) || run(0, X, Y, mvx, mvy, &gui, &st) || st) { printf("run failed z%d ph%d st%u\n", z, ph, (unsigned)st); goto zdone; }
+                ref(X, Y, mvx, mvy, 0, r0); ref(X, Y, mvx, mvy, 1, r1);
+                for (j = 0; j < BH[z]; j++) for (i = 0; i < BW[z]; i++) { int o = out[(Y + j) * P + X + i]; tot++; if (o != ((ph == 3) ? r1 : r0)[j * 16 + i]) bad++; }
+                { int k; for (k = 0; k < P * H; k++) { int x = k % P, y = k / P; if ((x < X || x >= X + BW[z] || y < Y || y >= Y + BH[z]) && out[k] != 0) outside++; } }
+            }
+            printf("size %dx%d phase %d (%s): %d of %d differ from %s; %d bytes outside the block\n", BW[z], BH[z], ph, ph == 0 ? "full" : ph == 1 ? "h" : ph == 2 ? "v" : "hv", bad, tot, ph == 3 ? "chained rounding" : "MPEG-2", outside);
+        }
+zdone:  szcode = 0; ragegl_free(c, srcOff); ragegl_free(c, dstOff); return 0;
+    }
+    if (argc > 1 && argv[1][0] == 'u') {                      /* secondary probe: left half 0x20, right half 0x60; primary at left, secondary 30 px to the right */
+        int i, j, k;
+        static const int sec[] = { 0, 1 };
+        for (k = 0; k < 2 * 10; k++) {
+            szcode = 0; twoway = sec[k & 1]; texvar = k >> 1; if (twoway == 0) continue; norestore = 0;
+            for (j = 0; j < H; j++) for (i = 0; i < P; i++) src[j * P + i] = i < 32 ? 0x20 : 0x60;
+            memset(dst0, 0, sizeof dst0);
+            ragegl_vwrite(c, srcOff, src, P * H, 0);
+            if (run(0, 8, 8, twoway ? 0 : 0, twoway ? 60 : 0, &gui, &st)) { printf("fail\n"); break; }
+            printf("TEX_CNTL variant %u: two-way out(8,8)=%02x out(15,15)=%02x st %u\n", (unsigned)texvar, out[8 * P + 8], out[15 * P + 15], (unsigned)st);
+        }
+        twoway = 0; ragegl_free(c, srcOff); ragegl_free(c, dstOff); return 0;
+    }
+    if (argc > 1 && argv[1][0] == 't') {                      /* two-way: (p1 + p2 + 1) >> 1 of two MPEG-2 predictions, all 16 phase pairs, 16x16 and 8x8 */
+        int z, p1, p2, n; static const int zs[2] = { 0, 2 };
+        for (z = 0; z < 2; z++) for (p1 = 0; p1 < 4; p1++) for (p2 = 0; p2 < 4; p2++) {
+            int bad = 0, tot = 0, hist[3] = { 0, 0, 0 }, outside = 0;
+            for (n = 0; n < 6; n++) {
+                int X = 10 + 4 * n, Y = 10 + 3 * n, i, j, m1x = p1 & 1 ? 2 : 0, m1y = p1 & 2 ? 2 : 0, m2x = (p2 & 1 ? 2 : 0) + 6, m2y = (p2 & 2 ? 2 : 0) - 4; unsigned char a[256], b[256];
+                szcode = zs[z]; twoway = 1; norestore = 0;
+                for (i = 0; i < P * H; i++) src[i] = (unsigned char)rnd();
+                memset(dst0, 0, sizeof dst0);
+                if (ragegl_vwrite(c, srcOff, src, P * H, 0) || run(0, X, Y, (m1x & 0xff) | ((m1y & 0xff) << 8) , ((m2x & 0xff) | ((m2y & 0xff) << 8)), &gui, &st) || st) { printf("run failed st%u\n", (unsigned)st); goto tdone; }
+                ref(X, Y, m1x, m1y, p1 == 3, a); ref(X, Y, m2x, m2y, p2 == 3, b);       /* hv chained as measured */
+                for (j = 0; j < BH[szcode]; j++) for (i = 0; i < BW[szcode]; i++) { int o = out[(Y + j) * P + X + i], e = (a[j * 16 + i] + b[j * 16 + i] + 1) >> 1, d = o - e; tot++; if (d) bad++; hist[d < 0 ? 0 : d == 0 ? 1 : 2]++; }
+                { int k; for (k = 0; k < P * H; k++) { int x = k % P, y = k / P; if ((x < X || x >= X + BW[szcode] || y < Y || y >= Y + BH[szcode]) && out[k] != 0) outside++; } }
+            }
+            printf("two-way %s p1=%d p2=%d: %d of %d differ from (a+b+1)>>1 (hw<ref %d, hw>ref %d), %d outside\n", z ? "8x8" : "16x16", p1, p2, bad, tot, hist[0], hist[2], outside);
+        }
+tdone:  szcode = 0; twoway = 0; ragegl_free(c, srcOff); ragegl_free(c, dstOff); return 0;
     }
     if (argc > 1 && argv[1][0] == 'w') {                      /* DP_PIX_WIDTH scale nibble x dst nibble: out(16,16) for src 0xff / 0x80, dst 0 */
         static const int sn[] = { 2, 3, 4, 6, 7, 8, 9, 11, 14, 15 }, dn[] = { 2, 3, 4, 6, 7, 8 };

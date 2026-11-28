@@ -44,3 +44,10 @@ With the mask fixed (destination pre-filled with 0, because the Win98 inter setu
 * **diagonal half-pel (2,2): 362 of 1024 are +1 above MPEG-2 `(a+b+c+d+2)>>2`** (hardware does two chained rounded bilinear stages). Needs a host correction or a different decomposition for hv blocks (about 35% of their samples).
 * Zero bytes changed outside the block in all runs.
 Remaining stage-1 gaps: engine hang every ~2nd run (eng_reset path), run on 16x8 and chroma sizes (stage 2).
+
+### Stage 2 RESULT (2026-11-27): block sizes and two-way
+* **hv half-pel model fixed:** hardware = chained rounding `((a+b+1)>>1 + (c+d+1)>>1 + 1)>>1`, 0 of 1024 differ from that model. It differs from MPEG-2 `(a+b+c+d+2)>>2` by exactly +1 in ~35% of samples (never -1).
+* **All four block sizes** (16x16 0x100010, 16x8 0x100008, 8x8 0x80008, 8x4 0x80004; `mc_exp z`): full/h/v = MPEG-2 exact, hv = chained model exact, 0 bytes outside the block, over all positions tried.
+* **Two-way:** needs **bit 31 set on SCALE_OFF_ACC (0x788, the primary)**; Win98's two-reference path always sets it through its `((y|~1)<<2 | x)<<28` expression. Secondary reference address + flags go to SECONDARY_SCALE_OFF_ACC (0x784) before 0x788. With that, all 16 phase pairs x {16x16, 8x8}: 0 of 1536/384 samples differ from `(p1+p2+1)>>1` where p1,p2 use the hardware's own chained hv. Without bit 31 the secondary is ignored. TEX_CNTL variants make no difference.
+* Consequence for M2: prediction is bit-exact vs MPEG-2 except hv half-pel (and two-way averages involving an hv half), which drift by +1 in ~35% of samples. Decision needed: accept (ATI's own MC had the same property), or route hv blocks through the CPU path of M1.
+Remaining: residual (0x1e0 feed or host IDCT + blender add), completion/fence, engine hang every ~2nd run, field-pitch (doubled) cases.

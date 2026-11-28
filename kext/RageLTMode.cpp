@@ -497,9 +497,9 @@ IOReturn RageLTDevice::ovlB0(uint32_t *before, uint32_t *readback, uint32_t *aft
  * registers are saved first and restored afterwards (the other kernel paths write everything they need again, this only keeps the desktop path untouched). */
 IOReturn RageLTDevice::mcExp(uint32_t owner, uint32_t srcOff, uint32_t dstOff, uint32_t pitchH, uint32_t xy, uint32_t mv, uint32_t *out)
 {
-    static const uint16_t kSave[] = { 0x5c0, 0x778, 0x5fc, 0x550, 0x6d0, 0x530, 0x774, 0x708, 0x6c4, 0x5dc, 0x5e0, 0x5f0, 0x5f4, 0x79c, 0x7d0, 0x6a8, 0x6b4, 0x6d8, 0x6d4, 0x500, 0x788, 0x78c, 0x304, 0x54c, 0x6cc, 0x750, 0x740, 0x6c8 };
+    static const uint16_t kSave[] = { 0x5c0, 0x778, 0x5fc, 0x550, 0x6d0, 0x530, 0x774, 0x708, 0x6c4, 0x5dc, 0x5e0, 0x5f0, 0x5f4, 0x79c, 0x7d0, 0x6a8, 0x6b4, 0x6d8, 0x6d4, 0x500, 0x788, 0x78c, 0x304, 0x54c, 0x6cc, 0x750, 0x740, 0x6c8, 0x784 };
     uint32_t sv[sizeof kSave / sizeof kSave[0]], i;
-    uint32_t mv_in = mv, pitch = pitchH & 0xffffu, h = (pitchH >> 16) & 0x3fffu, noRestore = pitchH >> 31, docMode = (pitchH >> 30) & 1u, X = xy & 0xffffu, Y = xy >> 16, size, x2, y2, ax, ay; int32_t mvx = (int16_t)(mv & 0xffffu), mvy = (int16_t)(mv >> 16), sx, sy;
+    uint32_t blkTrig = 0x100010u, blkSec = 0, mv_in = mv, pitch = pitchH & 0xffffu, h = (pitchH >> 16) & 0x7ffu, szc = (pitchH >> 27) & 3u, twoWay = (pitchH >> 29) & 1u, noRestore = pitchH >> 31, docMode = (pitchH >> 30) & 1u, X = xy & 0xffu, texVar = (xy >> 8) & 0xffu, Y = (xy >> 16) & 0xffffu, size, x2, y2, ax, ay; int32_t mvx = (int16_t)(mv & 0xffffu), mvy = (int16_t)(mv >> 16), sx, sy;
     IOReturn rc = kIOReturnSuccess;
     uint32_t gui = 0, fifo = 0, status = 2;
     *out = 2;
@@ -509,10 +509,17 @@ IOReturn RageLTDevice::mcExp(uint32_t owner, uint32_t srcOff, uint32_t dstOff, u
         mv_in = 0;
     }
     if (docMode) { mvx = 0; mvy = 0; }
-    sx = mvx + 2 * (int32_t)X; sy = mvy + 2 * (int32_t)Y;
-    if (sx < 0 || sy < 0) return kIOReturnBadArgument;
-    x2 = (uint32_t)sx; y2 = (uint32_t)sy; ax = x2 >> 1; ay = y2 >> 1;
-    if (ax + 17 > pitch || ay + 17 > h) return kIOReturnBadArgument;                     /* the interpolation reads one more column and row */
+    { static const uint32_t bwT[4] = { 16, 16, 8, 8 }, bhT[4] = { 16, 8, 8, 4 }, trigT[4] = { 0x100010u, 0x100008u, 0x80008u, 0x80004u };
+      uint32_t bw = bwT[szc], bh = bhT[szc]; int32_t mv2x = 0, mv2y = 0, sx2, sy2;
+      if (X + bw > pitch || Y + bh > h) return kIOReturnBadArgument;
+      if (twoWay) { mvx = (int8_t)(mv & 0xffu); mvy = (int8_t)((mv >> 8) & 0xffu); mv2x = (int8_t)((mv >> 16) & 0xffu); mv2y = (int8_t)((mv >> 24) & 0xffu); }
+      sx = mvx + 2 * (int32_t)X; sy = mvy + 2 * (int32_t)Y;
+      sx2 = mv2x + 2 * (int32_t)X; sy2 = mv2y + 2 * (int32_t)Y;
+      if (sx < 0 || sy < 0 || (twoWay && (sx2 < 0 || sy2 < 0))) return kIOReturnBadArgument;
+      x2 = (uint32_t)sx; y2 = (uint32_t)sy; ax = x2 >> 1; ay = y2 >> 1;
+      if (ax + bw + 1 > pitch || ay + bh + 1 > h) return kIOReturnBadArgument;                 /* the interpolation reads one more column and row */
+      if (twoWay && (((uint32_t)sx2 >> 1) + bw + 1 > pitch || ((uint32_t)sy2 >> 1) + bh + 1 > h)) return kIOReturnBadArgument;
+      blkTrig = trigT[szc]; blkSec = twoWay ? ((((uint32_t)sy2 >> 1) * pitch + ((uint32_t)sx2 >> 1) + srcOff) | (((((uint32_t)sy2 & 1u) << 2) | ((uint32_t)sx2 & 1u)) << 28)) : 0; }
     size = pitch * h;
     if (srcOff < dstOff ? srcOff + size > dstOff : dstOff + size > srcOff) return kIOReturnBadArgument;
     IOLockLock(fLock);
@@ -549,7 +556,8 @@ IOReturn RageLTDevice::mcExp(uint32_t owner, uint32_t srcOff, uint32_t dstOff, u
     eng_wq(fRegs, 0x550, 0x8000u);              /* ALPHA_TST_CNTL */
     eng_wq(fRegs, 0x6d0, 0x80080888u);          /* DP_PIX_WIDTH (8 bpp) */
     eng_wq(fRegs, 0x530, 0x8e023u);             /* DST_CNTL */
-    eng_wq(fRegs, 0x774, 0x40800180u);          /* TEX_CNTL */
+    { static const uint32_t texV[] = { 0x40800180u, 0x40800100u, 0x408001f0u, 0x40801980u, 0x40800000u, 0x40801180u, 0x40800980u, 0x40800580u, 0x40802180u, 0x40800080u };   /* diagnosis: TEX_CNTL variants, 0 = Win98 */
+      eng_wq(fRegs, 0x774, texV[texVar < 10 ? texVar : 0]); }                 /* TEX_CNTL */
     eng_wq(fRegs, 0x708, 0);                    /* CLR_CMP_CNTL */
     eng_wq(fRegs, 0x6c4, 0);                    /* DP_FOG_CLR */
     eng_wq(fRegs, 0x5dc, pitch);                /* index 0x77 (Win98: 2 * its width parameter): plane width */
@@ -566,9 +574,10 @@ IOReturn RageLTDevice::mcExp(uint32_t owner, uint32_t srcOff, uint32_t dstOff, u
     eng_wq(fRegs, 0x5fc, 0x98a40u);
     eng_wq(fRegs, 0x780, (pitch << 16) | pitch);                                   /* SCALE_PITCH_BOTH */
     eng_wq(fRegs, 0x500, (pitch << 19) | (dstOff >> 3));                           /* DST_OFF_PITCH */
-    eng_wq(fRegs, 0x788, (ay * pitch + ax + srcOff) | ((((y2 & 1u) << 2) | (x2 & 1u)) << 28));   /* SCALE_OFF_ACC: address, half-pel flags in bits 30:28 */
+    if (twoWay) eng_wq(fRegs, 0x784, blkSec);                                      /* SECONDARY_SCALE_OFF_ACC: second reference, same flag layout */
+    eng_wq(fRegs, 0x788, (ay * pitch + ax + srcOff) | ((((y2 & 1u) << 2) | (x2 & 1u)) << 28) | (twoWay ? 0x80000000u : 0u));   /* Win98's two-reference path always has bit 31 set on the primary (its ((y|~1)<<2|x)<<28 expression) */   /* SCALE_OFF_ACC: address, half-pel flags in bits 30:28 */
     eng_wq(fRegs, 0x78c, (X << 16) | Y);                                           /* SCALE_DST_Y_X */
-    eng_wq(fRegs, 0x790, 0x100010u);                                               /* trigger: 16 x 16 */
+    eng_wq(fRegs, 0x790, blkTrig);                                                 /* trigger: width << 16 | height */
 done:
     if (eng_wait_idle(fRegs)) {                  /* diagnosis: sample the status registers 4096 times: busy bit and FIFO-not-empty counts */
         uint32_t k, nb = 0, nf = 0, g, f; status = 1;
